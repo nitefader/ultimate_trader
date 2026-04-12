@@ -1,0 +1,68 @@
+@import './styles/tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100 font-mono;
+    background-color: var(--color-bg-page);
+    color: var(--color-text-primary);
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #374151 #111827;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-gray-900 border border-gray-800 rounded-lg p-4;
+    background-color: var(--color-bg-card);
+    border-color: var(--color-border);
+    box-shadow: var(--shadow-card);
+  }
+  .btn {
+    @apply px-4 py-2 rounded font-semibold text-sm transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-sky-600 hover:bg-sky-500 text-white;
+    background-color: var(--color-accent);
+  }
+  .btn-danger {
+    @apply btn bg-red-600 hover:bg-red-500 text-white;
+    background-color: var(--color-danger);
+  }
+  .btn-warning {
+    @apply btn bg-amber-600 hover:bg-amber-500 text-white;
+    background-color: var(--color-warning);
+  }
+  .btn-ghost {
+    @apply btn bg-transparent border border-gray-700 hover:bg-gray-800 text-gray-300;
+  }
+  .input {
+    @apply bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-sky-500;
+    border-color: var(--color-border);
+  }
+  .label {
+    @apply block text-xs text-gray-400 mb-1 uppercase tracking-wide;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold;
+  }
+  .badge-backtest { @apply badge bg-emerald-900 text-emerald-300; }
+  .badge-paper { @apply badge bg-indigo-900 text-indigo-300; }
+  .badge-live { @apply badge bg-red-900 text-red-300; }
+  .badge-green { @apply badge bg-green-900 text-green-300; }
+  .badge-red { @apply badge bg-red-900 text-red-300; }
+  .badge-gray { @apply badge bg-gray-800 text-gray-400; }
+  .metric-card {
+    @apply card flex flex-col gap-1;
+  }
+  .metric-label { @apply text-xs text-gray-500 uppercase; }
+  .metric-value { @apply text-xl font-bold; }
+  .positive { @apply text-emerald-400; }
+  .negative { @apply text-red-400; }
+  .neutral { @apply text-gray-300; }
+}

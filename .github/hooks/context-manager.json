@@ -1,0 +1,11 @@
+{
+  "name": "context-manager-automation",
+  "description": "Automatically invoke ContextManager at optimal times to optimize context window",
+  "event": "PostToolUse",
+  "condition": "context_tokens > 8000",
+  "action": {
+    "type": "invoke_agent",
+    "agent": "ContextManager",
+    "prompt": "Optimize current context window and suggest meditation if needed."
+  }
+}

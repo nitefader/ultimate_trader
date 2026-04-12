@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ultratrader-backend
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///./ultratrader.db}
+      - DEBUG=${DEBUG:-false}
+      - PLATFORM_MODE=${PLATFORM_MODE:-backtest}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    volumes:
+      - backend-data:/app/data
+      - backend-logs:/app/logs
+      - ./backend/configs:/app/configs:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - ultratrader
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ultratrader-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - ultratrader
+
+  # Optional: PostgreSQL for production
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: ultratrader-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: ultratrader
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+  #     POSTGRES_DB: ultratrader
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+  #   networks:
+  #     - ultratrader
+
+volumes:
+  backend-data:
+  backend-logs:
+  # postgres-data:
+
+networks:
+  ultratrader:
+    driver: bridge

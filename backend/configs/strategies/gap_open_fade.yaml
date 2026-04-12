@@ -1,0 +1,67 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Gap Open Fade — fade large opening gaps with time-based exits
+# ────────────────────────────────────────────────────────────────────────────
+
+name: "Gap Open Fade - Opening Reversion"
+category: mean_reversion
+description: >
+  Fade large overnight gaps at market open when gaps occur outside normal volatility.
+  Uses opening range, VWAP and early session momentum to determine entry. Tight
+  ATR-based stops and short time exits minimize overnight exposure.
+
+symbols:
+  - SPY
+  - AAPL
+  - QQQ
+
+timeframe: "1d"
+
+indicators:
+  vwap: true
+  atr_period: 14
+
+entry:
+  directions:
+    - long
+    - short
+  logic: "all_of"
+  conditions:
+    - type: single
+      left: {field: "open_gap_pct"}
+      op: ">"
+      right: 1.5   # gap > 1.5%
+    - type: single
+      left: {field: "close"}
+      op: "<"
+      right: {indicator: "vwap"}
+
+stop_loss:
+  method: "atr_multiple"
+  period: 14
+  mult: 1.5
+
+targets:
+  - method: "r_multiple"
+    r: 0.8
+
+exit:
+  time_exit:
+    max_bars: 6   # exit within first few bars of session
+
+position_sizing:
+  method: "risk_pct"
+  risk_pct: 0.5
+
+risk:
+  max_position_size_pct: 0.05
+  max_daily_loss_pct: 0.02
+  max_drawdown_lockout_pct: 0.06
+  max_open_positions: 3
+  max_portfolio_heat: 0.03
+
+cooldown_rules:
+  - trigger: "stop_out"
+    duration_minutes: 120
+    symbol_level: true
+
+tick_size: 0.01

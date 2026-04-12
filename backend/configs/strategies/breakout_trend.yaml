@@ -1,0 +1,105 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Breakout Trend Strategy — breakout entries with volume confirmation and trailing exit
+# ────────────────────────────────────────────────────────────────────────────
+
+name: "Breakout Trend - Channel Break"
+category: momentum
+description: >
+  A breakout strategy that enters on strength above recent resistance, supported by volume
+  expansion and trend confirmation. Uses EMA and breakout structure with ATR-based
+  protective stops and a trailing exit to capture extended moves.
+
+symbols:
+  - SPY
+  - QQQ
+  - NVDA
+
+timeframe: "1d"
+
+indicators:
+  ema_periods: [20, 50]
+  sma_periods: [20]
+  rsi_periods: [14]
+
+regime_filter:
+  allowed:
+    - trending_up
+
+use_support_resistance: true
+
+entry:
+  directions:
+    - long
+  logic: "n_of_m:3"
+  conditions:
+    - type: single
+      left: {indicator: "close"}
+      op: ">"
+      right: {indicator: "sma_20"}
+    - type: single
+      left: {indicator: "close"}
+      op: ">"
+      right: {indicator: "high_20"}
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: ">"
+      right: 55
+
+stop_loss:
+  method: "atr_multiple"
+  period: 14
+  mult: 1.8
+
+targets:
+  - method: "r_multiple"
+    r: 2.0
+  - method: "r_multiple"
+    r: 4.0
+
+trailing_stop:
+  method: "chandelier"
+  period: 22
+  mult: 3.0
+
+scale_out:
+  move_stop_to_be_after_t1: true
+  levels:
+    - pct: 50
+    - pct: 50
+
+scale_in:
+  max_adds: 1
+  conditions:
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: ">"
+      right: 60
+  levels:
+    - level: 0
+      pct: 75
+    - level: 1
+      pct: 25
+
+position_sizing:
+  method: "risk_pct"
+  risk_pct: 1.25
+
+leverage: 1.0
+
+risk:
+  max_position_size_pct: 0.12
+  max_daily_loss_pct: 0.03
+  max_drawdown_lockout_pct: 0.12
+  max_open_positions: 4
+  max_portfolio_heat: 0.06
+
+cooldown_rules:
+  - trigger: "stop_out"
+    duration_minutes: 120
+    symbol_level: true
+
+exit:
+  time_exit:
+    max_bars: 30
+
+tick_size: 0.01

@@ -1,0 +1,68 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Swing Reversal — swing high/low based mean reversion with structure-aware stops
+# ────────────────────────────────────────────────────────────────────────────
+
+name: "Swing Reversal - Structure Fade"
+category: mean_reversion
+description: >
+  Uses swing highs/lows and momentum oscillators to detect exhaustion and reverse
+  short-term swings. Stops anchored to swing extremes and targets set to prior
+  mean or mid-price regions.
+
+symbols:
+  - AAPL
+  - MSFT
+  - AMZN
+
+timeframe: "4h"
+
+indicators:
+  swing_lookback: 5
+  rsi_periods: [14]
+  stoch_periods: [14,3]
+
+entry:
+  directions:
+    - long
+    - short
+  logic: "n_of_m:2"
+  conditions:
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: "<"
+      right: 30
+    - type: single
+      left: {field: "close"}
+      op: ">"
+      right: {indicator: "swing_low"}
+
+stop_loss:
+  method: "swing_low"
+  lookback: 5
+
+targets:
+  - method: "r_multiple"
+    r: 1.0
+  - method: "r_multiple"
+    r: 2.0
+
+scale_out:
+  move_stop_to_be_after_t1: true
+  levels:
+    - pct: 60
+    - pct: 40
+
+position_sizing:
+  method: "risk_pct"
+  risk_pct: 0.8
+
+leverage: 1.0
+
+risk:
+  max_position_size_pct: 0.08
+  max_daily_loss_pct: 0.02
+  max_drawdown_lockout_pct: 0.08
+  max_open_positions: 4
+  max_portfolio_heat: 0.04
+
+tick_size: 0.01

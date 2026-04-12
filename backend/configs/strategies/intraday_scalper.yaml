@@ -1,0 +1,81 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Intraday Scalper — micro momentum scalper for liquid large-cap names
+# ────────────────────────────────────────────────────────────────────────────
+
+name: "Intraday Scalper - Micro Momentum"
+category: scalp
+description: >
+  A short-holding-time scalping strategy targeting micro-momentum and volume spikes
+  on high-liquidity names. Uses fast EMA crossover + volume spike confirmation, tight
+  ATR-based stops, and small R targets. Designed for 1m/5m execution in paper mode
+  before live deployment.
+
+symbols:
+  - AAPL
+  - MSFT
+  - NVDA
+  - SPY
+
+timeframe: "1m"
+
+indicators:
+  ema_periods: [9, 21]
+  atr_period: 14
+
+entry:
+  directions:
+    - long
+    - short
+  logic: "all_of"
+  conditions:
+    - type: single
+      left: {indicator: "ema_9"}
+      op: ">"
+      right: {indicator: "ema_21"}
+    - type: single
+      left: {indicator: "volume"}
+      op: ">"
+      right: {indicator: "volume_avg_20", mult: 1.5}
+
+stop_loss:
+  method: "atr_multiple"
+  period: 14
+  mult: 1.0
+
+targets:
+  - method: "r_multiple"
+    r: 0.3
+  - method: "r_multiple"
+    r: 0.6
+
+scale_out:
+  move_stop_to_be_after_t1: true
+  levels:
+    - pct: 50
+    - pct: 50
+
+scale_in: null
+
+position_sizing:
+  method: "risk_pct"
+  risk_pct: 0.25   # small per-trade risk for scalping
+
+leverage: 1.0
+
+risk:
+  max_position_size_pct: 0.02
+  max_daily_loss_pct: 0.01
+  max_drawdown_lockout_pct: 0.03
+  max_open_positions: 3
+  max_portfolio_heat: 0.02
+
+cooldown_rules:
+  - trigger: "stop_out"
+    duration_minutes: 15
+    symbol_level: true
+
+exit:
+  time_exit:
+    max_bars: 12   # force exit quickly if not hit
+
+tick_size: 0.01

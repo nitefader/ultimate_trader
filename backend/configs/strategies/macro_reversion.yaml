@@ -1,0 +1,117 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Macro Reversion Strategy — ETF mean reversion with volatility and range filters
+# ────────────────────────────────────────────────────────────────────────────
+
+name: "Macro Mean Reversion - ETF Fade"
+category: mean_reversion
+description: >
+  A portfolio mean reversion strategy for large ETFs. It seeks to fade extreme
+  moves into short-term oversold/overbought conditions, using Bollinger Bands,
+  RSI, and support/resistance zones to define high probability reversal entries.
+
+symbols:
+  - TLT
+  - GLD
+  - AGG
+  - IEF
+
+timeframe: "1d"
+
+indicators:
+  ema_periods: [10, 20]
+  sma_periods: [20]
+  rsi_periods: [14]
+
+regime_filter:
+  allowed:
+    - ranging
+    - low_volatility
+
+use_support_resistance: true
+
+entry:
+  directions:
+    - long
+    - short
+  logic: "n_of_m:3"
+  conditions:
+    - type: single
+      left: {field: "close"}
+      op: "<"
+      right: {indicator: "bb_lower"}
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: "<"
+      right: 35
+    - type: single
+      left: {field: "close"}
+      op: ">"
+      right: {nearest_sr_support: true}
+  short_conditions:
+    - type: single
+      left: {field: "close"}
+      op: ">"
+      right: {indicator: "bb_upper"}
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: ">"
+      right: 65
+    - type: single
+      left: {field: "close"}
+      op: "<"
+      right: {nearest_sr_resistance: true}
+
+stop_loss:
+  method: "combined"
+  rule: "farthest"
+  stops:
+    - method: "atr_multiple"
+      period: 14
+      mult: 1.4
+    - method: "swing_low"
+      lookback: 5
+    - method: "swing_high"
+      lookback: 5
+
+targets:
+  - method: "r_multiple"
+    r: 0.75
+  - method: "r_multiple"
+    r: 1.5
+
+scale_out:
+  move_stop_to_be_after_t1: true
+  levels:
+    - pct: 60
+    - pct: 40
+
+scale_in: null
+
+position_sizing:
+  method: "risk_pct"
+  risk_pct: 0.8
+
+leverage: 1.0
+
+risk:
+  max_position_size_pct: 0.08
+  max_daily_loss_pct: 0.02
+  max_drawdown_lockout_pct: 0.10
+  max_open_positions: 3
+  max_portfolio_heat: 0.04
+
+exit:
+  time_exit:
+    max_bars: 18
+
+cooldown_rules:
+  - trigger: "consecutive_loss"
+    consecutive_count: 3
+    session_reset: true
+    symbol_level: true
+
+  - trigger: "stop_out"
+    duration_minutes: 180
+    symbol_level: true
+
+tick_size: 0.01

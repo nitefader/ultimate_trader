@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Play, Loader, AlertCircle, Info } from 'lucide-react'
+import { Play, Loader, AlertCircle, Info, Database } from 'lucide-react'
 import { strategiesApi } from '../api/strategies'
 import { backtestsApi } from '../api/backtests'
+import { servicesApi } from '../api/services'
 import { useKillSwitchStore } from '../stores/useKillSwitchStore'
 import { TickerSearch } from '../components/TickerSearch'
 import clsx from 'clsx'
@@ -23,6 +24,7 @@ export function BacktestLauncher() {
   const [symbols, setSymbols] = useState('SPY')
   const [timeframe, setTimeframe] = useState('1d')
   const [dataProvider, setDataProvider] = useState<'auto' | 'yfinance' | 'alpaca'>('auto')
+  const [selectedServiceId, setSelectedServiceId] = useState<string>('')
   const [alpacaApiKey, setAlpacaApiKey] = useState('')
   const [alpacaSecretKey, setAlpacaSecretKey] = useState('')
   const [startDate, setStartDate] = useState(jan2018)
@@ -44,16 +46,44 @@ export function BacktestLauncher() {
     enabled: !!selectedStrategyId,
   })
 
+  const { data: allServices = [] } = useQuery({
+    queryKey: ['services'],
+    queryFn: servicesApi.list,
+  })
+
+  const alpacaServices = allServices.filter(
+    (s) => s.provider?.toLowerCase() === 'alpaca' && s.has_credentials && s.is_active,
+  )
+
+  // Auto-select the default Alpaca service account on first load
+  useEffect(() => {
+    if (selectedServiceId || alpacaServices.length === 0) return
+    const defaultSvc = alpacaServices.find((s) => s.is_default) ?? alpacaServices[0]
+    if (defaultSvc) setSelectedServiceId(defaultSvc.id)
+  }, [alpacaServices])
+
+  // When a service account is selected, populate the key fields from it
+  useEffect(() => {
+    const svc = alpacaServices.find((s) => s.id === selectedServiceId)
+    if (svc) {
+      setAlpacaApiKey(svc.api_key ?? '')
+      setAlpacaSecretKey(svc.secret_key ?? '')
+    } else {
+      setAlpacaApiKey('')
+      setAlpacaSecretKey('')
+    }
+  }, [selectedServiceId])
+
   const symbolList = symbols.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
 
   const { data: providerRecommendation } = useQuery({
-    queryKey: ['provider-recommendation', symbolList.join(','), timeframe, startDate, endDate, Boolean(alpacaApiKey && alpacaSecretKey)],
+    queryKey: ['provider-recommendation', symbolList.join(','), timeframe, startDate, endDate, Boolean(alpacaApiKey && alpacaSecretKey), selectedServiceId],
     queryFn: () => backtestsApi.recommendProvider({
       symbols: symbolList,
       timeframe,
       start_date: startDate,
       end_date: endDate,
-      has_alpaca_credentials: Boolean(alpacaApiKey && alpacaSecretKey),
+      has_alpaca_credentials: Boolean(selectedServiceId || (alpacaApiKey && alpacaSecretKey)),
     }),
     enabled: symbolList.length > 0,
     staleTime: 30_000,
@@ -111,8 +141,8 @@ export function BacktestLauncher() {
   if (commission < 0) launchValidationErrors.push('Commission cannot be negative.')
   if (commissionPct < 0 || commissionPct > 2) launchValidationErrors.push('Commission %/trade must be between 0 and 2%.')
   if (slippage < 0 || slippage > 10) launchValidationErrors.push('Slippage ticks must be between 0 and 10.')
-  if (dataProvider === 'alpaca' && (!alpacaApiKey || !alpacaSecretKey)) {
-    launchValidationErrors.push('Alpaca provider requires API key and secret key.')
+  if (dataProvider === 'alpaca' && !selectedServiceId) {
+    launchValidationErrors.push('Alpaca provider requires a service account. Create one under Services.')
   }
   if (dataProvider === 'yfinance' && timeframe === '4h') {
     launchValidationErrors.push('4h timeframe is not available on yfinance. Use auto or alpaca.')
@@ -267,15 +297,45 @@ export function BacktestLauncher() {
         )}
 
         {(dataProvider === 'alpaca' || dataProvider === 'auto') && (
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label">Alpaca API Key (optional for auto, required for alpaca)</label>
-              <input className="input w-full" value={alpacaApiKey} onChange={(e) => setAlpacaApiKey(e.target.value.trim())} placeholder="PK..." />
-            </div>
-            <div>
-              <label className="label">Alpaca Secret Key</label>
-              <input className="input w-full" type="password" value={alpacaSecretKey} onChange={(e) => setAlpacaSecretKey(e.target.value.trim())} placeholder="..." />
-            </div>
+          <div className="space-y-2">
+            <label className="label flex items-center gap-1.5">
+              <Database size={12} />
+              Alpaca Service Account
+              {dataProvider === 'alpaca' && <span className="text-red-400">*</span>}
+            </label>
+
+            {alpacaServices.length === 0 ? (
+              <div className="flex items-start gap-2 rounded border border-amber-800/60 bg-amber-900/20 p-3 text-xs text-amber-300">
+                <AlertCircle size={13} className="mt-0.5 flex-shrink-0" />
+                <span>
+                  No Alpaca service account found.{' '}
+                  <a href="/services" className="underline hover:text-amber-200">
+                    Create a service account for Alpaca
+                  </a>{' '}
+                  to use Alpaca as a data provider.
+                </span>
+              </div>
+            ) : (
+              <select
+                className="input w-full"
+                value={selectedServiceId}
+                onChange={(e) => setSelectedServiceId(e.target.value)}
+              >
+                <option value="">— Select an Alpaca account —</option>
+                {alpacaServices.map((svc) => (
+                  <option key={svc.id} value={svc.id}>
+                    {svc.name} ({svc.environment})
+                    {svc.is_default ? ' ★ default' : ''}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {selectedServiceId && (
+              <p className="text-[11px] text-green-500">
+                Credentials loaded from service account.
+              </p>
+            )}
           </div>
         )}
 

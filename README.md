@@ -67,6 +67,129 @@ Open **http://localhost**
 
 ---
 
+## Backup and Recovery
+
+GitHub will let you fully recreate the codebase only for files that are committed and pushed. Anything ignored by Git or kept only on your machine must be backed up separately.
+
+### Backed Up In GitHub
+
+- All committed source code in `backend/`, `frontend/`, `scripts/`, `docs/`, `nginx/`, and `.github/`
+- Project config such as `docker-compose.yml`, `.env.example`, and `.gitignore`
+- Commit history on `main` and any pushed branches
+
+### Not Backed Up By GitHub
+
+- `.env` and any `.env.*` files except `.env.example`
+- Local virtual environments such as `.venv/` and `venv/`
+- `node_modules/`, build outputs, and caches
+- Local logs in `logs/`
+- Local databases such as `*.db`
+- Local market data and generated files in `data/`
+- IDE-specific files and local agent folders such as `.vscode/`, `.claude/`, and `.codex/`
+
+### Recovery Checklist
+
+Keep these somewhere secure outside this computer if you want a true disaster-recovery path:
+
+- A copy of your `.env` values, especially `SECRET_KEY`, `ENCRYPTION_KEY`, and any broker credentials
+- Any SQLite database files you care about, if you want to preserve account data, runs, or app state
+- Any important files inside `data/`
+- Any deployment credentials, cloud secrets, SSH keys, or API keys not stored in GitHub
+
+If you only need to rebuild the app code and do not care about preserving local data, GitHub plus your `.env` values are usually enough.
+
+---
+
+## Rebuild On A New Machine
+
+These steps recreate the project from GitHub on a fresh computer.
+
+### 1. Install Prerequisites
+
+- Git
+- Python 3.11
+- Node.js 18+ and npm
+- Docker Desktop if you want the containerized setup
+
+### 2. Clone The Repository
+
+```bash
+git clone git@github.com:nitefader/ultimate_trader.git
+cd ultimate_trader
+```
+
+If you are not using SSH on the new machine, use the HTTPS clone URL from GitHub instead.
+
+### 3. Restore Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` and restore your real values:
+
+- `SECRET_KEY`
+- `ENCRYPTION_KEY`
+- `DATABASE_URL` if not using the default SQLite setup
+- Any Alpaca or other service credentials you actually use
+
+### 4. Restore Optional Local Data
+
+If you backed these up and want your previous state back, restore them into the project before starting the app:
+
+- SQLite database files such as `ultratrader.db`
+- `data/`
+- `logs/` if you want old logs retained
+
+### 5. Start The Project
+
+Choose one path:
+
+Manual local setup:
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+In a second terminal:
+
+```bash
+cd frontend
+npm install
+node ./scripts/verify-backend.mjs
+npm run dev
+```
+
+Docker setup:
+
+```bash
+docker-compose up --build
+```
+
+### 6. Verify The Rebuild
+
+- Frontend: `http://localhost:5173` for local Vite or `http://localhost` for Docker
+- Backend API docs: `http://localhost:8000/docs`
+- Backend health endpoint: `http://localhost:8000/health`
+
+### 7. Recreate The Safe Git Habit
+
+To make sure your latest work is recoverable:
+
+```bash
+git add .
+git commit -m "Describe the checkpoint"
+git push
+```
+
+Only committed and pushed work is guaranteed to be restorable from GitHub.
+
+---
+
 ## Seeding Sample Strategies
 
 ```bash

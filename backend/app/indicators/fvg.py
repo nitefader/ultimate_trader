@@ -28,6 +28,7 @@ class FairValueGap:
     detected_at: datetime | str
     source_bar_idx: int   # index of the middle bar (bar i)
     size: float           # gap size in price units
+    atr_at_detection: float | None = None  # ATR value at bar of detection
     filled: bool = False
     fill_time: datetime | str | None = None
     fill_price: float | None = None
@@ -35,14 +36,22 @@ class FairValueGap:
 
     @property
     def quality_score(self) -> float:
-        """Larger gaps score higher; normalised 0–1 (relative to recent ATR if provided)."""
-        return min(self.size / 10.0, 1.0)  # basic heuristic
+        """
+        Gap quality normalised 0–1.
+        When ATR is available: score = gap_size / ATR, capped at 1.
+        A gap equal to 1× ATR scores 1.0; half an ATR scores 0.5.
+        Fallback (no ATR): size / 10.0 (raw heuristic, less meaningful).
+        """
+        if self.atr_at_detection and self.atr_at_detection > 0:
+            return min(self.size / self.atr_at_detection, 1.0)
+        return min(self.size / 10.0, 1.0)
 
 
 def detect_fvgs(
     df: pd.DataFrame,
     min_gap_pct: float = 0.001,     # minimum gap as fraction of close
     freshness_bars: int = 50,
+    atr_period: int = 14,           # ATR period for quality_score normalisation
 ) -> list[FairValueGap]:
     """
     Detect all FVGs in a OHLCV DataFrame (columns: open, high, low, close, volume).
@@ -53,16 +62,24 @@ def detect_fvgs(
     df            : OHLCV DataFrame with DatetimeIndex
     min_gap_pct   : minimum gap size as fraction of close at detection
     freshness_bars: number of bars before a gap is considered stale
+    atr_period    : ATR look-back used to normalise quality_score
     """
+    from app.indicators.technical import atr as calc_atr
+
     gaps: list[FairValueGap] = []
-    highs = df["high"].values
-    lows = df["low"].values
+    highs  = df["high"].values
+    lows   = df["low"].values
     closes = df["close"].values
-    idx = df.index
+    idx    = df.index
+
+    # Pre-compute ATR series for quality normalisation (no lookahead — shift(1))
+    atr_series = calc_atr(df["high"], df["low"], df["close"], atr_period).shift(1).values
 
     for i in range(1, len(df) - 1):
-        # Bullish FVG: gap[i-1].high < gap[i+1].low
-        gap_low = highs[i - 1]
+        atr_val = float(atr_series[i]) if not pd.isna(atr_series[i]) else None
+
+        # Bullish FVG: bar[i-1].high < bar[i+1].low
+        gap_low  = highs[i - 1]
         gap_high = lows[i + 1]
         if gap_high > gap_low:
             gap_size = gap_high - gap_low
@@ -75,10 +92,11 @@ def detect_fvgs(
                     detected_at=idx[i + 1],
                     source_bar_idx=i,
                     size=gap_size,
+                    atr_at_detection=atr_val,
                 ))
 
-        # Bearish FVG: gap[i-1].low > gap[i+1].high
-        gap_low2 = highs[i + 1]
+        # Bearish FVG: bar[i-1].low > bar[i+1].high
+        gap_low2  = highs[i + 1]
         gap_high2 = lows[i - 1]
         if gap_high2 > gap_low2:
             gap_size = gap_high2 - gap_low2
@@ -91,6 +109,7 @@ def detect_fvgs(
                     detected_at=idx[i + 1],
                     source_bar_idx=i,
                     size=gap_size,
+                    atr_at_detection=atr_val,
                 ))
 
     return gaps

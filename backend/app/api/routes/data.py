@@ -6,9 +6,32 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.database import get_db
+from app.services.market_data_service import (
+    cache_path_for,
+    fetch_market_data,
+    get_inventory as get_inventory_entry,
+    list_inventory as list_inventory_entries,
+    search_symbols as search_market_symbols,
+)
+from app.services.market_metadata_service import (
+    create_market_metadata_snapshot,
+    get_latest_snapshot,
+    get_snapshot_by_version,
+    serialize_snapshot,
+)
+from app.services.watchlist_service import (
+    create_watchlist,
+    get_watchlist,
+    list_watchlists as list_watchlist_entries,
+    refresh_watchlist,
+    set_watchlist_membership_state,
+    serialize_watchlist,
+)
 from app.data.providers import yfinance_provider as yf_prov
 from app.data.providers import alpaca_provider as alp_prov
 
@@ -42,9 +65,7 @@ ALPACA_INFO = alp_prov.PROVIDER_INFO
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _cache_file_for(symbol: str, timeframe: str, provider: str) -> Path:
-    if provider == "alpaca":
-        return settings.CACHE_DIR / f"{symbol}_{timeframe}_alpaca.parquet"
-    return settings.CACHE_DIR / f"{symbol}_{timeframe}.parquet"
+    return cache_path_for(symbol, timeframe, provider)
 
 
 @router.get("/bars/{symbol}/{timeframe}")
@@ -115,24 +136,12 @@ async def list_providers():
 @router.get("/inventory")
 async def list_inventory():
     """List all cached data (from all providers)."""
-    yf_items = yf_prov.list_cached_symbols()
-    for item in yf_items:
-        item.setdefault("provider", "yfinance")
-
-    alp_items = alp_prov.list_cached_symbols()
-
-    # Merge and deduplicate
-    all_items = yf_items + alp_items
-    all_items.sort(key=lambda x: (x["symbol"], x["timeframe"]))
-    return {"items": all_items}
+    return {"items": list_inventory_entries()}
 
 
 @router.get("/inventory/{symbol}/{timeframe}")
 async def get_symbol_inventory(symbol: str, timeframe: str, provider: str = "yfinance"):
-    if provider == "alpaca":
-        info = alp_prov.get_inventory(symbol, timeframe)
-    else:
-        info = yf_prov.get_inventory(symbol, timeframe)
+    info = get_inventory_entry(symbol, timeframe, provider)
     if not info:
         raise HTTPException(
             status_code=404,
@@ -167,21 +176,22 @@ async def fetch_data(body: dict[str, Any]):
         raise HTTPException(status_code=400, detail="symbol required")
 
     try:
-        if provider == "alpaca":
-            api_key = body.get("api_key", "")
-            secret_key = body.get("secret_key", "")
-            if not api_key or not secret_key:
-                raise HTTPException(
-                    status_code=400,
-                    detail="api_key and secret_key are required for Alpaca provider"
-                )
-            df = await asyncio.get_running_loop().run_in_executor(
-                None, alp_prov.fetch, symbol, timeframe, start, end, api_key, secret_key, force
-            )
-        else:
-            df = await asyncio.get_running_loop().run_in_executor(
-                None, yf_prov.fetch, symbol, timeframe, start, end, True, force
-            )
+        api_key = body.get("api_key", "") if provider == "alpaca" else ""
+        secret_key = body.get("secret_key", "") if provider == "alpaca" else ""
+        df = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: fetch_market_data(
+                symbol=symbol,
+                timeframe=timeframe,
+                start=start,
+                end=end,
+                provider=provider,
+                adjusted=True,
+                force_download=force,
+                api_key=api_key,
+                secret_key=secret_key,
+            ),
+        )
 
         return {
             "symbol": symbol,
@@ -211,14 +221,20 @@ async def fetch_many(body: dict[str, Any]):
     results = []
     for symbol in symbols:
         try:
-            if provider == "alpaca":
-                df = await asyncio.get_running_loop().run_in_executor(
-                    None, alp_prov.fetch, symbol, timeframe, start, end, api_key, secret_key, False
-                )
-            else:
-                df = await asyncio.get_running_loop().run_in_executor(
-                    None, yf_prov.fetch, symbol, timeframe, start, end, True, False
-                )
+            df = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda symbol=symbol: fetch_market_data(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start=start,
+                    end=end,
+                    provider=provider,
+                    adjusted=True,
+                    force_download=False,
+                    api_key=api_key,
+                    secret_key=secret_key,
+                ),
+            )
             results.append({"symbol": symbol, "status": "ok", "bar_count": len(df)})
         except Exception as e:
             results.append({"symbol": symbol, "status": "error", "error": str(e)})
@@ -262,12 +278,158 @@ async def search_tickers(
                 status_code=400,
                 detail="api_key and secret_key required for Alpaca symbol search"
             )
-        results = await asyncio.get_running_loop().run_in_executor(
-            None, alp_prov.search_symbols, q, api_key, secret_key, limit
-        )
-    else:
-        results = await asyncio.get_running_loop().run_in_executor(
-            None, yf_prov.search_symbols, q, limit
-        )
+    results = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: search_market_symbols(
+            query=q,
+            provider=provider,
+            max_results=limit,
+            api_key=api_key,
+            secret_key=secret_key,
+        ),
+    )
 
     return {"results": results, "provider": provider}
+
+
+@router.post("/metadata/snapshots")
+async def create_metadata_snapshot(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
+    symbols = [str(s).upper() for s in body.get("symbols", []) if str(s).strip()]
+    as_of_date = body.get("as_of_date")
+    provider = body.get("provider", "yfinance")
+    if not symbols:
+        raise HTTPException(status_code=400, detail="symbols required")
+    if not as_of_date:
+        raise HTTPException(status_code=400, detail="as_of_date required")
+
+    try:
+        snapshot = await create_market_metadata_snapshot(
+            db,
+            symbols=symbols,
+            as_of_date=as_of_date,
+            provider=provider,
+            api_key=body.get("api_key", ""),
+            secret_key=body.get("secret_key", ""),
+            sector_overrides=body.get("sector_overrides", {}) or {},
+            benchmark_overrides=body.get("benchmark_overrides", {}) or {},
+        )
+        await db.commit()
+        await db.refresh(snapshot, attribute_names=["symbols"])
+        return serialize_snapshot(snapshot)
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Metadata snapshot creation failed: {exc}") from exc
+
+
+@router.get("/metadata/snapshots/latest")
+async def latest_metadata_snapshot(db: AsyncSession = Depends(get_db)):
+    snapshot = await get_latest_snapshot(db)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="No market metadata snapshots found")
+    return serialize_snapshot(snapshot)
+
+
+@router.get("/metadata/snapshots/{metadata_version_id}")
+async def metadata_snapshot_detail(metadata_version_id: str, db: AsyncSession = Depends(get_db)):
+    snapshot = await get_snapshot_by_version(db, metadata_version_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Market metadata snapshot not found")
+    return serialize_snapshot(snapshot)
+
+
+@router.post("/watchlists")
+async def create_watchlist_route(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+
+    try:
+        watchlist = await create_watchlist(
+            db,
+            name=name,
+            watchlist_type=str(body.get("watchlist_type", "scanner")).strip() or "scanner",
+            refresh_cron=body.get("refresh_cron"),
+            min_refresh_interval_minutes=int(body.get("min_refresh_interval_minutes", 5)),
+            config=body.get("config") or {},
+        )
+        if body.get("symbols") is not None:
+            watchlist = await refresh_watchlist(db, watchlist.id, list(body.get("symbols") or []))
+        await db.commit()
+        await db.refresh(watchlist, attribute_names=["memberships"])
+        return serialize_watchlist(watchlist)
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Watchlist creation failed: {exc}") from exc
+
+
+@router.get("/watchlists")
+async def list_watchlists_route(db: AsyncSession = Depends(get_db)):
+    watchlists = await list_watchlist_entries(db)
+    return {"items": [serialize_watchlist(item) for item in watchlists]}
+
+
+@router.get("/watchlists/{watchlist_id}")
+async def watchlist_detail(watchlist_id: str, db: AsyncSession = Depends(get_db)):
+    watchlist = await get_watchlist(db, watchlist_id)
+    if watchlist is None:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    return serialize_watchlist(watchlist)
+
+
+@router.post("/watchlists/{watchlist_id}/refresh")
+async def refresh_watchlist_route(watchlist_id: str, body: dict[str, Any], db: AsyncSession = Depends(get_db)):
+    try:
+        watchlist = await refresh_watchlist(db, watchlist_id, list(body.get("symbols") or []) if "symbols" in body else None)
+        await db.commit()
+        await db.refresh(watchlist, attribute_names=["memberships"])
+        return serialize_watchlist(watchlist)
+    except ValueError as exc:
+        await db.rollback()
+        status_code = 404 if str(exc) == "Watchlist not found" else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Watchlist refresh failed: {exc}") from exc
+
+
+@router.post("/watchlists/{watchlist_id}/memberships/{symbol}/state")
+async def set_watchlist_membership_state_route(
+    watchlist_id: str,
+    symbol: str,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+):
+    requested_state = str(body.get("state", "")).strip().lower()
+    if not requested_state:
+        raise HTTPException(status_code=400, detail="state required")
+
+    try:
+        membership = await set_watchlist_membership_state(
+            db,
+            watchlist_id,
+            symbol,
+            state=requested_state,
+            reason=body.get("reason"),
+        )
+        await db.commit()
+        return {
+            "symbol": membership.symbol,
+            "state": membership.state,
+            "resolved_at": membership.resolved_at.isoformat() if membership.resolved_at else None,
+            "suspended_at": membership.suspended_at.isoformat() if membership.suspended_at else None,
+            "metadata": membership.metadata_,
+        }
+    except ValueError as exc:
+        await db.rollback()
+        message = str(exc)
+        status_code = 404 if message in {"Watchlist not found", "Watchlist membership not found"} else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Membership state update failed: {exc}") from exc

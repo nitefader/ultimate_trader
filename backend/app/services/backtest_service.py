@@ -6,20 +6,22 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import math
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from copy import deepcopy
+from itertools import combinations
 from typing import Any
 import pandas as pd
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.backtest import BacktestEngine
-from app.data.providers.yfinance_provider import fetch as fetch_yfinance
-from app.data.providers.alpaca_provider import fetch as fetch_alpaca
 from app.models.run import BacktestRun, RunMetrics
+from app.models.validation_evidence import ValidationEvidence
 from app.models.trade import Trade, ScaleEvent
+from app.services.market_data_service import fetch_market_data
 from app.services.reporting import compute_full_metrics
 
 logger = logging.getLogger(__name__)
@@ -109,6 +111,29 @@ def recommend_data_provider(
         "reason": "Default research mode for EOD workflows",
         "warnings": [],
     }
+
+
+def _json_serializable(obj: Any) -> Any:
+    """
+    Recursively convert any non-JSON-serializable objects (datetime, pd.Timestamp,
+    np.int64, np.float64, etc.) to JSON-safe Python primitives.
+    Called before persisting walk_forward and validation_evidence payloads.
+    """
+    if isinstance(obj, dict):
+        return {k: _json_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_serializable(v) for v in obj]
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if hasattr(obj, "isoformat"):  # pd.Timestamp, np.datetime64 wrapped
+        return obj.isoformat()
+    if isinstance(obj, (pd.Timestamp,)):
+        return obj.isoformat()
+    if isinstance(obj, float) and (obj != obj or obj == float("inf") or obj == float("-inf")):
+        return None  # NaN/Inf → null
+    if hasattr(obj, "item"):  # np scalar → Python scalar
+        return obj.item()
+    return obj
 
 
 def _allocate_persisted_trade_id(source_trade_id: str | None, trade_id_map: dict[str, str]) -> str:
@@ -315,6 +340,434 @@ def _select_training_parameters(
     return best_params, details
 
 
+def _compute_cpcv_payload(
+    data: dict,
+    strategy_config: dict,
+    run_config: dict,
+) -> dict:
+    """
+    Combinatorial Purged Cross-Validation (CPCV).
+
+    Primary overfitting guard — runs before walk-forward.
+
+    Algorithm
+    ---------
+    1. Split the full date range into N equal-length paths.
+    2. For each combination of k test paths (C(N,k) combos):
+       a. Train on the remaining N-k paths (combined, non-contiguous OK).
+       b. Test on the k held-out paths.
+    3. Aggregate: median OOS Sharpe, % positive OOS folds, IS/OOS degradation ratio.
+
+    A strategy that passes CPCV (median OOS Sharpe > 0, degradation ratio < 2.0)
+    is then submitted to walk-forward as the secondary guard.
+
+    Parameters (from run_config["cpcv"])
+    ------------------------------------
+    n_paths       : int  — number of equal paths to split data into (default 6)
+    k_test_paths  : int  — paths per test combination (default 2)
+    embargo_bars  : int  — bars to drop between train and test (purge buffer, default 5)
+    max_combos    : int  — cap combinatorial explosion (default 30)
+    min_bars_path : int  — minimum bars per path, skip if shorter (default 30)
+    """
+    if not data:
+        return {}
+
+    primary_symbol = next(iter(data.keys()))
+    base_df = data[primary_symbol]
+    n_total_bars = len(base_df)
+
+    cpcv_cfg = (run_config.get("cpcv") or {}) if isinstance(run_config, dict) else {}
+    enabled = bool(cpcv_cfg.get("enabled", True))
+    if not enabled:
+        return {"method": "disabled", "folds": [], "warnings": ["CPCV disabled for this run"]}
+
+    n_paths = int(cpcv_cfg.get("n_paths", 6))
+    k_test = int(cpcv_cfg.get("k_test_paths", 2))
+    embargo_bars = int(cpcv_cfg.get("embargo_bars", 5))
+    max_combos = int(cpcv_cfg.get("max_combos", 30))
+    min_bars_path = int(cpcv_cfg.get("min_bars_path", 30))
+
+    # Need at least n_paths paths and k < n_paths
+    if k_test >= n_paths:
+        return {
+            "method": "cpcv",
+            "folds": [],
+            "warnings": [f"k_test_paths ({k_test}) must be < n_paths ({n_paths})"],
+        }
+
+    if n_total_bars < n_paths * min_bars_path:
+        return {
+            "method": "cpcv",
+            "folds": [],
+            "warnings": [
+                f"Insufficient bars ({n_total_bars}) for {n_paths} paths × {min_bars_path} min bars/path. "
+                f"Need at least {n_paths * min_bars_path} bars."
+            ],
+        }
+
+    # Split index into N equal-length paths
+    path_size = n_total_bars // n_paths
+    path_indices = list(range(n_paths))
+    paths: list[tuple[int, int]] = []   # (start_bar_idx, end_bar_idx_exclusive)
+    for i in range(n_paths):
+        start = i * path_size
+        end = (i + 1) * path_size if i < n_paths - 1 else n_total_bars
+        paths.append((start, end))
+
+    # Enumerate all C(N, k) test combinations, capped at max_combos
+    all_combos = list(combinations(path_indices, k_test))
+    if len(all_combos) > max_combos:
+        # Evenly spaced sample — preserves diversity without just taking the first N
+        step = len(all_combos) / max_combos
+        all_combos = [all_combos[round(i * step)] for i in range(max_combos)]
+
+    fold_results = []
+
+    for combo_idx, test_path_ids in enumerate(all_combos):
+        train_path_ids = [p for p in path_indices if p not in test_path_ids]
+
+        # Build train data: concatenate train paths with embargo gaps removed
+        train_frames: list[pd.DataFrame] = []
+        for pid in train_path_ids:
+            s, e = paths[pid]
+            train_frames.append(base_df.iloc[s:e])
+
+        # Build test data: concatenate test paths
+        test_frames: list[pd.DataFrame] = []
+        for pid in sorted(test_path_ids):
+            s, e = paths[pid]
+            # Apply embargo: skip first `embargo_bars` bars of each test path
+            # to prevent information leakage from the adjacent train path.
+            purge_start = min(s + embargo_bars, e)
+            test_frames.append(base_df.iloc[purge_start:e])
+
+        if not train_frames or not test_frames:
+            continue
+
+        train_df = pd.concat(train_frames).sort_index()
+        test_df = pd.concat(test_frames).sort_index()
+
+        if len(train_df) < min_bars_path or len(test_df) < min_bars_path:
+            continue
+
+        # Build per-symbol data dicts (multi-symbol: apply same path split to each)
+        train_data = {}
+        test_data = {}
+        for sym, sym_df in data.items():
+            sym_n = len(sym_df)
+            sym_path_size = sym_n // n_paths
+            t_frames = []
+            ts_frames = []
+            for pid in train_path_ids:
+                s = pid * sym_path_size
+                e = (pid + 1) * sym_path_size if pid < n_paths - 1 else sym_n
+                t_frames.append(sym_df.iloc[s:e])
+            for pid in sorted(test_path_ids):
+                s = pid * sym_path_size
+                e = (pid + 1) * sym_path_size if pid < n_paths - 1 else sym_n
+                purge_start = min(s + embargo_bars, e)
+                ts_frames.append(sym_df.iloc[purge_start:e])
+            if t_frames:
+                combined = pd.concat(t_frames).sort_index()
+                if len(combined) > 0:
+                    train_data[sym] = combined
+            if ts_frames:
+                combined = pd.concat(ts_frames).sort_index()
+                if len(combined) > 0:
+                    test_data[sym] = combined
+
+        if not train_data or not test_data:
+            continue
+
+        try:
+            selected_params, selection_details = _select_training_parameters(
+                train_data=train_data,
+                strategy_config=strategy_config,
+                run_config=run_config,
+                wf_cfg=(run_config.get("walk_forward") or {}) if isinstance(run_config, dict) else {},
+            )
+            locked_strategy_config = _with_parameter_overrides(strategy_config, selected_params)
+            parameter_locking_validated = all(
+                _get_nested_path(locked_strategy_config, path) == value
+                for path, value in selected_params.items()
+            )
+
+            train_engine = BacktestEngine(deepcopy(locked_strategy_config), run_config)
+            train_result = train_engine.run_backtest(train_data)
+            is_sharpe = float(train_result.metrics.get("sharpe_ratio") or 0.0)
+
+            test_run_config = dict(run_config)
+            test_run_config["signal_start_date"] = str(test_df.index[0].date())
+            test_engine = BacktestEngine(deepcopy(locked_strategy_config), test_run_config)
+            test_result = test_engine.run_backtest(test_data)
+            oos_sharpe = float(test_result.metrics.get("sharpe_ratio") or 0.0)
+
+            fold_results.append({
+                "combo_id": f"cpcv_{combo_idx + 1}",
+                "test_path_ids": list(test_path_ids),
+                "train_path_ids": train_path_ids,
+                "train_bars": len(train_df),
+                "test_bars": len(test_df),
+                "selected_parameters": selected_params,
+                "parameter_locking_validated": parameter_locking_validated,
+                "parameter_selection": selection_details,
+                "is_sharpe": round(is_sharpe, 3),
+                "oos_sharpe": round(oos_sharpe, 3),
+                "is_trades": len(train_result.trades),
+                "oos_trades": len(test_result.trades),
+                "oos_return_pct": round(float(test_result.metrics.get("total_return_pct") or 0.0), 2),
+            })
+        except Exception as exc:
+            fold_results.append({
+                "combo_id": f"cpcv_{combo_idx + 1}",
+                "test_path_ids": list(test_path_ids),
+                "train_path_ids": train_path_ids,
+                "error": str(exc),
+            })
+
+    # Aggregate
+    valid_oos = [f["oos_sharpe"] for f in fold_results if "oos_sharpe" in f]
+    valid_is = [f["is_sharpe"] for f in fold_results if "is_sharpe" in f]
+    median_oos_sharpe = float(sorted(valid_oos)[len(valid_oos) // 2]) if valid_oos else None
+    median_is_sharpe = float(sorted(valid_is)[len(valid_is) // 2]) if valid_is else None
+    pct_positive_oos = round(sum(1 for s in valid_oos if s > 0) / len(valid_oos) * 100, 1) if valid_oos else None
+
+    # IS/OOS degradation ratio: how much Sharpe degrades from IS to OOS.
+    # Ratio > 2.0 is a strong curve-fit signal.
+    degradation_ratio = None
+    if median_is_sharpe and median_oos_sharpe is not None:
+        if abs(median_oos_sharpe) > 1e-6:
+            degradation_ratio = round(median_is_sharpe / median_oos_sharpe, 3)
+        elif median_is_sharpe > 0:
+            degradation_ratio = float("inf")  # IS positive, OOS zero/negative — curve fit
+
+    warnings: list[str] = []
+    if degradation_ratio is not None and degradation_ratio != float("inf") and degradation_ratio > 2.0:
+        warnings.append(f"IS/OOS Sharpe degradation ratio {degradation_ratio:.2f} > 2.0 — likely curve-fit")
+    if degradation_ratio == float("inf"):
+        warnings.append("OOS Sharpe is zero or negative while IS Sharpe is positive — strong curve-fit signal")
+    if pct_positive_oos is not None and pct_positive_oos < 50:
+        warnings.append(f"Only {pct_positive_oos}% of OOS folds are profitable — strategy may not generalize")
+    if not fold_results:
+        warnings.append("No CPCV folds completed")
+
+    pass_primary_guard = bool(valid_oos) and (
+        median_oos_sharpe is not None
+        and median_oos_sharpe > 0
+        and (
+            degradation_ratio is None
+            or degradation_ratio < 2.0
+        )
+        and pct_positive_oos is not None
+        and pct_positive_oos >= 50.0
+        and all(bool(f.get("parameter_locking_validated", False)) for f in fold_results if "oos_sharpe" in f)
+    )
+
+    return {
+        "method": "cpcv",
+        "settings": {
+            "n_paths": n_paths,
+            "k_test_paths": k_test,
+            "embargo_bars": embargo_bars,
+            "total_combos_evaluated": len(fold_results),
+        },
+        "folds": fold_results,
+        "aggregate": {
+            "median_is_sharpe": round(median_is_sharpe, 3) if median_is_sharpe is not None else None,
+            "median_oos_sharpe": round(median_oos_sharpe, 3) if median_oos_sharpe is not None else None,
+            "pct_positive_oos_folds": pct_positive_oos,
+            "is_oos_degradation_ratio": degradation_ratio if degradation_ratio != float("inf") else None,
+            "is_oos_degradation_infinite": degradation_ratio == float("inf"),
+            "fold_count": len(fold_results),
+            "pass_primary_guard": pass_primary_guard,
+        },
+        "warnings": warnings,
+    }
+
+
+def _cpcv_primary_guard_passed(cpcv_payload: dict | None) -> bool:
+    if not isinstance(cpcv_payload, dict):
+        return False
+    aggregate = cpcv_payload.get("aggregate")
+    if not isinstance(aggregate, dict):
+        return False
+    return bool(aggregate.get("pass_primary_guard", False))
+
+
+def _trade_return_sharpe(trades: list[dict[str, Any]]) -> float | None:
+    returns: list[float] = []
+    for trade in trades:
+        ret = trade.get("return_pct")
+        if ret is None:
+            qty = float(trade.get("quantity", 0.0) or 0.0)
+            entry = float(trade.get("entry_price", 0.0) or 0.0)
+            pnl = trade.get("net_pnl")
+            cost_basis = qty * entry
+            if pnl is None or cost_basis <= 0:
+                continue
+            ret = float(pnl) / cost_basis * 100.0
+        returns.append(float(ret))
+
+    if len(returns) < 2:
+        return None
+
+    series = pd.Series(returns, dtype="float64")
+    std = float(series.std(ddof=1))
+    if std <= 1e-9:
+        return None
+    return float((series.mean() / std) * math.sqrt(len(series)))
+
+
+def _score_stability(
+    *,
+    cpcv_passed: bool,
+    oos_positive_rate_pct: float | None,
+    degradation_ratio: float | None,
+    infinite_degradation: bool,
+    walk_forward_positive_rate_pct: float | None,
+    anti_bias: dict[str, Any],
+) -> float:
+    score = 0.0
+    if cpcv_passed:
+        score += 0.35
+    if anti_bias.get("leakage_checks_passed"):
+        score += 0.15
+    if anti_bias.get("parameter_locking_passed"):
+        score += 0.15
+    if anti_bias.get("causal_indicator_checks_passed"):
+        score += 0.1
+    if oos_positive_rate_pct is not None:
+        score += min(max(float(oos_positive_rate_pct) / 100.0, 0.0), 1.0) * 0.15
+    if walk_forward_positive_rate_pct is not None:
+        score += min(max(float(walk_forward_positive_rate_pct) / 100.0, 0.0), 1.0) * 0.1
+
+    if infinite_degradation:
+        score -= 0.2
+    elif degradation_ratio is not None:
+        score -= min(max((float(degradation_ratio) - 1.0) / 3.0, 0.0), 0.2)
+
+    return round(min(max(score, 0.0), 1.0), 3)
+
+
+def _compute_cost_sensitivity_curve(
+    data: dict[str, pd.DataFrame],
+    strategy_config: dict,
+    run_config: dict,
+) -> list[dict[str, Any]]:
+    if not data:
+        return []
+
+    baseline_bps = float(run_config.get("slippage_pct", 0.0) or 0.0) * 100.0
+    bps_points = [baseline_bps, baseline_bps + 0.5, baseline_bps + 1.0, baseline_bps + 2.0, baseline_bps + 5.0]
+    curve: list[dict[str, Any]] = []
+
+    for bps in bps_points:
+        scenario_run_config = dict(run_config)
+        scenario_run_config["slippage_ticks"] = 0
+        scenario_run_config["slippage_pct"] = float(bps) / 100.0
+        scenario_run_config.pop("signal_start_date", None)
+        try:
+            scenario_engine = BacktestEngine(deepcopy(strategy_config), scenario_run_config)
+            scenario_result = scenario_engine.run_backtest(data)
+            metrics = scenario_result.metrics or {}
+            curve.append(
+                {
+                    "slippage_bps": round(float(bps), 2),
+                    "sharpe_ratio": metrics.get("sharpe_ratio"),
+                    "total_return_pct": metrics.get("total_return_pct"),
+                    "trade_count": metrics.get("total_trades"),
+                }
+            )
+        except Exception as exc:
+            curve.append(
+                {
+                    "slippage_bps": round(float(bps), 2),
+                    "error": str(exc),
+                }
+            )
+
+    return curve
+
+
+def _build_validation_evidence_payload(
+    *,
+    walk_forward_payload: dict,
+    strategy_config: dict,
+    run_config: dict,
+    data: dict[str, pd.DataFrame],
+) -> dict[str, Any]:
+    cpcv = walk_forward_payload.get("cpcv") if isinstance(walk_forward_payload, dict) else {}
+    cpcv_aggregate = cpcv.get("aggregate") if isinstance(cpcv, dict) else {}
+    anti_bias = walk_forward_payload.get("anti_bias") if isinstance(walk_forward_payload, dict) else {}
+    aggregate_oos = walk_forward_payload.get("aggregate_oos") if isinstance(walk_forward_payload, dict) else {}
+    fold_results = walk_forward_payload.get("folds") if isinstance(walk_forward_payload, dict) else []
+
+    regime_totals: dict[str, float] = {}
+    oos_symbol_returns: dict[str, list[float]] = {}
+    for fold in fold_results or []:
+        test_metrics = fold.get("test_metrics") if isinstance(fold, dict) else None
+        regime_breakdown = test_metrics.get("regime_breakdown") if isinstance(test_metrics, dict) else None
+        if isinstance(regime_breakdown, dict):
+            for regime, pnl in regime_breakdown.items():
+                regime_totals[regime] = round(regime_totals.get(regime, 0.0) + float(pnl or 0.0), 2)
+
+        test_trades = fold.get("test_trades") if isinstance(fold, dict) else None
+        if isinstance(test_trades, list):
+            for trade in test_trades:
+                symbol = str(trade.get("symbol", "")).upper()
+                if not symbol:
+                    continue
+                ret = trade.get("return_pct")
+                if ret is None:
+                    qty = float(trade.get("quantity", 0.0) or 0.0)
+                    entry = float(trade.get("entry_price", 0.0) or 0.0)
+                    pnl = trade.get("net_pnl")
+                    cost_basis = qty * entry
+                    if pnl is None or cost_basis <= 0:
+                        continue
+                    ret = float(pnl) / cost_basis * 100.0
+                oos_symbol_returns.setdefault(symbol, []).append(float(ret))
+
+    per_symbol_oos_sharpe: dict[str, float | None] = {}
+    for symbol, returns in oos_symbol_returns.items():
+        if len(returns) < 2:
+            per_symbol_oos_sharpe[symbol] = None
+            continue
+        series = pd.Series(returns, dtype="float64")
+        std = float(series.std(ddof=1))
+        per_symbol_oos_sharpe[symbol] = None if std <= 1e-9 else round(float((series.mean() / std) * math.sqrt(len(series))), 3)
+
+    cost_sensitivity_curve = _compute_cost_sensitivity_curve(data, strategy_config, run_config)
+    degradation_ratio = cpcv_aggregate.get("is_oos_degradation_ratio") if isinstance(cpcv_aggregate, dict) else None
+    infinite_degradation = bool(cpcv_aggregate.get("is_oos_degradation_infinite")) if isinstance(cpcv_aggregate, dict) else False
+    stability_score = _score_stability(
+        cpcv_passed=bool(cpcv_aggregate.get("pass_primary_guard")) if isinstance(cpcv_aggregate, dict) else False,
+        oos_positive_rate_pct=cpcv_aggregate.get("pct_positive_oos_folds") if isinstance(cpcv_aggregate, dict) else None,
+        degradation_ratio=float(degradation_ratio) if degradation_ratio is not None else None,
+        infinite_degradation=infinite_degradation,
+        walk_forward_positive_rate_pct=aggregate_oos.get("positive_oos_fold_rate_pct") if isinstance(aggregate_oos, dict) else None,
+        anti_bias=anti_bias if isinstance(anti_bias, dict) else {},
+    )
+
+    warnings: list[str] = []
+    if isinstance(cpcv, dict):
+        warnings.extend(str(w) for w in cpcv.get("warnings", []) or [])
+    warnings.extend(str(w) for w in walk_forward_payload.get("warnings", []) or [])
+
+    return {
+        "method": "cpcv_walk_forward",
+        "cpcv": cpcv if isinstance(cpcv, dict) else {},
+        "walk_forward": walk_forward_payload,
+        "anti_bias": anti_bias if isinstance(anti_bias, dict) else {},
+        "regime_performance": regime_totals,
+        "per_symbol_oos_sharpe": per_symbol_oos_sharpe,
+        "cost_sensitivity_curve": cost_sensitivity_curve,
+        "warnings": list(dict.fromkeys(warnings)),
+        "is_oos_degradation_ratio": float(degradation_ratio) if degradation_ratio is not None else None,
+        "stability_score": stability_score,
+    }
+
+
 def _compute_walk_forward_payload(
     data: dict,
     strategy_config: dict,
@@ -324,6 +777,9 @@ def _compute_walk_forward_payload(
     if not data:
         return {}
 
+    cpcv_payload = _compute_cpcv_payload(data, strategy_config, run_config)
+    cpcv_primary_guard_passed = _cpcv_primary_guard_passed(cpcv_payload)
+
     primary_symbol = next(iter(data.keys()))
     base_df = data[primary_symbol]
     n = len(base_df)
@@ -332,24 +788,40 @@ def _compute_walk_forward_payload(
             "method": "insufficient_bars",
             "folds": [],
             "aggregate_oos": {},
+            "cpcv": cpcv_payload,
             "warnings": ["Not enough bars for forward-test split"],
+            "anti_bias": {
+                "cpcv_primary_guard_passed": cpcv_primary_guard_passed,
+                "leakage_checks_passed": False,
+                "parameter_locking_passed": False,
+                "causal_indicator_checks_passed": len(_detect_non_causal_indicator_refs(strategy_config)) == 0,
+                "non_causal_indicator_refs": _detect_non_causal_indicator_refs(strategy_config),
+            },
         }
 
     wf_cfg = (run_config.get("walk_forward") or {}) if isinstance(run_config, dict) else {}
     enabled = bool(wf_cfg.get("enabled", True))
+    non_causal_refs = _detect_non_causal_indicator_refs(strategy_config)
     if not enabled:
         return {
             "method": "disabled",
             "folds": [],
             "aggregate_oos": {},
+            "cpcv": cpcv_payload,
             "warnings": ["Walk-forward mode disabled for this run"],
+            "anti_bias": {
+                "cpcv_primary_guard_passed": cpcv_primary_guard_passed,
+                "leakage_checks_passed": False,
+                "parameter_locking_passed": False,
+                "causal_indicator_checks_passed": len(non_causal_refs) == 0,
+                "non_causal_indicator_refs": non_causal_refs,
+            },
         }
 
     train_window_months = int(wf_cfg.get("train_window_months", 12))
     test_window_months = int(wf_cfg.get("test_window_months", 3))
     warmup_bars = int(wf_cfg.get("warmup_bars", 100))
     max_folds = int(wf_cfg.get("max_folds", 24))
-    non_causal_refs = _detect_non_causal_indicator_refs(strategy_config)
 
     folds = _generate_calendar_folds(base_df.index, train_window_months, test_window_months, max_folds)
     if not folds:
@@ -357,8 +829,10 @@ def _compute_walk_forward_payload(
             "method": "sliding_calendar_months",
             "folds": [],
             "aggregate_oos": {},
+            "cpcv": cpcv_payload,
             "warnings": ["No valid train/test fold windows for selected data range"],
             "anti_bias": {
+                "cpcv_primary_guard_passed": cpcv_primary_guard_passed,
                 "leakage_checks_passed": False,
                 "parameter_locking_passed": False,
                 "causal_indicator_checks_passed": len(non_causal_refs) == 0,
@@ -443,6 +917,7 @@ def _compute_walk_forward_payload(
                 "test_metrics": test_metrics,
                 "train_trades_count": len(train_result.trades),
                 "test_trades_count": len(test_result.trades),
+                "test_trades": test_result.trades,
                 "turnover_shares": round(turnover_shares, 2),
                 "cost_impact": round(cost_impact, 2),
                 "equity_curve_segment": test_equity_curve,
@@ -490,11 +965,13 @@ def _compute_walk_forward_payload(
             "warmup_bars": warmup_bars,
             "max_folds": max_folds,
         },
+        "cpcv": cpcv_payload,
         "folds": fold_results,
         "aggregate_oos": aggregate,
         "stitched_oos_equity": stitched_oos_equity,
         "naive_full_period": naive,
         "anti_bias": {
+            "cpcv_primary_guard_passed": cpcv_primary_guard_passed,
             "leakage_checks_passed": leakage_checks_passed,
             "parameter_locking_passed": parameter_locking_passed,
             "causal_indicator_checks_passed": causal_checks_passed,
@@ -527,6 +1004,7 @@ async def launch_backtest(
             **(run_config.get("parameters", {}) or {}),
             "commission_pct_per_trade": run_config.get("commission_pct_per_trade", 0.0),
             "walk_forward": run_config.get("walk_forward", {}),
+            "cpcv": run_config.get("cpcv", {}),
         },
         started_at=datetime.now(timezone.utc),
     )
@@ -559,27 +1037,20 @@ async def launch_backtest(
             raise ValueError(f"Unsupported data provider: {selected_provider}")
 
         for symbol in run.symbols:
-            if selected_provider == "alpaca":
-                df = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    fetch_alpaca,
-                    symbol,
-                    run.timeframe,
-                    run.start_date,
-                    run.end_date,
-                    alpaca_api_key,
-                    alpaca_secret_key,
-                    False,
-                )
-            else:
-                df = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    fetch_yfinance,
-                    symbol,
-                    run.timeframe,
-                    run.start_date,
-                    run.end_date,
-                )
+            df = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda symbol=symbol: fetch_market_data(
+                    symbol=symbol,
+                    timeframe=run.timeframe,
+                    start=run.start_date,
+                    end=run.end_date,
+                    provider=selected_provider,
+                    adjusted=True,
+                    force_download=False,
+                    api_key=alpaca_api_key,
+                    secret_key=alpaca_secret_key,
+                ),
+            )
             if df is not None and len(df) > 0:
                 data[symbol] = df
             else:
@@ -613,6 +1084,15 @@ async def launch_backtest(
             strategy_config,
             run_config,
             result.metrics,
+        )
+        validation_evidence_payload = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _build_validation_evidence_payload(
+                walk_forward_payload=walk_forward_payload,
+                strategy_config=strategy_config,
+                run_config=run_config,
+                data=data,
+            ),
         )
 
         # Persist trades
@@ -704,14 +1184,30 @@ async def launch_backtest(
             avg_hold_days=m.get("avg_hold_days"),
             long_trades=m.get("long_trades"),
             short_trades=m.get("short_trades"),
-            monthly_returns=m.get("monthly_returns", {}),
-            equity_curve=result.equity_curve,
-            exit_reason_breakdown=m.get("exit_reason_breakdown", {}),
-            regime_breakdown=m.get("regime_breakdown", {}),
-            monte_carlo=m.get("monte_carlo", {}),
-            walk_forward=walk_forward_payload,
+            monthly_returns=_json_serializable(m.get("monthly_returns", {})),
+            equity_curve=_json_serializable(result.equity_curve),
+            exit_reason_breakdown=_json_serializable(m.get("exit_reason_breakdown", {})),
+            regime_breakdown=_json_serializable(m.get("regime_breakdown", {})),
+            monte_carlo=_json_serializable(m.get("monte_carlo", {})),
+            walk_forward=_json_serializable(walk_forward_payload),
         )
         db.add(metrics)
+        vep = _json_serializable(validation_evidence_payload)
+        db.add(
+            ValidationEvidence(
+                run_id=run.id,
+                method=vep.get("method", "cpcv_walk_forward"),
+                cpcv=vep.get("cpcv", {}),
+                walk_forward=vep.get("walk_forward", {}),
+                anti_bias=vep.get("anti_bias", {}),
+                regime_performance=vep.get("regime_performance", {}),
+                per_symbol_oos_sharpe=vep.get("per_symbol_oos_sharpe", {}),
+                cost_sensitivity_curve=vep.get("cost_sensitivity_curve", []),
+                warnings=vep.get("warnings", []),
+                is_oos_degradation_ratio=vep.get("is_oos_degradation_ratio"),
+                stability_score=vep.get("stability_score"),
+            )
+        )
 
         run.status = "completed"
         run.completed_at = datetime.now(timezone.utc)

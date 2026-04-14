@@ -1,0 +1,330 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Strategy: VWAP Mean-Reversion Scalp
+# Mode:     DAY  (enters and exits within the same session — never holds overnight)
+# Bars:     5-minute
+#
+# Edge / Hypothesis
+# ─────────────────
+# Intraday price overextension relative to VWAP and Bollinger Bands creates
+# short-term mean-reversion opportunities with a positive expected value.
+# When RSI reaches an extreme (< 32 or > 68) AND price is simultaneously
+# outside the Bollinger Bands AND diverging from VWAP, the statistical
+# tendency to revert provides a 1.5–2.5R scalp opportunity.  Volume surge
+# at the extreme confirms institutional participation.  We only trade the
+# first 90 minutes and last 30 minutes of the session (highest liquidity,
+# clearest VWAP relationship).  All positions are flat by 15:45 ET.
+#
+# PDT-Aware
+# ─────────
+# duration_mode: "day" — the execution engine tracks round-trip day trades
+# and respects the 3-trade/5-session cap for margin accounts < $25 k.
+# Accounts with equity ≥ $25 k or cash accounts bypass the cap.
+#
+# Optimization Parameter Ranges (for param optimizer)
+# ────────────────────────────────────────────────────
+# rsi_oversold:        [28, 30, 32, 35]
+# rsi_overbought:      [65, 68, 70, 72]
+# bb_period:           [14, 20, 25]
+# bb_std:              [1.8, 2.0, 2.2]
+# atr_stop_mult:       [1.2, 1.5, 1.8, 2.0]
+# t1_r:                [1.2, 1.5, 1.8]
+# t2_r:                [2.0, 2.5, 3.0]
+# volume_confirm_mult: [1.2, 1.5, 2.0]
+#
+# Default Account Allocation Defaults
+# ─────────────────────────────────────
+# Suggested starting capital:   $25,000 (avoids PDT cap on margin)
+# Max concurrent positions:     3
+# Risk per trade:                0.75% of equity
+# Max daily loss:                2% of equity  (≈ 2–3 losing trades)
+# Max portfolio heat:            3%
+# Leverage:                      1× (no leverage — cash-settled ETFs + large-caps)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "VWAP Mean-Reversion Scalp"
+category: mean_reversion
+duration_mode: "day"
+
+description: >
+  A pure intraday mean-reversion strategy operating on 5-minute bars. Enters
+  when RSI reaches an oversold/overbought extreme while price is simultaneously
+  outside the Bollinger Bands and diverging from session VWAP. A volume surge
+  confirms institutional participation. Targets VWAP as the natural mean.
+  All positions are forced flat by 15:45 ET. PDT rules are enforced for
+  margin accounts below the $25k threshold — never consumes more than 3 day
+  trades in a rolling 5-session window. Best performance in range-bound and
+  high-volatility sessions; regime filter blocks trending days where
+  mean-reversion fails.
+
+# ── Watchlist ────────────────────────────────────────────────────────────────
+# Reference watchlist name — executor loads this at runtime.
+# Create via seed_watchlists or the Watchlists UI.
+watchlist: "Day Trading — High-Liquidity Universe"
+
+symbols:
+  - SPY     # S&P 500 ETF   — tightest spreads, deep book, VWAP behaves cleanly
+  - QQQ     # Nasdaq 100    — volatile, reverts well on 5m
+  - IWM     # Russell 2000  — higher intraday vol, bigger moves
+  - AAPL    # Large-cap tech, institutional VWAP anchoring
+  - MSFT    # Large-cap tech, liquid book
+  - NVDA    # High ATR, wider targets
+  - AMD     # Semiconductor vol
+  - TSLA    # High ATR intraday, strong reversions
+  - META    # Large-cap tech
+  - AMZN    # Large-cap, good VWAP behavior
+
+timeframe: "5m"
+
+# ── Indicator configuration ──────────────────────────────────────────────────
+indicators:
+  ema_periods: [9, 21]
+  rsi_periods: [14]
+  atr_period: 14
+  bb_period: 20
+  bb_std: 2.0
+  vwap_session: true          # resets at 09:30 ET each day
+
+# ── Market hours enforcement ─────────────────────────────────────────────────
+# Only enter between 09:35 and 11:00 ET (opening liquidity) or
+# between 14:30 and 15:45 ET (closing momentum).
+# Force-flat at 15:45 ET — no overnight holds ever.
+market_hours:
+  timezone: "America/New_York"
+  entry_windows:
+    - start: "09:35"
+      end: "11:00"
+    - start: "14:30"
+      end: "15:30"
+  force_flat_by: "15:45"
+  skip_first_bar: true        # skip the 09:30 bar (gap noise)
+
+# ── Regime filter ────────────────────────────────────────────────────────────
+# Mean-reversion works in ranging/choppy markets.
+# Avoid strong trending days — let the momentum strategies handle those.
+regime_filter:
+  allowed:
+    - ranging
+    - high_volatility    # volatile but non-directional — large reversions
+    - low_volatility     # tight range — VWAP gravity strong
+
+use_support_resistance: false  # S&R not used on 5m intraday
+use_fvg: false                 # FVG irrelevant at 5m scale
+
+# ── Entry rules (LONG) ───────────────────────────────────────────────────────
+# Condition: price is extended below VWAP + oversold RSI + below lower BB
+# with a volume confirmation surge.
+entry:
+  directions:
+    - long
+    - short
+
+  logic: "all_of"
+
+  conditions:
+    # ── LONG conditions ──────────────────────────────────────────────────────
+    # (engine evaluates direction-appropriate conditions at runtime)
+
+    # 1. RSI oversold — price momentum exhausted to downside
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: "<"
+      right: 32
+
+    # 2. Price below lower Bollinger Band — statistically extreme
+    - type: single
+      left: {field: "close"}
+      op: "<"
+      right: {indicator: "bb_lower"}
+
+    # 3. Price below VWAP — confirm downward displacement from fair value
+    - type: single
+      left: {field: "close"}
+      op: "<"
+      right: {indicator: "vwap"}
+
+    # 4. Volume confirmation — institutional activity at the extreme
+    #    current bar volume > 1.5× 20-bar average (vwma-based proxy)
+    - type: single
+      left: {field: "volume"}
+      op: ">"
+      right: {indicator: "volume_sma_20", mult: 1.5}
+
+  # Short-side mirror conditions
+  short_conditions:
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: ">"
+      right: 68
+
+    - type: single
+      left: {field: "close"}
+      op: ">"
+      right: {indicator: "bb_upper"}
+
+    - type: single
+      left: {field: "close"}
+      op: ">"
+      right: {indicator: "vwap"}
+
+    - type: single
+      left: {field: "volume"}
+      op: ">"
+      right: {indicator: "volume_sma_20", mult: 1.5}
+
+# ── Stop loss ────────────────────────────────────────────────────────────────
+# ATR-based stop: 1.5× ATR from entry price.
+# For scalps, we want a tight stop that respects intraday noise.
+# Combined with previous bar low for structure awareness.
+stop_loss:
+  method: "combined"
+  rule: "farthest"          # use the more conservative (wider) stop
+  stops:
+    - method: "atr_multiple"
+      period: 14
+      mult: 1.5
+    - method: "prev_bar_low"  # for longs: previous bar's low as hard floor
+
+# ── Profit targets ───────────────────────────────────────────────────────────
+# T1 at 1.5R — take 60% of position (quick lock-in, covers risk).
+# T2 at VWAP — the mean-reversion completion target.
+# If VWAP is already hit before T1, exit full position.
+targets:
+  - method: "r_multiple"
+    r: 1.5          # Target 1: 1.5R — partial exit
+
+  - method: "r_multiple"
+    r: 2.5          # Target 2: fallback if VWAP target unresolved
+
+# ── Trailing stop ────────────────────────────────────────────────────────────
+# After T1, trail with a 2-bar ATR chandelier to capture extended reversions.
+trailing_stop:
+  method: "chandelier"
+  period: 14        # shorter period for intraday (14 bars = 70 minutes)
+  mult: 2.0
+
+# ── Scale out ────────────────────────────────────────────────────────────────
+scale_out:
+  move_stop_to_be_after_t1: true   # move stop to breakeven after T1 hit
+  levels:
+    - pct: 60    # exit 60% at T1 (1.5R)
+    - pct: 40    # exit remaining 40% at T2 or trailing stop
+
+# ── No scale in for mean reversion ───────────────────────────────────────────
+# Never average into a losing intraday scalp.
+scale_in: null
+
+# ── Position sizing ───────────────────────────────────────────────────────────
+position_sizing:
+  method: "risk_pct"
+  risk_pct: 0.75    # Risk 0.75% of equity per trade
+                    # On $25k account: risk ≈ $187.50 per trade
+                    # On $50k account: risk ≈ $375 per trade
+
+leverage: 1.0       # No leverage — reduces margin call risk intraday
+
+# ── Risk controls ─────────────────────────────────────────────────────────────
+risk:
+  max_position_size_pct: 0.08    # Max 8% of equity in a single position
+  max_daily_loss_pct: 0.02       # Stop trading after 2% daily drawdown
+  max_drawdown_lockout_pct: 0.06 # Lock out after 6% portfolio drawdown
+  max_open_positions: 3          # Max 3 simultaneous scalps
+  max_portfolio_heat: 0.03       # Max 3% total portfolio risk exposure
+
+# ── PDT protection ───────────────────────────────────────────────────────────
+pdt:
+  enforce: true
+  max_day_trades_per_window: 3
+  window_sessions: 5
+  equity_threshold: 25000
+  # When PDT cap is reached, strategy pauses until window expires.
+  # Cash accounts are exempt (set account_mode: "cash" on the account).
+  on_limit_reached: "pause_entries"
+
+# ── Cooldown rules ────────────────────────────────────────────────────────────
+cooldown_rules:
+  # After 2 consecutive losses on the same symbol: sit out the rest of the session
+  - trigger: "consecutive_loss"
+    consecutive_count: 2
+    session_reset: true
+    symbol_level: true
+
+  # After a stop-out: wait 3 bars (15 minutes on 5m) before re-entering same symbol
+  - trigger: "stop_out"
+    duration_bars: 3
+    symbol_level: true
+
+  # After hitting daily loss limit: no more entries today
+  - trigger: "loss"
+    consecutive_count: 4
+    session_reset: true
+    symbol_level: false    # portfolio-level — stops all new entries
+
+# ── Event filter ─────────────────────────────────────────────────────────────
+# Avoid FOMC, CPI, NFP — these create directional moves that wreck mean-reversion.
+event_filter:
+  categories: [fomc, cpi, nfp, fed_speak]
+  impact_levels: [high]
+  minutes_before: 30
+  minutes_after: 30
+  disable_entries: true
+  close_positions_before: false  # don't close existing positions; let stops handle
+
+# ── Execution policy defaults ─────────────────────────────────────────────────
+execution:
+  fill_model: "next_bar_open"     # fills at next bar open + slippage
+  slippage_ticks: 1               # 1 tick ($0.01) per fill
+  commission_per_share: 0.005     # $0.005/share (Interactive Brokers rate)
+  min_commission: 1.00
+  order_type: "limit"             # use limit orders for scalps (no market order slippage)
+  limit_offset_ticks: 2           # place limit 2 ticks inside BBO
+
+# ── Optimization parameter ranges ────────────────────────────────────────────
+optimization:
+  objective: "sharpe_ratio"
+  min_trades: 30                  # at least 30 trades for statistical significance
+  parameters:
+    rsi_oversold:
+      type: int
+      values: [28, 30, 32, 35]
+    rsi_overbought:
+      type: int
+      values: [65, 68, 70, 72]
+    bb_std:
+      type: float
+      range: [1.8, 2.2]
+      step: 0.1
+    atr_stop_mult:
+      type: float
+      values: [1.2, 1.5, 1.8, 2.0]
+    t1_r:
+      type: float
+      values: [1.2, 1.5, 1.8]
+    volume_confirm_mult:
+      type: float
+      values: [1.2, 1.5, 2.0]
+  walk_forward:
+    enabled: true
+    train_months: 3
+    test_months: 1
+
+# ── Sample account allocation defaults ───────────────────────────────────────
+account_defaults:
+  suggested_capital: 25000
+  account_mode: "margin"          # margin account (PDT rules apply below $25k)
+  leverage: 1.0
+  max_position_size_pct: 0.08
+  max_daily_loss_pct: 0.02
+  max_open_positions: 3
+  notes: >
+    Fund with at least $25,000 to avoid PDT 3-trade cap.
+    Cash accounts ($0 minimum) are exempt from PDT but cannot short.
+    Reduce risk_pct to 0.5% during initial paper trading phase.
+
+tick_size: 0.01
+tags:
+  - intraday
+  - mean_reversion
+  - vwap
+  - scalp
+  - day_mode
+  - pdt_aware

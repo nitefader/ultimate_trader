@@ -4,6 +4,8 @@ import { AlertTriangle, Power, RotateCcw, X, ShieldAlert } from 'lucide-react'
 import { controlApi, deploymentsApi } from '../api/accounts'
 import { strategiesApi } from '../api/strategies'
 import { useKillSwitchStore } from '../stores/useKillSwitchStore'
+import { SelectMenu } from './SelectMenu'
+import { Tooltip } from './Tooltip'
 
 /**
  * HALT ALL - must always be visible in the header.
@@ -110,18 +112,19 @@ export function KillSwitch() {
           <RotateCcw size={12} /> {pending ? 'Resuming...' : 'Resume All'}
         </button>
         {activeDeployments.length > 0 && (
-          <select
-            className="input text-xs w-56"
+          <SelectMenu
+            className="w-56 text-xs"
             value={strategyId}
-            onChange={e => setStrategyId(e.target.value)}
-          >
-            <option value="">— Resume a strategy —</option>
-            {activeDeployments.map(d => (
-              <option key={d.id} value={d.strategy_id}>
-                {strategyName(d.strategy_id)} · {d.mode.toUpperCase()}
-              </option>
-            ))}
-          </select>
+            onChange={setStrategyId}
+            placeholder="— Resume a strategy —"
+            options={[
+              { value: '', label: '— Resume a strategy —' },
+              ...activeDeployments.map(d => ({
+                value: d.strategy_id,
+                label: `${strategyName(d.strategy_id)} · ${d.mode.toUpperCase()}`,
+              })),
+            ]}
+          />
         )}
         <button
           className="btn-ghost text-xs flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -136,15 +139,16 @@ export function KillSwitch() {
 
   return (
     <>
+      <Tooltip content="Halt All — blocks new orders on every account and strategy" side="bottom">
       <button
         className="btn flex items-center gap-2 bg-red-900 hover:bg-red-700 text-red-200 disabled:opacity-50 disabled:cursor-not-allowed"
         onClick={openConfirm}
         disabled={pending}
-        title="Halt All — blocks new orders on every account and strategy"
       >
         <Power size={14} />
         {pending ? 'Halting...' : 'HALT ALL'}
       </button>
+      </Tooltip>
 
       {/* Kill switch confirmation modal */}
       {showConfirm && (
@@ -167,10 +171,14 @@ export function KillSwitch() {
             <div className="space-y-3">
               <div>
                 <label className="label">Scope</label>
-                <select className="input w-full" value={scope} onChange={e => setScope(e.target.value as 'global' | 'strategy')}>
-                  <option value="global">Global (all trading)</option>
-                  <option value="strategy">Strategy only</option>
-                </select>
+                <SelectMenu
+                  value={scope}
+                  onChange={v => setScope(v as 'global' | 'strategy')}
+                  options={[
+                    { value: 'global', label: 'Global (all trading)' },
+                    { value: 'strategy', label: 'Strategy only' },
+                  ]}
+                />
               </div>
               {scope === 'strategy' && (
                 <div>
@@ -178,18 +186,18 @@ export function KillSwitch() {
                   {activeDeployments.length === 0 ? (
                     <div className="text-xs text-gray-500 py-2">No active deployments found.</div>
                   ) : (
-                    <select
-                      className="input w-full"
+                    <SelectMenu
                       value={strategyId}
-                      onChange={e => setStrategyId(e.target.value)}
-                    >
-                      <option value="">— Select a strategy —</option>
-                      {activeDeployments.map(d => (
-                        <option key={d.id} value={d.strategy_id}>
-                          {strategyName(d.strategy_id)} · {d.mode.toUpperCase()} · {d.status}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={setStrategyId}
+                      placeholder="— Select a strategy —"
+                      options={[
+                        { value: '', label: '— Select a strategy —' },
+                        ...activeDeployments.map(d => ({
+                          value: d.strategy_id,
+                          label: `${strategyName(d.strategy_id)} · ${d.mode.toUpperCase()} · ${d.status}`,
+                        })),
+                      ]}
+                    />
                   )}
                 </div>
               )}

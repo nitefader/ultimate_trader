@@ -86,8 +86,11 @@ def compute_full_metrics(
 
     # ── Trade stats ────────────────────────────────────────────────────────────
     if trades:
-        # Guard against None net_pnl values (open trades, incomplete data)
-        trade_pnls = [float(t.get("net_pnl") or 0) for t in trades]
+        # Only include closed trades with a committed net_pnl.
+        # Trades with net_pnl=None are open or incomplete — treating them as 0
+        # would inflate trade count and deflate win rate / profit factor.
+        closed_trades = [t for t in trades if t.get("net_pnl") is not None]
+        trade_pnls = [float(t["net_pnl"]) for t in closed_trades]
         winners = [p for p in trade_pnls if p > 0]
         losers = [p for p in trade_pnls if p < 0]
 
@@ -112,14 +115,16 @@ def compute_full_metrics(
             return float(net_pnl) / cost_basis * 100.0
 
         winner_return_pcts = [
-            r for t in trades if (t.get("net_pnl") or 0) > 0 for r in [_trade_return_pct(t)] if r is not None
+            r for t in closed_trades if float(t["net_pnl"]) > 0 for r in [_trade_return_pct(t)] if r is not None
         ]
         loser_return_pcts = [
-            r for t in trades if (t.get("net_pnl") or 0) < 0 for r in [_trade_return_pct(t)] if r is not None
+            r for t in closed_trades if float(t["net_pnl"]) < 0 for r in [_trade_return_pct(t)] if r is not None
         ]
         avg_win_pct = float(np.mean(winner_return_pcts)) if winner_return_pcts else 0.0
         avg_loss_pct = abs(float(np.mean(loser_return_pcts))) if loser_return_pcts else 0.0
 
+        # Expectancy is dollar-denominated (avg_win + avg_loss are both $ P&L).
+        # avg_win is positive, avg_loss is negative. Formula: E = W%*avg_win + L%*avg_loss.
         expectancy = (win_rate / 100 * avg_win) + ((1 - win_rate / 100) * avg_loss)
 
         gross_profit = sum(winners)
@@ -128,7 +133,7 @@ def compute_full_metrics(
 
         # Hold durations
         hold_durations = []
-        for t in trades:
+        for t in closed_trades:
             et = t.get("entry_time")
             xt = t.get("exit_time")
             if et and xt:
@@ -139,20 +144,20 @@ def compute_full_metrics(
                     pass
         avg_hold = float(np.mean(hold_durations)) if hold_durations else 0.0
 
-        long_trades = sum(1 for t in trades if t.get("direction") == "long")
-        short_trades = sum(1 for t in trades if t.get("direction") == "short")
+        long_trades = sum(1 for t in closed_trades if t.get("direction") == "long")
+        short_trades = sum(1 for t in closed_trades if t.get("direction") == "short")
 
         # Exit reason breakdown
         exit_reasons: dict[str, int] = {}
-        for t in trades:
+        for t in closed_trades:
             r = t.get("exit_reason", "unknown")
             exit_reasons[r] = exit_reasons.get(r, 0) + 1
 
-        # Regime breakdown
+        # Regime breakdown — P&L attribution by regime at entry
         regime_pnl: dict[str, float] = {}
-        for t in trades:
+        for t in closed_trades:
             r = t.get("regime_at_entry", "unknown") or "unknown"
-            regime_pnl[r] = regime_pnl.get(r, 0.0) + (t.get("net_pnl") or 0.0)
+            regime_pnl[r] = regime_pnl.get(r, 0.0) + float(t["net_pnl"])
 
     else:
         total_trades = win_count = loss_count = 0
@@ -161,7 +166,8 @@ def compute_full_metrics(
         exit_reasons = {}
         regime_pnl = {}
 
-    no_trades = len(trades) == 0
+    # no_trades: True if there were no closed trades with confirmed P&L
+    no_trades = len(trades) == 0 or (trades and all(t.get("net_pnl") is None for t in trades))
 
     # ── Monthly returns ────────────────────────────────────────────────────────
     monthly_returns: dict[str, float] = {}
@@ -170,7 +176,7 @@ def compute_full_metrics(
             eq_df["date"] = pd.to_datetime(eq_df["date"])
             eq_df = eq_df.set_index("date")
             monthly = eq_df["equity"].resample("ME").last()
-            monthly_pct = monthly.pct_change().dropna() * 100
+            monthly_pct = monthly.pct_change(fill_method=None).dropna() * 100
             for ts, val in monthly_pct.items():
                 monthly_returns[ts.strftime("%Y-%m")] = round(float(val), 2)
         except Exception:

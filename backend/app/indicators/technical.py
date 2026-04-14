@@ -204,6 +204,113 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── Hull Moving Average ───────────────────────────────────────────────────────
+
+def hull_ma(close: pd.Series, period: int = 20) -> pd.Series:
+    """
+    Hull Moving Average — reduces lag vs SMA/EMA.
+    HMA(n) = WMA(2 × WMA(n/2) − WMA(n), sqrt(n))
+    """
+    half = max(period // 2, 1)
+    sqrt_n = max(int(np.sqrt(period)), 1)
+    wma_half = wma(close, half)
+    wma_full = wma(close, period)
+    raw = 2 * wma_half - wma_full
+    return wma(raw, sqrt_n)
+
+
+# ── Donchian Channel ──────────────────────────────────────────────────────────
+
+def donchian_channel(high: pd.Series, low: pd.Series, period: int = 20) -> pd.DataFrame:
+    """
+    Donchian Channel — highest high and lowest low over the period.
+    Upper: rolling max of high. Lower: rolling min of low. Mid: average.
+    Uses shift(1) so the current bar does not contribute (no lookahead).
+    """
+    upper = high.shift(1).rolling(period).max()
+    lower = low.shift(1).rolling(period).min()
+    mid   = (upper + lower) / 2
+    return pd.DataFrame({"dc_upper": upper, "dc_mid": mid, "dc_lower": lower})
+
+
+# ── Ichimoku Cloud ────────────────────────────────────────────────────────────
+
+def ichimoku(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    tenkan_period: int = 9,
+    kijun_period: int = 26,
+    senkou_b_period: int = 52,
+    displacement: int = 26,
+) -> pd.DataFrame:
+    """
+    Ichimoku Kinko Hyo components.
+
+    Tenkan-sen  (Conversion):  (high_9  + low_9)  / 2
+    Kijun-sen   (Base):        (high_26 + low_26) / 2
+    Senkou A    (Leading A):   (Tenkan + Kijun) / 2, shifted forward
+    Senkou B    (Leading B):   (high_52 + low_52) / 2, shifted forward
+    Chikou      (Lagging):     close shifted back by displacement
+
+    Note: Senkou lines are shifted *forward* for display. In a live system
+    the forward values are projections, not lookahead — they use past data
+    shifted into the future index positions.
+    """
+    tenkan = (high.rolling(tenkan_period).max() + low.rolling(tenkan_period).min()) / 2
+    kijun  = (high.rolling(kijun_period).max()  + low.rolling(kijun_period).min())  / 2
+
+    senkou_a = ((tenkan + kijun) / 2).shift(displacement)
+    senkou_b = ((high.rolling(senkou_b_period).max() + low.rolling(senkou_b_period).min()) / 2).shift(displacement)
+    chikou   = close.shift(-displacement)
+
+    return pd.DataFrame({
+        "ichi_tenkan":  tenkan,
+        "ichi_kijun":   kijun,
+        "ichi_senkou_a": senkou_a,
+        "ichi_senkou_b": senkou_b,
+        "ichi_chikou":  chikou,
+    })
+
+
+# ── Fractals ──────────────────────────────────────────────────────────────────
+
+def fractals(high: pd.Series, low: pd.Series, n: int = 2) -> pd.DataFrame:
+    """
+    Williams Fractals — causal detection using only confirmed past bars.
+
+    A fractal high at bar i is confirmed when bar i is the highest high
+    in the window [i-n … i] AND the next n bars (i+1 … i+n) are all lower.
+    To avoid lookahead we detect fractals on bar i+n (the confirming bar),
+    referencing back to the peak bar at i.
+
+    Returns boolean Series:
+        fractal_high: True at the confirming bar of a fractal high
+        fractal_low:  True at the confirming bar of a fractal low
+    """
+    n = max(n, 1)
+    size = len(high)
+    frac_high = np.zeros(size, dtype=bool)
+    frac_low  = np.zeros(size, dtype=bool)
+
+    highs = high.values
+    lows  = low.values
+
+    for i in range(n, size - n):
+        window_h = highs[i - n: i + n + 1]
+        if highs[i] == window_h.max() and np.sum(window_h == highs[i]) == 1:
+            frac_high[i + n] = True   # mark at confirming bar
+
+        window_l = lows[i - n: i + n + 1]
+        if lows[i] == window_l.min() and np.sum(window_l == lows[i]) == 1:
+            frac_low[i + n] = True
+
+    return pd.DataFrame(
+        {"fractal_high": frac_high, "fractal_low": frac_low},
+        index=high.index,
+    )
+
+
 def vwap_session(df: pd.DataFrame) -> pd.Series:
     """Intraday VWAP — resets each day. Requires DatetimeIndex."""
     typical = (df["high"] + df["low"] + df["close"]) / 3

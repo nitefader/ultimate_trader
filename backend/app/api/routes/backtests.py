@@ -18,6 +18,7 @@ from app.database import get_db
 from app.data.providers.yfinance_provider import TIMEFRAME_MAP
 from app.data.providers.alpaca_provider import TIMEFRAME_MAP as ALPACA_TIMEFRAME_MAP
 from app.models.run import BacktestRun, RunMetrics
+from app.models.validation_evidence import ValidationEvidence
 from app.models.strategy import StrategyVersion
 from app.models.trade import Trade
 from app.services.backtest_service import launch_backtest, recommend_data_provider
@@ -48,6 +49,14 @@ class BacktestLaunchRequest(BaseModel):
         "warmup_bars": 100,
         "max_folds": 24,
     })
+    cpcv: dict[str, Any] = Field(default_factory=lambda: {
+        "enabled": True,
+        "n_paths": 6,
+        "k_test_paths": 2,
+        "embargo_bars": 5,
+        "max_combos": 30,
+        "min_bars_path": 30,
+    })
 
     @field_validator("timeframe")
     @classmethod
@@ -72,6 +81,20 @@ class BacktestLaunchRequest(BaseModel):
             test_months = int(wf.get("test_window_months", 3))
             if train_months <= 0 or test_months <= 0:
                 raise ValueError("walk_forward train/test windows must be positive")
+
+        cpcv = self.cpcv or {}
+        if cpcv.get("enabled", True):
+            n_paths = int(cpcv.get("n_paths", 6))
+            k_test_paths = int(cpcv.get("k_test_paths", 2))
+            embargo_bars = int(cpcv.get("embargo_bars", 5))
+            min_bars_path = int(cpcv.get("min_bars_path", 30))
+            max_combos = int(cpcv.get("max_combos", 30))
+            if n_paths <= 1:
+                raise ValueError("cpcv n_paths must be greater than 1")
+            if k_test_paths <= 0 or k_test_paths >= n_paths:
+                raise ValueError("cpcv k_test_paths must be positive and less than n_paths")
+            if embargo_bars < 0 or min_bars_path <= 0 or max_combos <= 0:
+                raise ValueError("cpcv embargo_bars must be >= 0 and min_bars_path/max_combos must be positive")
         return self
 
 
@@ -81,6 +104,29 @@ class ProviderRecommendationRequest(BaseModel):
     start_date: str = "2018-01-01"
     end_date: str = datetime.utcnow().strftime("%Y-%m-%d")
     has_alpaca_credentials: bool = False
+
+
+class ParamOptimizeRequest(BaseModel):
+    strategy_version_id: str
+    symbols: list[str] = Field(default_factory=lambda: ["SPY"])
+    timeframe: str = "1d"
+    start_date: str = "2020-01-01"
+    end_date: str = datetime.utcnow().strftime("%Y-%m-%d")
+    initial_capital: float = Field(default=100_000, gt=0)
+    data_provider: str = "yfinance"
+    alpaca_api_key: str | None = None
+    alpaca_secret_key: str | None = None
+    param_grid: dict[str, list[Any]] = Field(
+        ...,
+        description=(
+            "Map of dot-path → list of candidate values. "
+            'Example: {"stop_loss.multiplier": [1.5, 2.0, 2.5]}'
+        ),
+    )
+    objective_metric: str = "sharpe_ratio"
+    max_combinations: int = Field(default=64, ge=1, le=512)
+    commission_per_share: float = Field(default=0.005, ge=0)
+    slippage_ticks: int = Field(default=1, ge=0)
 
 
 class CompareRunsRequest(BaseModel):
@@ -205,6 +251,7 @@ async def launch(body: BacktestLaunchRequest, background_tasks: BackgroundTasks,
         "alpaca_secret_key": body.alpaca_secret_key or "",
         "parameters": body.parameters,
         "walk_forward": body.walk_forward,
+        "cpcv": body.cpcv,
     }
 
     try:
@@ -232,7 +279,7 @@ async def list_runs(
     # RunHistory and Dashboard use metrics (return, sharpe, drawdown, trades) from the list.
     q = (
         select(BacktestRun)
-        .options(selectinload(BacktestRun.metrics))
+        .options(selectinload(BacktestRun.metrics), selectinload(BacktestRun.validation_evidence))
         .order_by(BacktestRun.created_at.desc())
         .limit(limit)
     )
@@ -259,6 +306,7 @@ def _fmt_run(r: BacktestRun) -> dict:
         "completed_at": r.completed_at.isoformat() if r.completed_at else None,
         "error_message": r.error_message,
         "metrics": None,
+        "validation_evidence": None,
     }
     if r.metrics:
         m = r.metrics
@@ -289,6 +337,21 @@ def _fmt_run(r: BacktestRun) -> dict:
             "walk_forward": m.walk_forward,
             "no_trades": m.total_trades == 0,
         }
+    if r.validation_evidence:
+        ve = r.validation_evidence
+        base["validation_evidence"] = {
+            "method": ve.method,
+            "cpcv": ve.cpcv,
+            "walk_forward": ve.walk_forward,
+            "anti_bias": ve.anti_bias,
+            "regime_performance": ve.regime_performance,
+            "per_symbol_oos_sharpe": ve.per_symbol_oos_sharpe,
+            "cost_sensitivity_curve": ve.cost_sensitivity_curve,
+            "warnings": ve.warnings,
+            "is_oos_degradation_ratio": ve.is_oos_degradation_ratio,
+            "stability_score": ve.stability_score,
+            "created_at": ve.created_at.isoformat() if ve.created_at else None,
+        }
     return base
 
 
@@ -296,7 +359,7 @@ def _fmt_run(r: BacktestRun) -> dict:
 async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(BacktestRun)
-        .options(selectinload(BacktestRun.metrics))
+        .options(selectinload(BacktestRun.metrics), selectinload(BacktestRun.validation_evidence))
         .where(BacktestRun.id == run_id)
     )
     run = result.scalar_one_or_none()
@@ -349,7 +412,7 @@ async def update_run(run_id: str, body: BacktestRunUpdateRequest, db: AsyncSessi
     await db.commit()
     result = await db.execute(
         select(BacktestRun)
-        .options(selectinload(BacktestRun.metrics))
+        .options(selectinload(BacktestRun.metrics), selectinload(BacktestRun.validation_evidence))
         .where(BacktestRun.id == run_id)
     )
     updated = result.scalar_one()
@@ -405,6 +468,7 @@ async def compare_runs(run_id: str, body: CompareRunsRequest, db: AsyncSession =
     for rid in [run_id, other_run_id]:
         r = await db.execute(
             select(BacktestRun).options(selectinload(BacktestRun.metrics)).where(BacktestRun.id == rid)
+            .options(selectinload(BacktestRun.validation_evidence))
         )
         run = r.scalar_one_or_none()
         if not run:
@@ -412,20 +476,27 @@ async def compare_runs(run_id: str, body: CompareRunsRequest, db: AsyncSession =
         runs.append(run)
 
     def _anti_bias_passed(run: BacktestRun) -> bool | None:
-        wf = run.metrics.walk_forward if run.metrics else None
-        anti = wf.get("anti_bias") if isinstance(wf, dict) else None
+        anti = run.validation_evidence.anti_bias if run.validation_evidence else None
+        if not isinstance(anti, dict):
+            wf = run.metrics.walk_forward if run.metrics else None
+            anti = wf.get("anti_bias") if isinstance(wf, dict) else None
         if not isinstance(anti, dict):
             return None
-        return bool(
-            anti.get("leakage_checks_passed")
-            and anti.get("parameter_locking_passed")
-            and anti.get("causal_indicator_checks_passed")
-        )
+        required_checks = [
+            anti.get("leakage_checks_passed"),
+            anti.get("parameter_locking_passed"),
+            anti.get("causal_indicator_checks_passed"),
+        ]
+        if "cpcv_primary_guard_passed" in anti:
+            required_checks.append(anti.get("cpcv_primary_guard_passed"))
+        return bool(all(required_checks))
 
     def fmt(run: BacktestRun) -> dict:
         m = run.metrics
-        wf = m.walk_forward if m else None
+        wf = run.validation_evidence.walk_forward if run.validation_evidence else (m.walk_forward if m else None)
         agg_oos = wf.get("aggregate_oos") if isinstance(wf, dict) else None
+        cpcv = run.validation_evidence.cpcv if run.validation_evidence else (wf.get("cpcv") if isinstance(wf, dict) else None)
+        cpcv_agg = cpcv.get("aggregate") if isinstance(cpcv, dict) else None
         return {
             "run_id": run.id,
             "status": run.status,
@@ -442,6 +513,8 @@ async def compare_runs(run_id: str, body: CompareRunsRequest, db: AsyncSession =
             "total_trades": m.total_trades if m else None,
             "oos_total_return_pct": agg_oos.get("oos_total_return_pct") if isinstance(agg_oos, dict) else None,
             "avg_oos_return_pct": agg_oos.get("avg_oos_return_pct") if isinstance(agg_oos, dict) else None,
+            "cpcv_median_oos_sharpe": cpcv_agg.get("median_oos_sharpe") if isinstance(cpcv_agg, dict) else None,
+            "cpcv_passed": cpcv_agg.get("pass_primary_guard") if isinstance(cpcv_agg, dict) else None,
             "anti_bias_passed": _anti_bias_passed(run),
         }
 
@@ -465,6 +538,57 @@ async def compare_runs(run_id: str, body: CompareRunsRequest, db: AsyncSession =
         "win_rate_pct": _delta("win_rate_pct"),
         "total_trades": _delta("total_trades"),
         "oos_total_return_pct": _delta("oos_total_return_pct"),
+        "cpcv_median_oos_sharpe": _delta("cpcv_median_oos_sharpe"),
     }
 
     return {"left_run": left, "right_run": right, "deltas": deltas}
+
+
+# ── Parameter optimization ────────────────────────────────────────────────────
+
+@router.post("/optimize")
+async def optimize_params(body: ParamOptimizeRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Grid-search parameter optimization for a strategy version.
+
+    Runs the backtest engine over all combinations in param_grid (capped at
+    max_combinations) and returns ranked results by objective_metric.
+
+    This is strategy-parameter optimization (EMA periods, multipliers, etc.).
+    For portfolio-weight optimization see /api/v1/optimizations.
+    """
+    from app.services.param_optimizer import run_param_optimization
+
+    sv = await db.get(StrategyVersion, body.strategy_version_id)
+    if not sv:
+        raise HTTPException(status_code=404, detail="StrategyVersion not found")
+
+    if not body.param_grid:
+        raise HTTPException(status_code=422, detail="param_grid must not be empty")
+
+    run_config = {
+        "symbols": body.symbols,
+        "timeframe": body.timeframe,
+        "start_date": body.start_date,
+        "end_date": body.end_date,
+        "initial_capital": body.initial_capital,
+        "data_provider": body.data_provider,
+        "alpaca_api_key": body.alpaca_api_key or "",
+        "alpaca_secret_key": body.alpaca_secret_key or "",
+        "commission_per_share": body.commission_per_share,
+        "slippage_ticks": body.slippage_ticks,
+    }
+
+    try:
+        result = await run_param_optimization(
+            strategy_config=sv.config,
+            run_config=run_config,
+            param_grid=body.param_grid,
+            objective_metric=body.objective_metric,
+            max_combinations=body.max_combinations,
+        )
+    except Exception as exc:
+        logger.exception("param optimization failed for sv %s: %s", body.strategy_version_id, exc)
+        raise HTTPException(status_code=500, detail="Parameter optimization failed. Check server logs.")
+
+    return result

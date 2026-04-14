@@ -5,7 +5,10 @@ import type { DeploymentTradeRow } from '../api/accounts'
 import { mlApi } from '../api/ml'
 import { strategiesApi } from '../api/strategies'
 import { ModeIndicator } from '../components/ModeIndicator'
+import { usePollingGate } from '../hooks/usePollingGate'
 import { ChevronDown, ChevronRight } from 'lucide-react'
+import { SelectMenu } from '../components/SelectMenu'
+import { Tooltip } from '../components/Tooltip'
 import type { Deployment, Account, Strategy } from '../types'
 import clsx from 'clsx'
 
@@ -82,13 +85,14 @@ function DeploymentRow({ dep, onStart, onPause, onStop, onViewTrades, strategyNa
               Stop
             </button>
           )}
+          <Tooltip content="View paper trades for this deployment">
           <button
             className={clsx('text-xs py-0.5 px-2 border rounded transition-colors', isSelected ? 'border-sky-600 text-sky-400 bg-sky-900/20' : 'border-gray-700 text-gray-400 hover:border-gray-500')}
             onClick={() => onViewTrades(dep.id)}
-            title="View paper trades for this deployment"
           >
             {isSelected ? <ChevronDown size={12} className="inline" /> : <ChevronRight size={12} className="inline" />} Trades
           </button>
+          </Tooltip>
         </div>
       </td>
     </tr>
@@ -96,6 +100,7 @@ function DeploymentRow({ dep, onStart, onPause, onStop, onViewTrades, strategyNa
 }
 
 export function DeploymentManager() {
+  const pausePolling = usePollingGate()
   const qc = useQueryClient()
   const [showLivePromotion, setShowLivePromotion] = useState(false)
   const [selectedPaperDepId, setSelectedPaperDepId] = useState('')
@@ -110,7 +115,7 @@ export function DeploymentManager() {
   const { data: deployments = [] } = useQuery({
     queryKey: ['deployments'],
     queryFn: () => deploymentsApi.list(),
-    refetchInterval: 15_000,
+    refetchInterval: pausePolling ? false : 15_000,
   })
 
   const { data: accounts = [] } = useQuery({
@@ -133,7 +138,7 @@ export function DeploymentManager() {
     queryKey: ['deployment-trades', tradesDepId],
     queryFn: () => deploymentsApi.getTrades(tradesDepId!),
     enabled: !!tradesDepId,
-    refetchInterval: 60_000,
+    refetchInterval: pausePolling ? false : 60_000,
   })
 
   const pauseMutation = useMutation({
@@ -343,23 +348,30 @@ export function DeploymentManager() {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="label">Paper Deployment Source</label>
-              <select className="input w-full" value={selectedPaperDepId} onChange={e => setSelectedPaperDepId(e.target.value)}>
-                <option value="">— Select paper deployment —</option>
-                {paperDeployments.map(d => (
-                  <option key={d.id} value={d.id}>
-                    {d.id.slice(0, 8)} (status: {d.status})
-                  </option>
-                ))}
-              </select>
+              <SelectMenu
+                value={selectedPaperDepId}
+                onChange={setSelectedPaperDepId}
+                placeholder="— Select paper deployment —"
+                options={[
+                  { value: '', label: '— Select paper deployment —' },
+                  ...paperDeployments.map(d => ({
+                    value: d.id,
+                    label: `${d.id.slice(0, 8)} (status: ${d.status})`,
+                  })),
+                ]}
+              />
             </div>
             <div>
               <label className="label">Live Account</label>
-              <select className="input w-full" value={selectedLiveAccountId} onChange={e => setSelectedLiveAccountId(e.target.value)}>
-                <option value="">— Select live account —</option>
-                {liveAccounts.map(a => (
-                  <option key={a.id} value={a.id}>{a.name}</option>
-                ))}
-              </select>
+              <SelectMenu
+                value={selectedLiveAccountId}
+                onChange={setSelectedLiveAccountId}
+                placeholder="— Select live account —"
+                options={[
+                  { value: '', label: '— Select live account —' },
+                  ...liveAccounts.map(a => ({ value: a.id, label: a.name })),
+                ]}
+              />
               {liveAccounts.length === 0 && (
                 <div className="text-xs text-gray-500 mt-1">No live accounts configured</div>
               )}

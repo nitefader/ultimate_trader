@@ -23,9 +23,13 @@ from app.api.routes.control import router as control_router
 from app.api.routes.events import router as events_router
 from app.api.routes.ml import router as ml_router
 from app.api.routes.monitor import router as monitor_router
+from app.api.routes.optimizations import router as optimizations_router
+from app.api.routes.universes import router as universes_router
 from app.api.routes.bi import router as bi_router
 from app.api.routes.backlog import router as backlog_router
 from app.api.routes.services import router as services_router
+from app.api.routes.programs import router as programs_router
+from app.api.routes.watchlists import router as watchlists_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -47,6 +51,13 @@ logging.basicConfig(
     stream=sys.stdout,
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
 )
+
+# SQLAlchemy engine/pool loggers are extremely noisy at DEBUG level (one line
+# per cursor operation). Suppress them unless SQL_ECHO is explicitly enabled.
+if not settings.SQL_ECHO:
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine.Engine").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
@@ -71,6 +82,38 @@ async def _run_schema_migrations() -> None:
         ("program_backlog_items", "order_index", "INTEGER DEFAULT 0"),
         ("program_backlog_items", "blocked_by_ids", "TEXT DEFAULT '[]'"),
         ("accounts", "data_service_id", "TEXT"),
+        ("accounts", "is_killed", "BOOLEAN DEFAULT 0"),
+        ("accounts", "kill_reason", "TEXT"),
+        ("accounts", "account_mode", "TEXT DEFAULT 'margin'"),
+        ("strategy_versions", "duration_mode", "TEXT DEFAULT 'swing'"),
+        ("watchlist_memberships", "candidate_since", "DATETIME"),
+        ("watchlist_memberships", "active_since", "DATETIME"),
+        ("watchlist_memberships", "pending_removal_since", "DATETIME"),
+        ("watchlist_memberships", "inactive_until", "DATETIME"),
+        ("watchlist_memberships", "suspended_at", "DATETIME"),
+        ("optimization_profiles", "strategy_version_id", "TEXT"),
+        ("optimization_profiles", "validation_evidence_id", "TEXT"),
+        ("optimization_profiles", "symbol_universe_snapshot_id", "TEXT"),
+        ("optimization_profiles", "engine_version", "TEXT DEFAULT '1'"),
+        ("optimization_profiles", "status", "TEXT DEFAULT 'draft'"),
+        ("optimization_profiles", "objective_config", "TEXT DEFAULT '{}'"),
+        ("optimization_profiles", "covariance_model", "TEXT DEFAULT '{}'"),
+        ("optimization_profiles", "constraints", "TEXT DEFAULT '{}'"),
+        ("optimization_profiles", "notes", "TEXT"),
+        ("weight_profiles", "parent_weight_profile_id", "TEXT"),
+        ("weight_profiles", "engine_version", "TEXT DEFAULT '1'"),
+        ("weight_profiles", "evidence_id", "TEXT"),
+        ("weight_profiles", "symbol_universe_snapshot_id", "TEXT"),
+        ("weight_profiles", "metadata_version_id", "TEXT"),
+        ("weight_profiles", "objective_used", "TEXT DEFAULT '{}'"),
+        ("weight_profiles", "constraints_used", "TEXT DEFAULT '{}'"),
+        ("weight_profiles", "covariance_model_used", "TEXT DEFAULT '{}'"),
+        ("weight_profiles", "input_universe_snapshot", "TEXT DEFAULT '[]'"),
+        ("weight_profiles", "output_weights", "TEXT DEFAULT '{}'"),
+        ("weight_profiles", "explain_output", "TEXT DEFAULT '{}'"),
+        ("market_metadata_symbols", "adv_usd_30d", "REAL"),
+        ("market_metadata_symbols", "spread_proxy_bps_30d", "REAL"),
+        ("market_metadata_symbols", "regime_tag", "TEXT DEFAULT 'unknown'"),
     ]
 
     async with engine.begin() as conn:
@@ -92,11 +135,15 @@ async def lifespan(app: FastAPI):
     await seed_default_data()
     await _restore_kill_switch_state()
     from app.services.paper_broker import start_paper_broker_loop
+    from app.services.watchlist_scheduler import start_watchlist_scheduler
     start_paper_broker_loop()
+    start_watchlist_scheduler()
     yield
     # Shutdown (graceful)
     from app.services.paper_broker import stop_paper_broker_loop
+    from app.services.watchlist_scheduler import stop_watchlist_scheduler
     stop_paper_broker_loop()
+    stop_watchlist_scheduler()
 
 
 async def _restore_kill_switch_state():
@@ -116,18 +163,21 @@ async def _restore_kill_switch_state():
 
 
 async def seed_default_data():
-    """Create default paper account and seed sample strategies on first run."""
+    """Create default paper account, seed sample strategies, and seed watchlists on first run."""
     from app.database import AsyncSessionLocal
     from app.models.account import Account
     from app.models.strategy import Strategy, StrategyVersion
+    from app.models.watchlist import Watchlist, WatchlistMembership
     from sqlalchemy import select
     import uuid
     import os
     import glob
     import yaml
-    
+
+    _VALID_DURATION_MODES = {"day", "swing", "position"}
+
     async with AsyncSessionLocal() as db:
-        # Seed default paper account
+        # ── Default paper account ────────────────────────────────────────────
         result = await db.execute(select(Account).limit(1))
         if not result.scalar_one_or_none():
             paper_account = Account(
@@ -143,48 +193,111 @@ async def seed_default_data():
             )
             db.add(paper_account)
             await db.commit()
-        
-        # Seed sample strategies from YAML configs
+
+        # ── Sample strategies from YAML configs ──────────────────────────────
         result = await db.execute(select(Strategy.name))
         existing_names = {row[0] for row in result.all()}
-        
+
         configs_dir = os.path.join(os.path.dirname(__file__), '..', 'configs', 'strategies')
         if os.path.exists(configs_dir):
             config_paths = sorted(glob.glob(os.path.join(configs_dir, '*.yaml')))
             for path in config_paths:
                 try:
-                    with open(path) as f:
-                        config = yaml.safe_load(f)
-                    if not config:
+                    with open(path, encoding='utf-8') as f:
+                        raw = yaml.safe_load(f)
+                    if not raw:
                         continue
-                    
-                    name = config.get('name', os.path.basename(path))
+
+                    name = raw.get('name', os.path.basename(path))
                     if name in existing_names:
                         continue
-                    
+
+                    # Pull top-level metadata fields out before storing config
+                    duration_mode = raw.get('duration_mode', 'swing')
+                    if duration_mode not in _VALID_DURATION_MODES:
+                        duration_mode = 'swing'
+
+                    tags = raw.get('tags', [])
+                    if not isinstance(tags, list):
+                        tags = []
+
                     strategy = Strategy(
                         id=str(uuid.uuid4()),
                         name=name,
-                        description=config.get('description', '').strip(),
-                        category=config.get('category', 'custom'),
+                        description=(raw.get('description') or '').strip(),
+                        category=raw.get('category', 'custom'),
                         status='active',
+                        tags=tags,
                     )
                     db.add(strategy)
-                    
+
                     version = StrategyVersion(
                         id=str(uuid.uuid4()),
                         strategy_id=strategy.id,
                         version=1,
-                        config=config,
+                        config=raw,
                         notes='Sample strategy — loaded from YAML',
+                        duration_mode=duration_mode,
                         promotion_status='backtest_only',
                     )
                     db.add(version)
                     existing_names.add(name)
-                    logger.info(f"Seeded strategy: {name}")
+                    logger.info(f"Seeded strategy: {name} (duration_mode={duration_mode})")
                 except Exception as exc:
                     logger.warning(f"Failed to seed strategy from {path}: {exc}")
-            
+
+            await db.commit()
+
+        # ── Watchlists from YAML configs ──────────────────────────────────────
+        result = await db.execute(select(Watchlist.name))
+        existing_watchlists = {row[0] for row in result.all()}
+
+        watchlist_dir = os.path.join(os.path.dirname(__file__), '..', 'configs', 'watchlists')
+        if os.path.exists(watchlist_dir):
+            wl_paths = sorted(glob.glob(os.path.join(watchlist_dir, '*.yaml')))
+            for path in wl_paths:
+                try:
+                    with open(path, encoding='utf-8') as f:
+                        wl_raw = yaml.safe_load(f)
+                    if not wl_raw:
+                        continue
+
+                    wl_name = wl_raw.get('name', os.path.basename(path))
+                    if wl_name in existing_watchlists:
+                        continue
+
+                    watchlist = Watchlist(
+                        id=str(uuid.uuid4()),
+                        name=wl_name,
+                        watchlist_type=wl_raw.get('watchlist_type', 'manual'),
+                        refresh_cron=wl_raw.get('refresh_cron'),
+                        min_refresh_interval_minutes=wl_raw.get('min_refresh_interval_minutes', 5),
+                        config=wl_raw.get('config', {}),
+                    )
+                    db.add(watchlist)
+
+                    symbols = wl_raw.get('symbols', [])
+                    for sym in symbols:
+                        sym = str(sym).strip().upper()
+                        if not sym:
+                            continue
+                        import datetime as _dt
+                        now = _dt.datetime.now(_dt.timezone.utc)
+                        membership = WatchlistMembership(
+                            id=str(uuid.uuid4()),
+                            watchlist_id=watchlist.id,
+                            symbol=sym,
+                            state='active',
+                            resolved_at=now,
+                            active_since=now,
+                        )
+                        db.add(membership)
+
+                    existing_watchlists.add(wl_name)
+                    logger.info(f"Seeded watchlist: {wl_name} ({len(symbols)} symbols)")
+                except Exception as exc:
+                    logger.warning(f"Failed to seed watchlist from {path}: {exc}")
+
             await db.commit()
 
 
@@ -215,9 +328,13 @@ app.include_router(control_router, prefix="/api/v1")
 app.include_router(events_router, prefix="/api/v1")
 app.include_router(ml_router, prefix="/api/v1")
 app.include_router(monitor_router, prefix="/api/v1")
+app.include_router(optimizations_router, prefix="/api/v1")
+app.include_router(universes_router, prefix="/api/v1")
 app.include_router(bi_router, prefix="/api/v1")
 app.include_router(backlog_router, prefix="/api/v1")
 app.include_router(services_router, prefix="/api/v1")
+app.include_router(programs_router, prefix="/api/v1")
+app.include_router(watchlists_router, prefix="/api/v1")
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

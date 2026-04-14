@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     APP_NAME: str = "UltraTrader 2026"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
+    # Set SQL_ECHO=true to enable per-statement SQLAlchemy logging (very noisy).
+    # Intentionally separate from DEBUG so you can run DEBUG without log flooding.
+    SQL_ECHO: bool = False
     SECRET_KEY: str = "change-me-in-production-use-a-long-random-string"
     ENV: Literal["dev", "test", "prod"] = "dev"
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -14,12 +15,17 @@ from app.config import get_settings
 settings = get_settings()
 
 _connect_args = {}
-if "sqlite" in settings.DATABASE_URL:
-    _connect_args = {"check_same_thread": False}
+_is_sqlite = "sqlite" in settings.DATABASE_URL
+
+if _is_sqlite:
+    _connect_args = {
+        "check_same_thread": False,
+        "timeout": 30,  # seconds before sqlite3 raises OperationalError: database is locked
+    }
 
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=settings.DEBUG,
+    echo=settings.SQL_ECHO,
     connect_args=_connect_args,
 )
 
@@ -47,8 +53,14 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def create_all_tables() -> None:
-    """Create all tables — used on startup."""
+    """Create all tables and configure DB pragmas — used on startup."""
     # Import all models so they register with Base.metadata
     import app.models  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if _is_sqlite:
+            # WAL mode: allows concurrent reads during long write transactions
+            # (prevents "database is locked" during backtest runs).
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL"))
+            await conn.execute(text("PRAGMA busy_timeout=30000"))

@@ -1,0 +1,78 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Watchlist: Position Trading — Trend Leaders Universe
+# Used by:  Trend Continuation Pullback (POSITION mode, daily bars)
+#
+# Selection criteria:
+#   - Market cap > $50B (institutional support sustains trends)
+#   - Average daily volume > 5M shares (sufficient liquidity for entry/exit)
+#   - EMA21 > EMA50 > EMA200 on weekly chart (confirmed secular uptrend)
+#   - ADX > 20 on weekly (trend has momentum, not exhausted)
+#   - Not in earnings blackout (EPS within 30 days flagged separately)
+#
+# Refresh: eod (16:30 ET weekdays) — rescreen each afternoon after close
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "Position Trading — Trend Leaders Universe"
+watchlist_type: "manual"
+refresh_cron: "30 16 * * 1-5"  # 16:30 ET Mon–Fri (after close)
+min_refresh_interval_minutes: 60
+
+config:
+  description: >
+    Large-cap trend leaders with confirmed multi-timeframe uptrend structure.
+    Curated for the Trend Continuation Pullback strategy (POSITION mode,
+    daily bars). Re-screened daily after market close. Symbols with
+    earnings within 5 days are automatically flagged and excluded from
+    new entries.
+  min_market_cap_usd: 50000000000
+  min_adv_shares: 5000000
+  strategy_affinity: "trend_continuation_pullback"
+  notes: >
+    Review monthly and remove any position that has broken below EMA200
+    on the weekly chart. Add sector ETFs as diversifiers when individual
+    names become too correlated. Monitor for dividend ex-dates (not filtered
+    automatically — manual check required for tax-sensitive accounts).
+
+symbols:
+  # ── Benchmark & Sector ETFs ──────────────────────────────────────────────
+  - SPY     # S&P 500 — primary trend benchmark and tradeable instrument
+  - QQQ     # Nasdaq-100 — growth leadership
+  - XLK     # Technology sector
+  - XLF     # Financials sector
+  - XLV     # Healthcare sector
+  - SOXX    # Philadelphia Semiconductor Index ETF
+  - XLI     # Industrial sector
+
+  # ── Mega-Cap Technology ───────────────────────────────────────────────────
+  - AAPL    # Apple — secular growth, consistent EMA structure
+  - MSFT    # Microsoft — cloud + AI secular trend
+  - NVDA    # Nvidia — AI/GPU secular trend leader
+  - GOOGL   # Alphabet — diversified tech
+  - META    # Meta Platforms — advertising + AI
+  - AMZN    # Amazon — cloud + retail
+  - AVGO    # Broadcom — semiconductor infrastructure
+  - AMD     # Advanced Micro Devices — semiconductor cycle
+  - TSM     # TSMC ADR — foundry secular trend
+
+  # ── Healthcare / Biotech Leaders ─────────────────────────────────────────
+  - LLY     # Eli Lilly — GLP-1 secular growth
+  - UNH     # UnitedHealth — healthcare managed care
+  - ABBV    # AbbVie — pharma/immunology
+
+  # ── Financial Leaders ─────────────────────────────────────────────────────
+  - JPM     # JPMorgan Chase — financials leadership
+  - GS      # Goldman Sachs — capital markets
+  - V       # Visa — payment networks, clean trend
+  - MA      # Mastercard — payment networks
+
+  # ── Consumer / Retail ─────────────────────────────────────────────────────
+  - COST    # Costco — defensive growth, consistent uptrend
+  - HD      # Home Depot — consumer discretionary leader
+
+  # ── Industrials ───────────────────────────────────────────────────────────
+  - CAT     # Caterpillar — industrial trend
+  - DE      # Deere — agricultural/infrastructure
+
+  # ── Alternative Assets ────────────────────────────────────────────────────
+  - GLD     # SPDR Gold Trust — trending when risk-off
+  - BTC-USD # Bitcoin ETF proxy — secular trend (use IAB or IBIT if available)

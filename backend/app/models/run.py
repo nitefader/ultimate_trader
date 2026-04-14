@@ -44,6 +44,12 @@ class BacktestRun(Base):
     strategy_version: Mapped["StrategyVersion"] = relationship("StrategyVersion", back_populates="runs")
     trades: Mapped[list["Trade"]] = relationship("Trade", back_populates="run", cascade="all, delete-orphan")
     metrics: Mapped["RunMetrics"] = relationship("RunMetrics", back_populates="run", uselist=False, cascade="all, delete-orphan")
+    validation_evidence: Mapped["ValidationEvidence"] = relationship(
+        "ValidationEvidence",
+        back_populates="run",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class RunMetrics(Base):

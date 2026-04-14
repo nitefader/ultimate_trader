@@ -17,6 +17,9 @@ const EventCalendar = lazy(() => import('./pages/EventCalendar').then((m) => ({ 
 const LogsPanel = lazy(() => import('./pages/LogsPanel').then((m) => ({ default: m.LogsPanel })))
 const LiveMonitor = lazy(() => import('./pages/LiveMonitor').then((m) => ({ default: m.LiveMonitor })))
 const Services = lazy(() => import('./pages/Services').then((m) => ({ default: m.Services })))
+const TradingPrograms = lazy(() => import('./pages/TradingPrograms').then((m) => ({ default: m.TradingPrograms })))
+const WatchlistLibrary = lazy(() => import('./pages/WatchlistLibrary').then((m) => ({ default: m.WatchlistLibrary })))
+const OptimizationLab = lazy(() => import('./pages/OptimizationLab').then((m) => ({ default: m.OptimizationLab })))
 
 export default function App() {
   return (
@@ -40,6 +43,9 @@ export default function App() {
             <Route path="data" element={<DataManager />} />
             <Route path="events" element={<EventCalendar />} />
             <Route path="logs" element={<LogsPanel />} />
+            <Route path="programs" element={<TradingPrograms />} />
+            <Route path="watchlists" element={<WatchlistLibrary />} />
+            <Route path="lab" element={<OptimizationLab />} />
           </Route>
         </Routes>
       </Suspense>

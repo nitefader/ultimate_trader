@@ -7,6 +7,9 @@ import { servicesApi } from '../api/services'
 import { ModeIndicator } from '../components/ModeIndicator'
 import { ConfirmationModal } from '../components/ConfirmationModal'
 import { CreateAccountModal } from '../components/CreateAccountModal'
+import { usePollingGate } from '../hooks/usePollingGate'
+import { SelectMenu } from '../components/SelectMenu'
+import { Tooltip } from '../components/Tooltip'
 import clsx from 'clsx'
 import type { Account, AccountActivity, Deployment } from '../types'
 
@@ -76,17 +79,18 @@ function pnlClass(n: number | null | undefined): string {
 }
 
 function AccountPositionsPanel({ accountId }: { accountId: string }) {
+  const pausePolling = usePollingGate()
   const { data, isLoading, error, isFetching } = useQuery<BrokerStatus>({
     queryKey: ['account-broker-status', accountId],
     queryFn: () => accountsApi.getBrokerStatus(accountId),
-    refetchInterval: 30_000,
+    refetchInterval: pausePolling ? false : 30_000,
     staleTime: 20_000,
   })
 
   const { data: orders = [], isFetching: ordersFetching } = useQuery<Order[]>({
     queryKey: ['account-broker-orders', accountId],
     queryFn: () => accountsApi.getBrokerOrders(accountId, 'open'),
-    refetchInterval: 30_000,
+    refetchInterval: pausePolling ? false : 30_000,
     staleTime: 20_000,
   })
 
@@ -140,8 +144,13 @@ function AccountPositionsPanel({ accountId }: { accountId: string }) {
       </div>
 
       {/* Positions */}
+      <div className="flex items-center gap-2 mb-1">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Open Positions</span>
+        <span className="flex-1 h-px bg-gray-800" />
+        <span className="text-[10px] text-gray-600">{positions.length}</span>
+      </div>
       {positions.length === 0 ? (
-        <div className="text-[11px] text-gray-600">No open positions</div>
+        <div className="text-[11px] text-gray-600 pb-1">No open positions</div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full" style={{ fontSize: '11px' }}>
@@ -178,7 +187,12 @@ function AccountPositionsPanel({ accountId }: { accountId: string }) {
       )}
 
       {/* Orders */}
-      <div className="border-t border-gray-800/60 pt-1.5">
+      <div className="flex items-center gap-2 mt-3 mb-1">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Open Orders</span>
+        <span className="flex-1 h-px bg-gray-800" />
+        <span className="text-[10px] text-gray-600">{orders.length}</span>
+      </div>
+      <div>
         {orders.length === 0 ? (
           <div className="text-[11px] text-gray-600">No open orders</div>
         ) : (
@@ -290,13 +304,15 @@ function AccountCard({ account, onHalt, onResume, onEdit, onRefresh, onDelete, o
   const [, setAgeTick] = React.useState(0)
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  const pausePolling = usePollingGate()
 
   React.useEffect(() => {
+    if (pausePolling) return
     const interval = setInterval(() => {
       setAgeTick((v) => v + 1)
     }, 1_000)
     return () => clearInterval(interval)
-  }, [])
+  }, [pausePolling])
 
   useEffect(() => {
     if (!menuOpen) return
@@ -330,51 +346,57 @@ function AccountCard({ account, onHalt, onResume, onEdit, onRefresh, onDelete, o
             className="mt-1 h-4 w-4 rounded border-gray-700 bg-gray-900 text-sky-500 focus:ring-sky-500"
             checked={isSelected}
             onChange={(e) => onSelectionChange(account, e.target.checked)}
-            aria-label={`Select account ${account.name}`}
-            title={canDelete ? `Select ${account.name}` : `Select ${account.name} (delete blocked: ${getDeleteSummary(activity)})`}
+            aria-label={canDelete ? `Select ${account.name}` : `Select ${account.name} (delete blocked: ${getDeleteSummary(activity)})`}
           />
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <span className="font-semibold text-gray-200">{account.name}</span>
               {account.is_connected
-                ? <Link to={`/security?account=${account.id}`} title="Connected to Alpaca — click to manage keys" className="flex items-center gap-1 text-green-400 hover:text-green-300 transition-colors"><Wifi size={12} /><span className="text-[10px] underline">Keys</span></Link>
-                : <Link to={`/security?account=${account.id}`} title="Not connected — click to configure API keys" className="flex items-center gap-1 text-amber-500 hover:text-amber-400 transition-colors"><WifiOff size={12} /><span className="text-[10px] underline">Setup keys</span></Link>}
+                ? <Tooltip content="Connected to Alpaca — click to manage keys"><Link to={`/security?account=${account.id}`} className="flex items-center gap-1 text-green-400 hover:text-green-300 transition-colors"><Wifi size={12} /><span className="text-[10px] underline">Keys</span></Link></Tooltip>
+                : <Tooltip content="Not connected — click to configure API keys"><Link to={`/security?account=${account.id}`} className="flex items-center gap-1 text-amber-500 hover:text-amber-400 transition-colors"><WifiOff size={12} /><span className="text-[10px] underline">Setup keys</span></Link></Tooltip>}
               {hasActiveDeployment && (
-                <span className="flex items-center gap-1 text-[10px] text-emerald-300 border border-emerald-800 bg-emerald-950/40 rounded px-1.5 py-0.5" title="UltraTrader has an active deployment on this account">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  <Zap size={9} />
-                  UltraTrader Active
-                </span>
+                <Tooltip content="UltraTrader has an active deployment on this account">
+                  <span className="flex items-center gap-1 text-[10px] text-emerald-300 border border-emerald-800 bg-emerald-950/40 rounded px-1.5 py-0.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <Zap size={9} />
+                    UltraTrader Active
+                  </span>
+                </Tooltip>
               )}
             </div>
             <div className="flex items-center gap-2 mt-1">
               <ModeIndicator mode={account.mode} />
-              {account.is_killed && <span className="badge-red" title="Trading halted — no new orders will be placed. Click Resume Trading to re-enable.">HALTED</span>}
-              {!account.is_killed && account.is_enabled && <span className="badge-green" title="Account is active and eligible for trading">Active</span>}
-              {!account.is_killed && !account.is_enabled && <span className="badge-gray" title="Account is disabled — will not execute any trades">Disabled</span>}
+              {account.is_killed && <Tooltip content="Trading halted — no new orders will be placed. Click Resume Trading to re-enable."><span className="badge-red">HALTED</span></Tooltip>}
+              {!account.is_killed && account.is_enabled && <Tooltip content="Account is active and eligible for trading"><span className="badge-green">Active</span></Tooltip>}
+              {!account.is_killed && !account.is_enabled && <Tooltip content="Account is disabled — will not execute any trades"><span className="badge-gray">Disabled</span></Tooltip>}
             </div>
           </div>
         </div>
         <div className="flex gap-2 items-center flex-wrap justify-end">
+          <Tooltip content="Refresh equity from Alpaca">
           <button
             className="btn-ghost text-xs flex items-center gap-1 py-1"
             onClick={() => onRefresh(account.id)}
             disabled={isRefreshing}
-            title="Refresh equity from Alpaca"
           >
             <RefreshCw size={12} className={isRefreshing ? 'animate-spin' : ''} />
           </button>
+          </Tooltip>
           <button className="btn-ghost text-xs py-1" onClick={() => onEdit(account.id)}>
             Edit
           </button>
           {account.is_killed ? (
-            <button className="btn-ghost text-xs flex items-center gap-1 py-1 text-green-400 border border-green-800 hover:border-green-600" onClick={() => onResume(account.id)} title="Resume trading — re-enable order placement">
-              <RotateCcw size={12} /> Resume Trading
-            </button>
+            <Tooltip content="Resume trading — re-enable order placement">
+              <button className="btn-ghost text-xs flex items-center gap-1 py-1 text-green-400 border border-green-800 hover:border-green-600" onClick={() => onResume(account.id)}>
+                <RotateCcw size={12} /> Resume Trading
+              </button>
+            </Tooltip>
           ) : (
-            <button className="btn-ghost text-xs flex items-center gap-1 py-1 text-amber-400 border border-amber-800 hover:border-amber-600" onClick={() => onHalt()} title="Halt trading — block all new orders without closing positions">
-              <Power size={12} /> Halt Trading
-            </button>
+            <Tooltip content="Halt — block all new orders without closing positions">
+              <button className="btn-ghost text-xs flex items-center gap-1 py-1 text-amber-400 border border-amber-800 hover:border-amber-600" onClick={() => onHalt()}>
+                <Power size={12} /> Halt
+              </button>
+            </Tooltip>
           )}
           <button
             className={clsx(
@@ -383,41 +405,38 @@ function AccountCard({ account, onHalt, onResume, onEdit, onRefresh, onDelete, o
             )}
             onClick={() => onDelete(account)}
             disabled={!canDelete || isDeleting}
-            title={canDelete ? 'Delete this account' : `Cannot delete: ${getDeleteSummary(activity)}`}
           >
             <Trash2 size={12} /> {isDeleting ? 'Deleting...' : 'Delete'}
           </button>
           <button
             className="btn-ghost text-xs flex items-center gap-1 py-1 border border-gray-700"
             onClick={onToggleExpand}
-            title={isExpanded ? 'Hide live positions' : 'Show live positions'}
           >
             {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
             {isExpanded ? 'Hide' : 'Positions'}
           </button>
           {/* Overflow menu */}
           <div className="relative" ref={menuRef}>
+            <Tooltip content="More actions">
             <button
               className="btn-ghost text-xs flex items-center py-1 px-1.5 border border-gray-700"
               onClick={() => setMenuOpen(v => !v)}
-              title="More actions"
             >
               <MoreHorizontal size={14} />
             </button>
+            </Tooltip>
             {menuOpen && (
               <div className="absolute right-0 top-full mt-1 z-50 w-52 rounded border border-gray-700 bg-gray-900 shadow-xl py-1">
                 <div className="px-3 py-1.5 text-[10px] text-gray-500 uppercase tracking-wider">Danger Zone</div>
                 <button
                   className="w-full text-left px-3 py-2 text-xs flex items-center gap-2 text-amber-400 hover:bg-gray-800 transition-colors"
                   onClick={() => { setMenuOpen(false); onFlatten() }}
-                  title="Close all open positions via market orders. Does not halt future trading."
                 >
                   <Layers size={12} /> Flatten Account
                 </button>
                 <button
                   className="w-full text-left px-3 py-2 text-xs flex items-center gap-2 text-red-400 hover:bg-gray-800 transition-colors"
                   onClick={() => { setMenuOpen(false); onEmergencyExit() }}
-                  title="Halt trading AND close all positions immediately."
                 >
                   <AlertTriangle size={12} /> Emergency Exit
                 </button>
@@ -431,14 +450,16 @@ function AccountCard({ account, onHalt, onResume, onEdit, onRefresh, onDelete, o
         <div>
           <div className="text-xs text-gray-500 flex items-center gap-1">
             Equity
-            {account.is_connected && <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500" title="Live data from Alpaca" />}
+            {account.is_connected && <Tooltip content="Live data from Alpaca"><span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500" /></Tooltip>}
           </div>
           <div className="font-mono font-bold">${accountEquity.toLocaleString('en', { maximumFractionDigits: 0 })}</div>
         </div>
         <div>
-          <div className="text-xs text-gray-500" title={showUnrealized ? 'Unrealized P&L from open positions' : `vs baseline $${account.initial_balance.toLocaleString('en', { maximumFractionDigits: 0 })}`}>
-            {showUnrealized ? 'Unrealized P&L' : 'P&L'}
-          </div>
+          <Tooltip content={showUnrealized ? 'Unrealized P&L from open positions' : `vs baseline $${account.initial_balance.toLocaleString('en', { maximumFractionDigits: 0 })}`} className="block">
+            <div className="text-xs text-gray-500">
+              {showUnrealized ? 'Unrealized P&L' : 'P&L'}
+            </div>
+          </Tooltip>
           <div className={clsx('font-mono font-bold', pnl >= 0 ? 'positive' : 'negative')}>
             {pnl >= 0 ? '+' : ''}${Math.abs(pnl).toLocaleString('en', { maximumFractionDigits: 0 })} ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%)
           </div>
@@ -454,9 +475,9 @@ function AccountCard({ account, onHalt, onResume, onEdit, onRefresh, onDelete, o
         <div>Max Pos: {(account.max_position_size_pct * 100).toFixed(0)}%</div>
         <div>Max DD: {(account.max_drawdown_lockout_pct * 100).toFixed(0)}%</div>
         <div>Max Open: {account.max_open_positions}</div>
-        <div title="Margin multiplier synced from Alpaca">
-          Margin: <span className={account.leverage >= 2 ? 'text-amber-400' : 'text-gray-400'}>{account.leverage}x</span>
-        </div>
+        <Tooltip content="Margin multiplier synced from Alpaca" className="block">
+          <div>Margin: <span className={account.leverage >= 2 ? 'text-amber-400' : 'text-gray-400'}>{account.leverage}x</span></div>
+        </Tooltip>
       </div>
 
       {activity && (
@@ -542,10 +563,11 @@ function DeploymentMonitor({ deployment, account, onStop }: {
   account?: Account
   onStop: (id: string) => void
 }) {
+  const pausePolling = usePollingGate()
   const { data: positionsData = { positions: [] }, isLoading: positionsLoading, error: positionsError } = useQuery({
     queryKey: ['deployment-positions', deployment.id],
     queryFn: () => deploymentsApi.getPositions(deployment.id),
-    refetchInterval: 5_000,
+    refetchInterval: pausePolling ? false : 5_000,
   })
 
   const positions: Position[] = positionsData?.positions ?? []
@@ -682,7 +704,7 @@ function DeploymentMonitor({ deployment, account, onStop }: {
   )
 }
 
-function EditAccountModal({ account, onClose, onUpdated }: { account: Account | null; onClose: () => void; onUpdated: () => void }) {
+const EditAccountModal = React.memo(function EditAccountModal({ account, onClose, onUpdated }: { account: Account | null; onClose: () => void; onUpdated: () => void }) {
   const [name, setName] = useState(account?.name || '')
   const [maxPositionSizePct, setMaxPositionSizePct] = useState((account?.max_position_size_pct || 0.1) * 100)
   const [maxDailyLossPct, setMaxDailyLossPct] = useState((account?.max_daily_loss_pct || 0.03) * 100)
@@ -711,8 +733,8 @@ function EditAccountModal({ account, onClose, onUpdated }: { account: Account | 
   if (!account) return null
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="card w-96 space-y-4 max-h-96 overflow-y-auto">
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="card w-96 space-y-4 max-h-[90vh] overflow-y-auto">
         <h3 className="text-sm font-semibold">Edit Account</h3>
         <div>
           <label className="label">Name</label>
@@ -738,18 +760,18 @@ function EditAccountModal({ account, onClose, onUpdated }: { account: Account | 
         </div>
         <div>
           <label className="label">Data Service</label>
-          <select
-            className="input w-full"
+          <SelectMenu
             value={dataServiceId}
-            onChange={e => setDataServiceId(e.target.value)}
-          >
-            <option value="">Self (use own credentials)</option>
-            {services.filter(s => s.is_active).map(s => (
-              <option key={s.id} value={s.id}>
-                {s.name} ({s.provider} / {s.environment}){s.is_default ? ' ★' : ''}
-              </option>
-            ))}
-          </select>
+            onChange={setDataServiceId}
+            placeholder="Self (use own credentials)"
+            options={[
+              { value: '', label: 'Self (use own credentials)' },
+              ...services.filter(s => s.is_active).map(s => ({
+                value: s.id,
+                label: `${s.name} (${s.provider} / ${s.environment})${s.is_default ? ' ★' : ''}`,
+              })),
+            ]}
+          />
           <div className="mt-1 text-xs text-gray-500">
             Choose a shared data service or use this account's own Alpaca keys.
           </div>
@@ -764,9 +786,10 @@ function EditAccountModal({ account, onClose, onUpdated }: { account: Account | 
       </div>
     </div>
   )
-}
+})
 
 export function AccountMonitor() {
+  const pausePolling = usePollingGate()
   const [activeTab, setActiveTab] = useState<string | null>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [editingAccountId, setEditingAccountId] = useState<string | null>(null)
@@ -787,9 +810,10 @@ export function AccountMonitor() {
 
   // Tick every second to drive the staleness indicator
   React.useEffect(() => {
+    if (pausePolling) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [])
+  }, [pausePolling])
 
   const qc = useQueryClient()
 
@@ -809,7 +833,7 @@ export function AccountMonitor() {
         result.status === 'fulfilled' ? result.value : []
       ))
     },
-    refetchInterval: 5000, // More frequent updates for live monitoring
+    refetchInterval: pausePolling ? false : 5000, // More frequent updates for live monitoring
   })
 
   const {
@@ -823,8 +847,20 @@ export function AccountMonitor() {
       setLastAccountsFetch(new Date())
       return result
     },
-    refetchInterval: 15_000,
+    refetchInterval: pausePolling ? false : 15_000,
   })
+
+  // Auto-sync leverage/margin from Alpaca on mount and whenever the account list changes
+  const syncedAccountIds = React.useRef<Set<string>>(new Set())
+  React.useEffect(() => {
+    const newIds = accounts
+      .filter(a => a.is_connected && !syncedAccountIds.current.has(a.id))
+    if (newIds.length === 0) return
+    newIds.forEach(a => syncedAccountIds.current.add(a.id))
+    Promise.allSettled(newIds.map(a => accountsApi.syncFromBroker(a.id))).then(() => {
+      qc.invalidateQueries({ queryKey: ['accounts'] })
+    })
+  }, [accounts])
 
   const runningDeployments = deployments.filter(d => d.status === 'running')
   const activeDeploymentAccountIds = new Set(runningDeployments.map(d => d.account_id).filter(Boolean))
@@ -889,9 +925,11 @@ export function AccountMonitor() {
     onError: () => { /* keep modal open */ },
   })
 
+  const [resumeError, setResumeError] = useState<string | null>(null)
   const resumeMutation = useMutation({
     mutationFn: (id: string) => accountsApi.resume(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['accounts'] }),
+    onSuccess: () => { setResumeError(null); qc.invalidateQueries({ queryKey: ['accounts'] }) },
+    onError: (e: any) => setResumeError(e?.response?.data?.detail ?? e?.message ?? 'Failed to resume trading'),
   })
 
   const deleteMutation = useMutation({
@@ -1111,7 +1149,6 @@ export function AccountMonitor() {
                   )}
                   onClick={handleBulkDeleteAccounts}
                   disabled={readyToDeleteAccounts.length === 0 || bulkDeleteMutation.isPending}
-                  title={readyToDeleteAccounts.length > 0 ? 'Delete all selected accounts that are ready to remove' : 'No selected accounts are ready to delete'}
                 >
                   <Trash2 size={12} /> {bulkDeleteMutation.isPending ? 'Deleting Selected...' : `Delete Selected (${readyToDeleteAccounts.length})`}
                 </button>
@@ -1129,6 +1166,10 @@ export function AccountMonitor() {
 
               {bulkDeleteError && (
                 <div className="mt-3 text-xs text-red-400">{bulkDeleteError}</div>
+              )}
+
+              {resumeError && (
+                <div className="mt-3 text-xs text-red-400">Resume failed: {resumeError}</div>
               )}
             </div>
 

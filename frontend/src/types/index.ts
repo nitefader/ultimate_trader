@@ -1,6 +1,7 @@
 export type Mode = 'backtest' | 'paper' | 'live'
 export type RunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type DeploymentStatus = 'pending' | 'running' | 'paused' | 'stopped' | 'failed'
+export type DurationMode = 'day' | 'swing' | 'position'
 
 export interface Strategy {
   id: string
@@ -19,8 +20,40 @@ export interface StrategyVersion {
   version: number
   config: StrategyConfig
   notes?: string
+  duration_mode: DurationMode
   promotion_status: string
   created_at: string
+}
+
+export interface MarketHoursWindow {
+  start: string  // "HH:MM" in timezone
+  end: string
+}
+
+export interface MarketHoursConfig {
+  timezone?: string
+  entry_windows?: MarketHoursWindow[]
+  force_flat_by?: string  // "HH:MM" — hard EOD exit
+  skip_first_bar?: boolean
+}
+
+export interface PDTConfig {
+  enforce?: boolean
+  max_day_trades_per_window?: number
+  window_sessions?: number
+  equity_threshold?: number
+  on_limit_reached?: 'pause_entries' | 'block_new' | 'warn_only'
+}
+
+export interface GapRiskConfig {
+  max_gap_pct?: number
+  weekend_position_allowed?: boolean
+  earnings_blackout?: boolean
+  earnings_blackout_days_before?: number
+}
+
+export interface ExitConfig {
+  max_bars?: number
 }
 
 export interface StrategyConfig {
@@ -28,6 +61,7 @@ export interface StrategyConfig {
   name?: string
   symbols?: string[]
   timeframe?: string
+  duration_mode?: DurationMode
   entry?: EntryConfig
   stop_loss?: StopConfig
   targets?: TargetConfig[]
@@ -40,6 +74,13 @@ export interface StrategyConfig {
   trailing_stop?: TrailingStopConfig
   leverage?: number
   indicators?: IndicatorConfig
+  // Day-mode specifics
+  market_hours?: MarketHoursConfig
+  pdt?: PDTConfig
+  // Position-mode specifics
+  gap_open_exit?: boolean
+  gap_risk?: GapRiskConfig
+  exit?: ExitConfig
 }
 
 export interface EntryConfig {
@@ -137,6 +178,34 @@ export interface IndicatorConfig {
   rsi_periods?: number[]
 }
 
+// ── IndicatorSpec — typed union for all supported indicators ─────────────────
+// Each discriminated variant maps directly to a backend indicator function.
+
+export type IndicatorSpec =
+  | { kind: 'sma';           period: number }
+  | { kind: 'ema';           period: number }
+  | { kind: 'wma';           period: number }
+  | { kind: 'vwma';          period: number }
+  | { kind: 'hull_ma';       period: number }
+  | { kind: 'rsi';           period: number }
+  | { kind: 'macd';          fast: number; slow: number; signal: number }
+  | { kind: 'bollinger';     period: number; std_dev: number }
+  | { kind: 'keltner';       period: number; mult: number }
+  | { kind: 'donchian';      period: number }
+  | { kind: 'atr';           period: number }
+  | { kind: 'adx';           period: number }
+  | { kind: 'stochastic';    k_period: number; d_period: number }
+  | { kind: 'chandelier';    period: number; mult: number }
+  | { kind: 'ichimoku';      tenkan: number; kijun: number; senkou_b: number; displacement: number }
+  | { kind: 'vwap_session' }
+  | { kind: 'obv' }
+  | { kind: 'fractals';      n: number }
+  | { kind: 'pivot_points' }
+  | { kind: 'swing_highs_lows'; lookback: number }
+
+export type IndicatorKind = IndicatorSpec['kind']
+
+
 // ── Backtest ──────────────────────────────────────────────────────────────────
 
 export interface BacktestRun {
@@ -153,6 +222,7 @@ export interface BacktestRun {
   completed_at?: string
   error_message?: string
   metrics?: RunMetrics
+  validation_evidence?: ValidationEvidence
 }
 
 export interface RunMetrics {
@@ -201,11 +271,13 @@ export interface WalkForwardResult {
     total_trades?: number | null
   }
   anti_bias?: {
+    cpcv_primary_guard_passed?: boolean
     leakage_checks_passed?: boolean
     parameter_locking_passed?: boolean
     causal_indicator_checks_passed?: boolean
     non_causal_indicator_refs?: string[]
   }
+  cpcv?: CpcvResult
   aggregate_oos?: {
     fold_count?: number
     oos_total_return_pct?: number | null
@@ -234,7 +306,60 @@ export interface WalkForwardFold {
   test_metrics?: {
     total_return_pct?: number
     sharpe_ratio?: number
+    regime_breakdown?: Record<string, number>
   }
+}
+
+export interface CpcvResult {
+  method?: string
+  warnings?: string[]
+  settings?: {
+    n_paths?: number
+    k_test_paths?: number
+    embargo_bars?: number
+    total_combos_evaluated?: number
+  }
+  aggregate?: {
+    median_is_sharpe?: number | null
+    median_oos_sharpe?: number | null
+    pct_positive_oos_folds?: number | null
+    is_oos_degradation_ratio?: number | null
+    is_oos_degradation_infinite?: boolean
+    fold_count?: number
+    pass_primary_guard?: boolean
+  }
+  folds?: Array<{
+    combo_id: string
+    train_path_ids?: number[]
+    test_path_ids?: number[]
+    train_bars?: number
+    test_bars?: number
+    is_sharpe?: number
+    oos_sharpe?: number
+    oos_return_pct?: number
+    parameter_locking_validated?: boolean
+    error?: string
+  }>
+}
+
+export interface ValidationEvidence {
+  method?: string
+  cpcv?: CpcvResult
+  walk_forward?: WalkForwardResult
+  anti_bias?: WalkForwardResult['anti_bias']
+  regime_performance?: Record<string, number>
+  per_symbol_oos_sharpe?: Record<string, number | null>
+  cost_sensitivity_curve?: Array<{
+    slippage_bps: number
+    sharpe_ratio?: number | null
+    total_return_pct?: number | null
+    trade_count?: number | null
+    error?: string
+  }>
+  warnings?: string[]
+  is_oos_degradation_ratio?: number | null
+  stability_score?: number | null
+  created_at?: string | null
 }
 
 export interface MonteCarloResult {
@@ -254,20 +379,52 @@ export interface EquityPoint {
   regime: string
 }
 
+export interface ScaleEvent {
+  id: string
+  event_type: 'scale_in' | 'scale_out'
+  time: string
+  price: number
+  quantity: number
+  quantity_pct: number
+  reason?: string
+  new_stop?: number
+  realized_pnl?: number
+}
+
 export interface Trade {
   id: string
   symbol: string
   direction: string
+  // Entry
   entry_time?: string
   entry_price: number
+  entry_order_type?: string
+  initial_quantity?: number
+  initial_stop?: number
+  initial_target?: number
+  // Exit
   exit_time?: string
   exit_price?: number
-  quantity: number
+  exit_quantity?: number
   exit_reason?: string
+  // P&L
+  realized_pnl?: number
+  commission?: number
+  slippage?: number
   net_pnl?: number
   return_pct?: number
   r_multiple?: number
+  // State
+  is_open?: boolean
+  max_adverse_excursion?: number   // MAE — worst price against position
+  max_favorable_excursion?: number  // MFE — best price in position's favor
+  // Context
   regime_at_entry?: string
+  entry_conditions_fired?: string[]
+  tags?: string[]
+  // Relations
+  quantity: number
+  scale_events?: ScaleEvent[]
 }
 
 export interface CompareRunSummary {
@@ -286,6 +443,8 @@ export interface CompareRunSummary {
   total_trades?: number | null
   oos_total_return_pct?: number | null
   avg_oos_return_pct?: number | null
+  cpcv_median_oos_sharpe?: number | null
+  cpcv_passed?: boolean | null
   anti_bias_passed?: boolean | null
 }
 
@@ -309,6 +468,7 @@ export interface Account {
   name: string
   mode: Mode
   broker: string
+  account_mode: 'cash' | 'margin'  // CASH: no shorts, no leverage, T+1; MARGIN: full controls
   initial_balance: number
   current_balance: number
   equity: number

@@ -1,11 +1,15 @@
 import React, { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { strategiesApi } from '../api/strategies'
 import { ConditionBuilder } from '../components/StrategyBuilder/ConditionBuilder'
-import { Pencil, Save, X, Plus, Trash2, ChevronDown, ChevronUp, Code } from 'lucide-react'
+import { SelectMenu } from '../components/SelectMenu'
+import { Pencil, Save, X, Plus, Trash2, ChevronDown, ChevronUp, Code, AlertTriangle, TrendingUp } from 'lucide-react'
 import clsx from 'clsx'
 import type { Strategy, StrategyVersion, StrategyConfig, Condition, CooldownRule, ScaleLevel } from '../types'
+
+const DRAFT_STATUSES = new Set(['backtest_only'])
+const LIVE_STATUSES = new Set(['paper_approved', 'live_approved'])
 
 const STOP_METHODS = ['fixed_pct', 'fixed_dollar', 'atr_multiple', 'prev_bar_low', 'n_bars_low', 'swing_low', 'fvg_low', 'sr_support', 'chandelier']
 const TARGET_METHODS = ['r_multiple', 'fixed_pct', 'atr_multiple', 'sr_resistance', 'swing_high', 'prev_day_high']
@@ -239,9 +243,11 @@ function ConfigEditor({ config, onChange }: { config: StrategyConfig; onChange: 
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Timeframe">
-            <select className="input w-full" value={config.timeframe ?? '1d'} onChange={e => set('timeframe', e.target.value)}>
-              {TIMEFRAMES.map(tf => <option key={tf}>{tf}</option>)}
-            </select>
+            <SelectMenu
+              value={config.timeframe ?? '1d'}
+              onChange={v => set('timeframe', v)}
+              options={TIMEFRAMES.map(tf => ({ value: tf, label: tf }))}
+            />
           </Field>
           <Field label="Leverage">
             <input type="number" step="0.1" min="1" className="input w-full" value={config.leverage ?? 1} onChange={e => set('leverage', parseFloat(e.target.value))} />
@@ -279,9 +285,11 @@ function ConfigEditor({ config, onChange }: { config: StrategyConfig; onChange: 
       <SectionCard title="Stop Loss">
         <div className="grid grid-cols-3 gap-3">
           <Field label="Method">
-            <select className="input w-full" value={config.stop_loss?.method ?? 'fixed_pct'} onChange={e => set('stop_loss', { ...config.stop_loss, method: e.target.value })}>
-              {STOP_METHODS.map(m => <option key={m}>{m}</option>)}
-            </select>
+            <SelectMenu
+              value={config.stop_loss?.method ?? 'fixed_pct'}
+              onChange={v => set('stop_loss', { ...config.stop_loss, method: v })}
+              options={STOP_METHODS.map(m => ({ value: m, label: m }))}
+            />
           </Field>
           {(config.stop_loss?.method === 'fixed_pct' || config.stop_loss?.method === 'fixed_dollar') && (
             <Field label="Value">
@@ -305,11 +313,13 @@ function ConfigEditor({ config, onChange }: { config: StrategyConfig; onChange: 
         {(config.targets ?? []).map((target, i) => (
           <div key={i} className="flex items-center gap-2 bg-gray-800 rounded p-2">
             <span className="text-xs text-gray-500 w-16">Target {i + 1}</span>
-            <select className="input text-xs py-1" value={target.method} onChange={e => {
-              const targets = [...(config.targets ?? [])]; targets[i] = { ...targets[i], method: e.target.value }; set('targets', targets)
-            }}>
-              {TARGET_METHODS.map(m => <option key={m}>{m}</option>)}
-            </select>
+            <SelectMenu
+              value={target.method}
+              onChange={v => {
+                const targets = [...(config.targets ?? [])]; targets[i] = { ...targets[i], method: v }; set('targets', targets)
+              }}
+              options={TARGET_METHODS.map(m => ({ value: m, label: m }))}
+            />
             {target.method === 'r_multiple' && (
               <input type="number" step="0.5" className="input text-xs py-1 w-20" value={target.r ?? 2} onChange={e => {
                 const targets = [...(config.targets ?? [])]; targets[i] = { ...targets[i], r: parseFloat(e.target.value) }; set('targets', targets)
@@ -328,9 +338,11 @@ function ConfigEditor({ config, onChange }: { config: StrategyConfig; onChange: 
       <SectionCard title="Position Sizing">
         <div className="grid grid-cols-3 gap-3">
           <Field label="Method">
-            <select className="input w-full" value={config.position_sizing?.method ?? 'risk_pct'} onChange={e => set('position_sizing', { ...config.position_sizing, method: e.target.value })}>
-              {SIZING_METHODS.map(m => <option key={m}>{m}</option>)}
-            </select>
+            <SelectMenu
+              value={config.position_sizing?.method ?? 'risk_pct'}
+              onChange={v => set('position_sizing', { ...config.position_sizing, method: v })}
+              options={SIZING_METHODS.map(m => ({ value: m, label: m }))}
+            />
           </Field>
           {config.position_sizing?.method === 'risk_pct' && (
             <Field label="Risk % per trade">
@@ -376,11 +388,13 @@ function ConfigEditor({ config, onChange }: { config: StrategyConfig; onChange: 
       <SectionCard title="Cooldown Rules" defaultOpen={false}>
         {(config.cooldown_rules ?? []).map((rule, i) => (
           <div key={i} className="flex items-center gap-2 bg-gray-800 rounded p-2">
-            <select className="input text-xs py-1" value={rule.trigger} onChange={e => {
-              const rules = [...(config.cooldown_rules ?? [])]; rules[i] = { ...rules[i], trigger: e.target.value }; set('cooldown_rules', rules)
-            }}>
-              {COOLDOWN_TRIGGERS.map(t => <option key={t}>{t}</option>)}
-            </select>
+            <SelectMenu
+              value={rule.trigger}
+              onChange={v => {
+                const rules = [...(config.cooldown_rules ?? [])]; rules[i] = { ...rules[i], trigger: v }; set('cooldown_rules', rules)
+              }}
+              options={COOLDOWN_TRIGGERS.map(t => ({ value: t, label: t }))}
+            />
             <input type="number" className="input text-xs py-1 w-24" placeholder="Minutes" value={rule.duration_minutes ?? ''} onChange={e => {
               const rules = [...(config.cooldown_rules ?? [])]; rules[i] = { ...rules[i], duration_minutes: parseInt(e.target.value) || undefined }; set('cooldown_rules', rules)
             }} />
@@ -399,6 +413,7 @@ function ConfigEditor({ config, onChange }: { config: StrategyConfig; onChange: 
 
 export function StrategyDetails() {
   const { strategyId } = useParams<{ strategyId: string }>()
+  const navigate = useNavigate()
   const qc = useQueryClient()
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
   const [newVersionNotes, setNewVersionNotes] = useState('')
@@ -408,6 +423,8 @@ export function StrategyDetails() {
   const [editConfig, setEditConfig] = useState<StrategyConfig | null>(null)
   const [editNotes, setEditNotes] = useState('')
   const [showRawJson, setShowRawJson] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deletingVersionId, setDeletingVersionId] = useState<string | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['strategy', strategyId],
@@ -444,6 +461,30 @@ export function StrategyDetails() {
       setEditing(false)
       setEditConfig(null)
       setEditNotes('')
+      qc.invalidateQueries({ queryKey: ['strategy', strategyId] })
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      if (!data) throw new Error('Strategy not loaded')
+      return strategiesApi.delete(data.id)
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['strategies'] })
+      navigate('/strategies')
+    },
+  })
+
+  const deleteVersionMutation = useMutation({
+    mutationFn: async (versionId: string) => {
+      if (!strategyId) throw new Error('No strategy id')
+      return strategiesApi.deleteVersion(strategyId, versionId)
+    },
+    onSuccess: (_data, versionId) => {
+      setDeletingVersionId(null)
+      // If we deleted the selected version, clear selection
+      if (selectedVersionId === versionId) setSelectedVersionId(null)
       qc.invalidateQueries({ queryKey: ['strategy', strategyId] })
     },
   })
@@ -491,8 +532,53 @@ export function StrategyDetails() {
           >
             + New Version
           </button>
+          <button
+            className="btn-ghost text-sm text-red-400 hover:text-red-300"
+            onClick={() => setShowDeleteConfirm(s => !s)}
+          >
+            <Trash2 size={13} className="inline mr-1" />
+            Delete
+          </button>
         </div>
       </div>
+
+      {showDeleteConfirm && (
+        <div className="card border border-red-900/60 bg-red-950/20">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertTriangle size={15} className="text-red-400" />
+            <span className="text-sm font-semibold text-red-300">Delete Strategy</span>
+          </div>
+          <p className="text-xs text-gray-400 mb-3">
+            Permanently delete <span className="font-semibold text-gray-200">{strategy.name}</span> and all {versions.length} version(s).
+            This cannot be undone. The server will block deletion if any runs or deployments are tied to this strategy.
+          </p>
+          {deleteMutation.isError && (() => {
+            const err = deleteMutation.error as any
+            const detail = err?.response?.data?.detail
+            if (detail && typeof detail === 'object' && detail.blockers) {
+              return (
+                <div className="mb-3 rounded border border-amber-800 bg-amber-950/30 p-3 space-y-1">
+                  <p className="text-xs font-semibold text-amber-300">{detail.message}</p>
+                  {(detail.blockers as string[]).map((b: string, i: number) => (
+                    <p key={i} className="text-xs text-amber-200">• {b}</p>
+                  ))}
+                </div>
+              )
+            }
+            return <p className="text-xs text-red-400 mb-3">{err?.message ?? 'Delete failed'}</p>
+          })()}
+          <div className="flex items-center gap-2">
+            <button
+              className="text-xs px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-white font-semibold disabled:opacity-50"
+              disabled={deleteMutation.isPending}
+              onClick={() => deleteMutation.mutate()}
+            >
+              {deleteMutation.isPending ? 'Deleting…' : 'Confirm Delete'}
+            </button>
+            <button className="btn-ghost text-xs" onClick={() => { setShowDeleteConfirm(false); deleteMutation.reset() }}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       {creating && (
         <div className="card space-y-3 border border-indigo-900/50">
@@ -544,24 +630,101 @@ export function StrategyDetails() {
             <div className="text-gray-500 text-sm">No versions</div>
           ) : (
             <div className="space-y-2">
-              {versions.map(v => (
-                <button
-                  key={v.id}
-                  type="button"
-                  onClick={() => setSelectedVersionId(v.id)}
-                  className={clsx(
-                    'w-full text-left rounded border px-3 py-2 transition',
-                    selected?.id === v.id ? 'border-sky-600 bg-sky-950/20' : 'border-gray-800 hover:border-gray-700',
-                  )}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-mono text-gray-100">v{v.version}</div>
-                    <span className="text-xs text-gray-500">{v.created_at?.slice(0, 10)}</span>
+              {versions.map(v => {
+                const isProtected = new Set(['paper_approved', 'live_approved']).has(v.promotion_status)
+                const isOnlyVersion = versions.length <= 1
+                const canDeleteVer = !isProtected && !isOnlyVersion
+                const isConfirmingDelete = deletingVersionId === v.id
+
+                return (
+                  <div key={v.id} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedVersionId(v.id); setDeletingVersionId(null) }}
+                      className={clsx(
+                        'w-full text-left rounded border px-3 py-2 transition pr-8',
+                        selected?.id === v.id ? 'border-sky-600 bg-sky-950/20' : 'border-gray-800 hover:border-gray-700',
+                      )}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm font-mono text-gray-100">v{v.version}</div>
+                        <span className="text-xs text-gray-500">{v.created_at?.slice(0, 10)}</span>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1 truncate">{v.notes ?? '—'}</div>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <span className="text-xs text-gray-600">{v.promotion_status}</span>
+                        {v.duration_mode === 'day' && <span className="px-1 py-0.5 rounded text-[10px] font-semibold bg-sky-900/40 text-sky-400">DAY</span>}
+                        {v.duration_mode === 'swing' && <span className="px-1 py-0.5 rounded text-[10px] font-semibold bg-indigo-900/40 text-indigo-400">SWING</span>}
+                        {v.duration_mode === 'position' && <span className="px-1 py-0.5 rounded text-[10px] font-semibold bg-amber-900/40 text-amber-400">POS</span>}
+                      </div>
+                    </button>
+                    {/* Quick action buttons */}
+                    <div className="absolute right-2 top-2 flex items-center gap-1">
+                      <Link
+                        to={`/backtest?strategy_id=${strategyId}&version_id=${v.id}`}
+                        onClick={e => e.stopPropagation()}
+                        title={`Backtest v${v.version}`}
+                        className="p-1 rounded text-gray-600 hover:text-sky-400 hover:bg-sky-950/30 transition"
+                      >
+                        <TrendingUp size={11} />
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={e => {
+                          e.stopPropagation()
+                          setDeletingVersionId(isConfirmingDelete ? null : v.id)
+                        }}
+                        disabled={!canDeleteVer}
+                        title={
+                          isProtected ? `v${v.version} is ${v.promotion_status} — demote before deleting`
+                            : isOnlyVersion ? 'Cannot delete the only version'
+                            : `Delete v${v.version}`
+                        }
+                        className={clsx(
+                          'p-1 rounded transition',
+                          canDeleteVer
+                            ? 'text-gray-600 hover:text-red-400 hover:bg-red-950/30'
+                            : 'text-gray-800 cursor-not-allowed',
+                        )}
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+
+                    {/* Inline confirm */}
+                    {isConfirmingDelete && (
+                      <div className="rounded border border-red-900/60 bg-red-950/20 px-3 py-2 mt-1 space-y-1.5">
+                        <p className="text-xs text-red-300">Delete v{v.version}? Cannot be undone. Blocked if runs or deployments reference it.</p>
+                        <div className="flex gap-2">
+                          <button
+                            className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600 text-white font-semibold disabled:opacity-50"
+                            disabled={deleteVersionMutation.isPending}
+                            onClick={() => deleteVersionMutation.mutate(v.id)}
+                          >
+                            {deleteVersionMutation.isPending ? 'Deleting…' : 'Confirm'}
+                          </button>
+                          <button className="text-xs text-gray-400 hover:text-gray-200" onClick={() => { setDeletingVersionId(null); deleteVersionMutation.reset() }}>Cancel</button>
+                        </div>
+                        {deleteVersionMutation.isError && (() => {
+                          const err = deleteVersionMutation.error as any
+                          const detail = err?.response?.data?.detail
+                          if (detail && typeof detail === 'object' && detail.blockers) {
+                            return (
+                              <div className="rounded border border-amber-800 bg-amber-950/30 p-2 space-y-1">
+                                <p className="text-xs font-semibold text-amber-300">{detail.message}</p>
+                                {(detail.blockers as string[]).map((b: string, i: number) => (
+                                  <p key={i} className="text-xs text-amber-200">• {b}</p>
+                                ))}
+                              </div>
+                            )
+                          }
+                          return <p className="text-xs text-red-400">{err?.message ?? 'Delete failed'}</p>
+                        })()}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-xs text-gray-500 mt-1 truncate">{v.notes ?? '—'}</div>
-                  <div className="text-xs text-gray-600 mt-1">{v.promotion_status}</div>
-                </button>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>
@@ -575,17 +738,26 @@ export function StrategyDetails() {
                   <span className="badge badge-gray font-mono">v{selected.version}</span>
                 )}
                 {selected && !editing && (
-                  <button className="btn-ghost text-xs flex items-center gap-1" onClick={startEditing} title="Edit config and save as new version">
+                  <button className="btn-ghost text-xs flex items-center gap-1" onClick={startEditing}>
                     <Pencil size={12} /> Edit
                   </button>
                 )}
               </div>
             </div>
             {selected ? (
-              <div className="grid grid-cols-2 gap-3 text-xs text-gray-500">
+              <div className="grid grid-cols-3 gap-3 text-xs text-gray-500">
                 <div>
                   <div className="text-gray-600">Promotion status</div>
                   <div className="text-gray-200">{selected.promotion_status}</div>
+                </div>
+                <div>
+                  <div className="text-gray-600">Duration mode</div>
+                  <div className="mt-0.5">
+                    {selected.duration_mode === 'day' && <span className="px-2 py-0.5 rounded text-xs font-semibold bg-sky-900/50 text-sky-300">DAY</span>}
+                    {selected.duration_mode === 'swing' && <span className="px-2 py-0.5 rounded text-xs font-semibold bg-indigo-900/50 text-indigo-300">SWING</span>}
+                    {selected.duration_mode === 'position' && <span className="px-2 py-0.5 rounded text-xs font-semibold bg-amber-900/50 text-amber-300">POSITION</span>}
+                    {!selected.duration_mode && <span className="text-gray-500">—</span>}
+                  </div>
                 </div>
                 <div>
                   <div className="text-gray-600">Created</div>

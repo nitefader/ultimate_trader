@@ -42,7 +42,7 @@
     @apply btn bg-transparent border border-gray-700 hover:bg-gray-800 text-gray-300;
   }
   .input {
-    @apply bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-sky-500;
+    @apply bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-sky-500 appearance-auto;
     border-color: var(--color-border);
   }
   .label {

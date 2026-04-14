@@ -39,6 +39,11 @@ class Account(Base):
     max_open_positions: Mapped[int] = mapped_column(default=10)
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
 
+    # Account mode — controls PDT rules, short selling, leverage availability
+    # CASH: no shorts, no leverage, T+1 settlement, PDT inapplicable
+    # MARGIN: short selling enabled, leverage up to max, PDT tracked if equity < $25k
+    account_mode: Mapped[str] = mapped_column(String(16), default="margin")  # cash | margin
+
     # Status
     is_connected: Mapped[bool] = mapped_column(Boolean, default=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)

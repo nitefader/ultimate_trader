@@ -1,26 +1,52 @@
 import React, { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useQuery, useMutation } from '@tanstack/react-query'
-import { Play, Loader, AlertCircle, Info, Database } from 'lucide-react'
-import { strategiesApi } from '../api/strategies'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { AlertCircle, Database, Info, Loader, Play } from 'lucide-react'
+import clsx from 'clsx'
 import { backtestsApi } from '../api/backtests'
 import { servicesApi } from '../api/services'
-import { useKillSwitchStore } from '../stores/useKillSwitchStore'
+import { strategiesApi } from '../api/strategies'
+import { DatePickerInput } from '../components/DatePickerInput'
+import { SelectMenu } from '../components/SelectMenu'
 import { TickerSearch } from '../components/TickerSearch'
-import clsx from 'clsx'
+import { useKillSwitchStore } from '../stores/useKillSwitchStore'
 
 const today = new Date().toISOString().slice(0, 10)
 const jan2018 = '2018-01-01'
 
+const timeframeOptions = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1wk'].map((tf) => ({
+  value: tf,
+  label: tf,
+}))
+
+const dataProviderOptions = [
+  { value: 'auto', label: 'Auto (recommended)' },
+  { value: 'yfinance', label: 'Yahoo Finance' },
+  { value: 'alpaca', label: 'Alpaca' },
+]
+
+const optimizationMetricOptions = [
+  { value: 'sharpe_ratio', label: 'Sharpe Ratio' },
+  { value: 'total_return_pct', label: 'Total Return %' },
+  { value: 'sortino_ratio', label: 'Sortino Ratio' },
+  { value: 'calmar_ratio', label: 'Calmar Ratio' },
+  { value: 'win_rate_pct', label: 'Win Rate %' },
+  { value: 'profit_factor', label: 'Profit Factor' },
+]
+
 export function BacktestLauncher() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const prefillStrategyId = searchParams.get('strategy_id') ?? ''
+  const prefillVersionId = searchParams.get('version_id') ?? ''
+
   const { data: strategies = [], isLoading: strategiesLoading } = useQuery({
     queryKey: ['strategies'],
     queryFn: strategiesApi.list,
   })
 
-  const [selectedStrategyId, setSelectedStrategyId] = useState('')
-  const [selectedVersionId, setSelectedVersionId] = useState('')
+  const [selectedStrategyId, setSelectedStrategyId] = useState(prefillStrategyId)
+  const [selectedVersionId, setSelectedVersionId] = useState(prefillVersionId)
   const [symbols, setSymbols] = useState('SPY')
   const [timeframe, setTimeframe] = useState('1d')
   const [dataProvider, setDataProvider] = useState<'auto' | 'yfinance' | 'alpaca'>('auto')
@@ -52,39 +78,54 @@ export function BacktestLauncher() {
   })
 
   const alpacaServices = allServices.filter(
-    (s) => s.provider?.toLowerCase() === 'alpaca' && s.has_credentials && s.is_active,
+    (service) =>
+      service.provider?.toLowerCase() === 'alpaca' &&
+      service.has_credentials &&
+      service.is_active,
   )
 
-  // Auto-select the default Alpaca service account on first load
   useEffect(() => {
     if (selectedServiceId || alpacaServices.length === 0) return
-    const defaultSvc = alpacaServices.find((s) => s.is_default) ?? alpacaServices[0]
+    const defaultSvc = alpacaServices.find((service) => service.is_default) ?? alpacaServices[0]
     if (defaultSvc) setSelectedServiceId(defaultSvc.id)
-  }, [alpacaServices])
+  }, [alpacaServices, selectedServiceId])
 
-  // When a service account is selected, populate the key fields from it
   useEffect(() => {
-    const svc = alpacaServices.find((s) => s.id === selectedServiceId)
-    if (svc) {
-      setAlpacaApiKey(svc.api_key ?? '')
-      setAlpacaSecretKey(svc.secret_key ?? '')
+    const service = alpacaServices.find((item) => item.id === selectedServiceId)
+    if (service) {
+      setAlpacaApiKey(service.api_key ?? '')
+      setAlpacaSecretKey(service.secret_key ?? '')
     } else {
       setAlpacaApiKey('')
       setAlpacaSecretKey('')
     }
-  }, [selectedServiceId])
+  }, [alpacaServices, selectedServiceId])
 
-  const symbolList = symbols.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+  const symbolList = symbols
+    .split(',')
+    .map((symbol) => symbol.trim().toUpperCase())
+    .filter(Boolean)
 
   const { data: providerRecommendation } = useQuery({
-    queryKey: ['provider-recommendation', symbolList.join(','), timeframe, startDate, endDate, Boolean(alpacaApiKey && alpacaSecretKey), selectedServiceId],
-    queryFn: () => backtestsApi.recommendProvider({
-      symbols: symbolList,
+    queryKey: [
+      'provider-recommendation',
+      symbolList.join(','),
       timeframe,
-      start_date: startDate,
-      end_date: endDate,
-      has_alpaca_credentials: Boolean(selectedServiceId || (alpacaApiKey && alpacaSecretKey)),
-    }),
+      startDate,
+      endDate,
+      Boolean(alpacaApiKey && alpacaSecretKey),
+      selectedServiceId,
+    ],
+    queryFn: () =>
+      backtestsApi.recommendProvider({
+        symbols: symbolList,
+        timeframe,
+        start_date: startDate,
+        end_date: endDate,
+        has_alpaca_credentials: Boolean(
+          selectedServiceId || (alpacaApiKey && alpacaSecretKey),
+        ),
+      }),
     enabled: symbolList.length > 0,
     staleTime: 30_000,
   })
@@ -93,7 +134,7 @@ export function BacktestLauncher() {
     mutationFn: async () => {
       const result = await backtestsApi.launch({
         strategy_version_id: selectedVersionId,
-        symbols: symbols.split(',').map((s) => s.trim()).filter(Boolean),
+        symbols: symbols.split(',').map((symbol) => symbol.trim()).filter(Boolean),
         timeframe,
         start_date: startDate,
         end_date: endDate,
@@ -129,46 +170,81 @@ export function BacktestLauncher() {
   const versions = strategyDetail?.versions ?? []
   const latestVersion = versions[0]
 
+  useEffect(() => {
+    // Auto-select latest version only when no version is chosen and no prefill
+    if (!selectedVersionId && latestVersion && !prefillVersionId) {
+      setSelectedVersionId(latestVersion.id)
+    }
+  }, [latestVersion, selectedVersionId, prefillVersionId])
+
+  const strategyOptions = strategies.map((strategy) => ({
+    value: strategy.id,
+    label: `${strategy.name} (${strategy.category})`,
+  }))
+
+  const versionOptions = versions.map((version) => ({
+    value: version.id,
+    label: `v${version.version} - ${version.notes ?? 'no notes'} (${version.promotion_status})`,
+  }))
+
+  const serviceOptions = alpacaServices.map((service) => ({
+    value: service.id,
+    label: `${service.name} (${service.environment})${service.is_default ? ' * default' : ''}`,
+  }))
+
   const launchValidationErrors: string[] = []
   if (!selectedStrategyId) launchValidationErrors.push('Select a strategy.')
   if (!selectedVersionId) launchValidationErrors.push('Select a strategy version.')
   if (symbolList.length === 0) launchValidationErrors.push('Provide at least one symbol.')
-  if (symbolList.some((s) => !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(s))) {
+  if (symbolList.some((symbol) => !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(symbol))) {
     launchValidationErrors.push('Use valid ticker symbols (uppercase letters/numbers).')
   }
-  if (new Date(startDate) > new Date(endDate)) launchValidationErrors.push('Start date must be on or before end date.')
+  if (new Date(startDate) > new Date(endDate)) {
+    launchValidationErrors.push('Start date must be on or before end date.')
+  }
   if (capital < 1000) launchValidationErrors.push('Initial capital must be at least $1,000.')
   if (commission < 0) launchValidationErrors.push('Commission cannot be negative.')
-  if (commissionPct < 0 || commissionPct > 2) launchValidationErrors.push('Commission %/trade must be between 0 and 2%.')
-  if (slippage < 0 || slippage > 10) launchValidationErrors.push('Slippage ticks must be between 0 and 10.')
+  if (commissionPct < 0 || commissionPct > 2) {
+    launchValidationErrors.push('Commission %/trade must be between 0 and 2%.')
+  }
+  if (slippage < 0 || slippage > 10) {
+    launchValidationErrors.push('Slippage ticks must be between 0 and 10.')
+  }
   if (dataProvider === 'alpaca' && !selectedServiceId) {
-    launchValidationErrors.push('Alpaca provider requires a service account. Create one under Services.')
+    launchValidationErrors.push(
+      'Alpaca provider requires a service account. Create one under Services.',
+    )
   }
   if (dataProvider === 'yfinance' && timeframe === '4h') {
-    launchValidationErrors.push('4h timeframe is not available on yfinance. Use auto or alpaca.')
+    launchValidationErrors.push(
+      '4h timeframe is not available on yfinance. Use auto or alpaca.',
+    )
   }
-  if (walkForwardEnabled && trainWindowMonths < 3) launchValidationErrors.push('Training window should be at least 3 months.')
-  if (walkForwardEnabled && testWindowMonths < 1) launchValidationErrors.push('Test window should be at least 1 month.')
-  if (walkForwardEnabled && warmupBars < 20) launchValidationErrors.push('Warmup bars should be at least 20 for stable indicators.')
+  if (walkForwardEnabled && trainWindowMonths < 3) {
+    launchValidationErrors.push('Training window should be at least 3 months.')
+  }
+  if (walkForwardEnabled && testWindowMonths < 1) {
+    launchValidationErrors.push('Test window should be at least 1 month.')
+  }
+  if (walkForwardEnabled && warmupBars < 20) {
+    launchValidationErrors.push('Warmup bars should be at least 20 for stable indicators.')
+  }
 
-  useEffect(() => {
-    if (!selectedVersionId && latestVersion) {
-      setSelectedVersionId(latestVersion.id)
-    }
-  }, [latestVersion, selectedVersionId])
-
-  const killSwitchStatus = useKillSwitchStore(s => s.status)
+  const killSwitchStatus = useKillSwitchStore((state) => state.status)
   const isKilled = killSwitchStatus?.global_killed ?? false
-  const canLaunch = launchValidationErrors.length === 0 && !launchMutation.isPending && !isKilled
+  const canLaunch =
+    launchValidationErrors.length === 0 && !launchMutation.isPending && !isKilled
 
   const errorMsg = launchMutation.error
     ? (() => {
         const err = launchMutation.error as any
         const detail = err?.response?.data?.detail
         const backendError = err?.response?.data?.error
+
         if (detail && backendError && backendError !== detail) {
           return `${detail}: ${backendError}`
         }
+
         return detail ?? backendError ?? (err as Error).message ?? 'Unknown error'
       })()
     : null
@@ -177,29 +253,31 @@ export function BacktestLauncher() {
     <div className="max-w-2xl space-y-6">
       <div>
         <h1 className="text-xl font-bold text-gray-100">Backtest Launcher</h1>
-        <p className="text-xs text-gray-500 mt-0.5">Run a strategy against historical market data</p>
+        <p className="mt-0.5 text-xs text-gray-500">
+          Run a strategy against historical market data
+        </p>
       </div>
 
       {launchValidationErrors.length > 0 && (
-        <div className="card border-amber-800 bg-amber-900/20 text-amber-200 text-xs space-y-1">
+        <div className="card space-y-1 border-amber-800 bg-amber-900/20 text-xs text-amber-200">
           <div className="font-semibold text-amber-300">Preflight checks</div>
-          {launchValidationErrors.map((err, i) => (
-            <div key={i}>• {err}</div>
+          {launchValidationErrors.map((error, index) => (
+            <div key={index}>- {error}</div>
           ))}
         </div>
       )}
 
       <div className="card space-y-4">
-        <h3 className="text-sm font-semibold text-gray-200 border-b border-gray-800 pb-2">
+        <h3 className="border-b border-gray-800 pb-2 text-sm font-semibold text-gray-200">
           Strategy Selection
         </h3>
 
         {strategiesLoading ? (
-          <div className="text-gray-500 text-sm flex items-center gap-2">
+          <div className="flex items-center gap-2 text-sm text-gray-500">
             <Loader size={14} className="animate-spin" /> Loading strategies...
           </div>
         ) : strategies.length === 0 ? (
-          <div className="flex items-start gap-2 text-amber-400 text-sm bg-amber-900/20 border border-amber-800/50 rounded-lg p-3">
+          <div className="flex items-start gap-2 rounded-lg border border-amber-800/50 bg-amber-900/20 p-3 text-sm text-amber-400">
             <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
             <span>
               No strategies found.{' '}
@@ -212,45 +290,35 @@ export function BacktestLauncher() {
         ) : (
           <div>
             <label className="label">Strategy</label>
-            <select
-              className="input w-full"
+            <SelectMenu
+              className="w-full"
               value={selectedStrategyId}
-              onChange={(e) => {
-                setSelectedStrategyId(e.target.value)
+              placeholder="- Select a strategy -"
+              options={strategyOptions}
+              onChange={(value) => {
+                setSelectedStrategyId(value)
                 setSelectedVersionId('')
               }}
-            >
-              <option value="">- Select a strategy -</option>
-              {strategies.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} ({s.category})
-                </option>
-              ))}
-            </select>
+            />
           </div>
         )}
 
         {versions.length > 0 && (
           <div>
             <label className="label">Version</label>
-            <select
-              className="input w-full"
+            <SelectMenu
+              className="w-full"
               value={selectedVersionId}
-              onChange={(e) => setSelectedVersionId(e.target.value)}
-            >
-              <option value="">- Select version -</option>
-              {versions.map((v) => (
-                <option key={v.id} value={v.id}>
-                  v{v.version} - {v.notes ?? 'no notes'} ({v.promotion_status})
-                </option>
-              ))}
-            </select>
+              placeholder="- Select version -"
+              options={versionOptions}
+              onChange={setSelectedVersionId}
+            />
           </div>
         )}
 
         {latestVersion && !selectedVersionId && (
           <div
-            className="text-xs text-sky-400 cursor-pointer hover:text-sky-300"
+            className="cursor-pointer text-xs text-sky-400 hover:text-sky-300"
             onClick={() => setSelectedVersionId(latestVersion.id)}
           >
             Use latest version (v{latestVersion.version})
@@ -259,37 +327,53 @@ export function BacktestLauncher() {
       </div>
 
       <div className="card space-y-4">
-        <h3 className="text-sm font-semibold text-gray-200 border-b border-gray-800 pb-2">Data Configuration</h3>
+        <h3 className="border-b border-gray-800 pb-2 text-sm font-semibold text-gray-200">
+          Data Configuration
+        </h3>
 
         <div>
           <label className="label">Symbols</label>
           <TickerSearch
             selected={symbolList}
             onChange={(next) => setSymbols(next.join(', '))}
-            placeholder="Search ticker — SPY, QQQ, AAPL..."
+            placeholder="Search ticker - SPY, QQQ, AAPL..."
           />
-          <p className="text-xs text-gray-600 mt-1">Select one or more symbols. Data is cached after first download.</p>
+          <p className="mt-1 text-xs text-gray-600">
+            Select one or more symbols. Data is cached after first download.
+          </p>
         </div>
 
         <div>
           <label className="label">Data Provider</label>
-          <select className="input w-full" value={dataProvider} onChange={(e) => setDataProvider(e.target.value as 'auto' | 'yfinance' | 'alpaca')}>
-            <option value="auto">Auto (recommended)</option>
-            <option value="yfinance">Yahoo Finance</option>
-            <option value="alpaca">Alpaca</option>
-          </select>
-          <p className="text-xs text-gray-600 mt-1">Auto mode picks provider based on timeframe/range and credential availability.</p>
+          <SelectMenu
+            className="w-full"
+            value={dataProvider}
+            options={dataProviderOptions}
+            onChange={(value) => setDataProvider(value as 'auto' | 'yfinance' | 'alpaca')}
+          />
+          <p className="mt-1 text-xs text-gray-600">
+            Auto mode picks provider based on timeframe/range and credential availability.
+          </p>
         </div>
 
         {providerRecommendation && (
-          <div className="rounded border border-sky-800 bg-sky-950/30 p-3 text-xs text-sky-200 space-y-1">
-            <div className="font-semibold text-sky-300">Provider Recommendation: {providerRecommendation.provider.toUpperCase()} ({providerRecommendation.confidence})</div>
+          <div className="space-y-1 rounded border border-sky-800 bg-sky-950/30 p-3 text-xs text-sky-200">
+            <div className="font-semibold text-sky-300">
+              Provider Recommendation: {providerRecommendation.provider.toUpperCase()} (
+              {providerRecommendation.confidence})
+            </div>
             <div>{providerRecommendation.reason}</div>
-            {providerRecommendation.warnings?.map((w, i) => (
-              <div key={i} className="text-amber-300">• {w}</div>
+            {providerRecommendation.warnings?.map((warning, index) => (
+              <div key={index} className="text-amber-300">
+                - {warning}
+              </div>
             ))}
             {dataProvider !== providerRecommendation.provider && (
-              <button className="mt-1 text-[11px] text-sky-300 underline" onClick={() => setDataProvider(providerRecommendation.provider)}>
+              <button
+                type="button"
+                className="mt-1 text-[11px] text-sky-300 underline"
+                onClick={() => setDataProvider(providerRecommendation.provider)}
+              >
                 Use recommended provider
               </button>
             )}
@@ -316,19 +400,13 @@ export function BacktestLauncher() {
                 </span>
               </div>
             ) : (
-              <select
-                className="input w-full"
+              <SelectMenu
+                className="w-full"
                 value={selectedServiceId}
-                onChange={(e) => setSelectedServiceId(e.target.value)}
-              >
-                <option value="">— Select an Alpaca account —</option>
-                {alpacaServices.map((svc) => (
-                  <option key={svc.id} value={svc.id}>
-                    {svc.name} ({svc.environment})
-                    {svc.is_default ? ' ★ default' : ''}
-                  </option>
-                ))}
-              </select>
+                placeholder="- Select an Alpaca account -"
+                options={serviceOptions}
+                onChange={setSelectedServiceId}
+              />
             )}
 
             {selectedServiceId && (
@@ -342,84 +420,145 @@ export function BacktestLauncher() {
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className="label">Timeframe</label>
-            <select className="input w-full" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
-              {['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1wk'].map((tf) => (
-                <option key={tf} value={tf}>
-                  {tf}
-                </option>
-              ))}
-            </select>
+            <SelectMenu
+              className="w-full"
+              value={timeframe}
+              options={timeframeOptions}
+              onChange={setTimeframe}
+            />
           </div>
           <div>
             <label className="label">Start Date</label>
-            <input type="date" className="input w-full" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+            <DatePickerInput
+              className="w-full"
+              value={startDate}
+              max={endDate}
+              onChange={setStartDate}
+            />
           </div>
           <div>
             <label className="label">End Date</label>
-            <input type="date" className="input w-full" value={endDate} onChange={(e) => setEndDate(e.target.value)} max={today} />
+            <DatePickerInput
+              className="w-full"
+              value={endDate}
+              min={startDate}
+              max={today}
+              onChange={setEndDate}
+            />
           </div>
         </div>
 
         {timeframe !== '1d' && timeframe !== '1wk' && (
-          <div className="flex items-start gap-2 text-sky-400/80 text-xs bg-sky-900/10 border border-sky-900/30 rounded p-2">
+          <div className="flex items-start gap-2 rounded border border-sky-900/30 bg-sky-900/10 p-2 text-xs text-sky-400/80">
             <Info size={13} className="mt-0.5 flex-shrink-0" />
-            <span>Intraday data on yfinance is limited: 1m = 7 days, 5-30m = 60 days, 1h = 2 years. For deeper intraday history, use Alpaca or Auto.</span>
+            <span>
+              Intraday data on yfinance is limited: 1m = 7 days, 5-30m = 60 days, 1h = 2
+              years. For deeper intraday history, use Alpaca or Auto.
+            </span>
           </div>
         )}
       </div>
 
       <div className="card space-y-4">
-        <h3 className="text-sm font-semibold text-gray-200 border-b border-gray-800 pb-2">Walk-Forward Configuration</h3>
+        <h3 className="border-b border-gray-800 pb-2 text-sm font-semibold text-gray-200">
+          Walk-Forward Configuration
+        </h3>
 
         <div className="flex items-center justify-between rounded border border-gray-800 px-3 py-2">
           <div>
             <div className="text-xs font-semibold text-gray-300">Enable Honest Walk-Forward</div>
-            <div className="text-[11px] text-gray-500">Train on in-sample window, lock params, then test only on unseen data.</div>
+            <div className="text-[11px] text-gray-500">
+              Train on in-sample window, lock params, then test only on unseen data. <span className="text-sky-400/80">Strongly recommended</span> — prevents overfitting.
+            </div>
           </div>
           <input
             type="checkbox"
             checked={walkForwardEnabled}
-            onChange={(e) => setWalkForwardEnabled(e.target.checked)}
+            onChange={(event) => setWalkForwardEnabled(event.target.checked)}
             className="h-4 w-4"
           />
         </div>
 
         {walkForwardEnabled && (
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            <div>
-              <label className="label">Train Window (months)</label>
-              <input type="number" className="input w-full" min={3} max={60} value={trainWindowMonths} onChange={(e) => setTrainWindowMonths(parseInt(e.target.value) || 12)} />
+          <>
+            <div className="text-[11px] text-gray-600 bg-gray-900/60 rounded px-3 py-2 border border-gray-800">
+              <strong className="text-gray-500">Tip:</strong> For daily strategies, try 12m train + 3m test. For intraday, try 3m train + 1m test.
+              Ensure your date range spans at least (train + test) × 2 months for meaningful folds.
             </div>
-            <div>
-              <label className="label">Test Window (months)</label>
-              <input type="number" className="input w-full" min={1} max={24} value={testWindowMonths} onChange={(e) => setTestWindowMonths(parseInt(e.target.value) || 3)} />
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+              <div>
+                <label className="label">Train Window (months)</label>
+                <input
+                  type="number"
+                  className="input w-full"
+                  min={3}
+                  max={60}
+                  value={trainWindowMonths}
+                  onChange={(event) =>
+                    setTrainWindowMonths(parseInt(event.target.value, 10) || 12)
+                  }
+                />
+              </div>
+              <div>
+                <label className="label">Test Window (months)</label>
+                <input
+                  type="number"
+                  className="input w-full"
+                  min={1}
+                  max={24}
+                  value={testWindowMonths}
+                  onChange={(event) =>
+                    setTestWindowMonths(parseInt(event.target.value, 10) || 3)
+                  }
+                />
+              </div>
+              <div>
+                <label className="label">Warmup Bars</label>
+                <input
+                  type="number"
+                  className="input w-full"
+                  min={20}
+                  max={600}
+                  value={warmupBars}
+                  onChange={(event) => setWarmupBars(parseInt(event.target.value, 10) || 100)}
+                />
+                <p className="text-[10px] text-gray-600 mt-0.5">Bars to warm up indicators before trading starts. 100 is safe for most strategies.</p>
+              </div>
+              <div>
+                <label className="label">Max Folds</label>
+                <input
+                  type="number"
+                  className="input w-full"
+                  min={1}
+                  max={60}
+                  value={maxFolds}
+                  onChange={(event) => setMaxFolds(parseInt(event.target.value, 10) || 24)}
+                />
+                <p className="text-[10px] text-gray-600 mt-0.5">Cap on number of train/test periods. 24 is usually sufficient.</p>
+              </div>
+              <div>
+                <label className="label">Optimization Metric</label>
+                <SelectMenu
+                  className="w-full"
+                  value={selectionMetric}
+                  options={optimizationMetricOptions}
+                  onChange={setSelectionMetric}
+                />
+                <p className="text-[10px] text-gray-600 mt-0.5">Metric used to rank parameter sets during training. Sharpe balances return and risk.</p>
+              </div>
             </div>
-            <div>
-              <label className="label">Warmup Bars</label>
-              <input type="number" className="input w-full" min={20} max={600} value={warmupBars} onChange={(e) => setWarmupBars(parseInt(e.target.value) || 100)} />
-            </div>
-            <div>
-              <label className="label">Max Folds</label>
-              <input type="number" className="input w-full" min={1} max={60} value={maxFolds} onChange={(e) => setMaxFolds(parseInt(e.target.value) || 24)} />
-            </div>
-            <div>
-              <label className="label">Optimization Metric</label>
-              <select className="input w-full" value={selectionMetric} onChange={e => setSelectionMetric(e.target.value)}>
-                <option value="sharpe_ratio">Sharpe Ratio</option>
-                <option value="total_return_pct">Total Return %</option>
-                <option value="sortino_ratio">Sortino Ratio</option>
-                <option value="calmar_ratio">Calmar Ratio</option>
-                <option value="win_rate_pct">Win Rate %</option>
-                <option value="profit_factor">Profit Factor</option>
-              </select>
-            </div>
-          </div>
+          </>
         )}
       </div>
 
       <div className="card space-y-4">
-        <h3 className="text-sm font-semibold text-gray-200 border-b border-gray-800 pb-2">Execution Parameters</h3>
+        <h3 className="border-b border-gray-800 pb-2 text-sm font-semibold text-gray-200">
+          Execution Parameters
+        </h3>
 
+        <div className="text-[11px] text-gray-600 bg-gray-900/60 rounded px-3 py-2 border border-gray-800">
+          <strong className="text-gray-500">Tip:</strong> For realistic results, use Alpaca commission defaults: $0.005/share or 0.1%/trade. Set slippage to 1–2 ticks for liquid ETFs, higher for small-caps.
+        </div>
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className="label">Initial Capital ($)</label>
@@ -427,10 +566,11 @@ export function BacktestLauncher() {
               type="number"
               className="input w-full"
               value={capital}
-              onChange={(e) => setCapital(parseInt(e.target.value) || 0)}
               min={1000}
               step={1000}
+              onChange={(event) => setCapital(parseInt(event.target.value, 10) || 0)}
             />
+            <p className="text-[10px] text-gray-600 mt-0.5">Starting portfolio value for the simulation.</p>
           </div>
           <div>
             <label className="label">Commission/Share ($)</label>
@@ -439,9 +579,10 @@ export function BacktestLauncher() {
               step="0.001"
               className="input w-full"
               value={commission}
-              onChange={(e) => setCommission(parseFloat(e.target.value) || 0)}
               min={0}
+              onChange={(event) => setCommission(parseFloat(event.target.value) || 0)}
             />
+            <p className="text-[10px] text-gray-600 mt-0.5">Flat fee per share. Alpaca: $0.005 (equity). Use 0 if broker charges % only.</p>
           </div>
           <div>
             <label className="label">Commission (% per trade)</label>
@@ -450,10 +591,11 @@ export function BacktestLauncher() {
               step="0.01"
               className="input w-full"
               value={commissionPct}
-              onChange={(e) => setCommissionPct(parseFloat(e.target.value) || 0)}
               min={0}
               max={2}
+              onChange={(event) => setCommissionPct(parseFloat(event.target.value) || 0)}
             />
+            <p className="text-[10px] text-gray-600 mt-0.5">Percentage of trade value. Alpaca: 0.1%. Applied on top of per-share fee.</p>
           </div>
           <div>
             <label className="label">Slippage Ticks</label>
@@ -461,20 +603,21 @@ export function BacktestLauncher() {
               type="number"
               className="input w-full"
               value={slippage}
-              onChange={(e) => setSlippage(parseInt(e.target.value) || 0)}
               min={0}
               max={10}
+              onChange={(event) => setSlippage(parseInt(event.target.value, 10) || 0)}
             />
+            <p className="text-[10px] text-gray-600 mt-0.5">Market impact / fill slippage in price ticks. 1 tick = 1 cent for most equities.</p>
           </div>
         </div>
       </div>
 
       {errorMsg && (
-        <div className="flex items-start gap-2 bg-red-900/30 border border-red-800 rounded-lg p-3 text-red-400 text-sm">
-          <AlertCircle size={15} className="flex-shrink-0 mt-0.5" />
+        <div className="flex items-start gap-2 rounded-lg border border-red-800 bg-red-900/30 p-3 text-sm text-red-400">
+          <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
           <div>
-            <div className="font-semibold mb-0.5">Backtest failed to launch</div>
-            <div className="text-xs text-red-500 font-mono">{errorMsg}</div>
+            <div className="mb-0.5 font-semibold">Backtest failed to launch</div>
+            <div className="font-mono text-xs text-red-500">{errorMsg}</div>
           </div>
         </div>
       )}
@@ -482,17 +625,19 @@ export function BacktestLauncher() {
       {isKilled && (
         <div className="flex items-center gap-2 rounded border border-red-800 bg-red-900/20 px-3 py-2 text-xs text-red-400">
           <AlertCircle size={14} />
-          Kill switch is active — backtests are disabled. Resume trading from the Accounts screen.
+          Kill switch is active - backtests are disabled. Resume trading from the Accounts
+          screen.
         </div>
       )}
+
       <button
+        type="button"
         className={clsx(
-          'btn-primary w-full flex items-center justify-center gap-2 py-3 text-sm font-semibold',
-          !canLaunch && 'opacity-50 cursor-not-allowed',
+          'btn-primary flex w-full items-center justify-center gap-2 py-3 text-sm font-semibold',
+          !canLaunch && 'cursor-not-allowed opacity-50',
         )}
         onClick={() => launchMutation.mutate()}
         disabled={!canLaunch}
-        title={isKilled ? 'Kill switch is active — backtests are disabled' : undefined}
       >
         {launchMutation.isPending ? (
           <>
@@ -505,16 +650,31 @@ export function BacktestLauncher() {
         )}
       </button>
 
-      <div className="text-xs text-gray-600 space-y-1 px-1">
+      <div className="space-y-1 px-1 text-xs text-gray-600">
         <p>Signals fire at bar close; fills execute at next bar open plus slippage.</p>
-        <p>Costs: ${commission.toFixed(3)}/share + {commissionPct.toFixed(2)}% per trade · Slippage: {slippage} tick(s) · Capital: ${capital.toLocaleString()}</p>
-        <p>Provider: {dataProvider === 'auto' ? `Auto${providerRecommendation ? ` → ${providerRecommendation.provider}` : ''}` : dataProvider}</p>
+        <p>
+          Costs: ${commission.toFixed(3)}/share + {commissionPct.toFixed(2)}% per trade -
+          {' '}Slippage: {slippage} tick(s) - Capital: ${capital.toLocaleString()}
+        </p>
+        <p>
+          Provider:{' '}
+          {dataProvider === 'auto'
+            ? `Auto${providerRecommendation ? ` -> ${providerRecommendation.provider}` : ''}`
+            : dataProvider}
+        </p>
         {walkForwardEnabled ? (
-          <p>Walk-forward: {trainWindowMonths}m train → {testWindowMonths}m blind test, stitched out-of-sample reporting only.</p>
+          <p>
+            Walk-forward: {trainWindowMonths}m train {'->'} {testWindowMonths}m blind
+            test,
+            stitched out-of-sample reporting only.
+          </p>
         ) : (
           <p>Walk-forward disabled: this run uses naive full-period evaluation.</p>
         )}
-        <p>Historical bars are downloaded from the selected provider and cached locally on first run.</p>
+        <p>
+          Historical bars are downloaded from the selected provider and cached locally on
+          first run.
+        </p>
       </div>
     </div>
   )

@@ -17,7 +17,12 @@ from typing import Any, Literal
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+    MarketOrderRequest as _BracketBase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +473,156 @@ def close_all_positions(config: AlpacaClientConfig) -> list[dict[str, Any]]:
         return [{"error": str(exc)}]
     except Exception:
         return [{"error": "Unexpected error"}]
+
+
+def get_asset_info(config: AlpacaClientConfig, symbol: str) -> dict[str, Any]:
+    """
+    Fetch Alpaca asset metadata for a symbol.
+
+    Returns fractionable, shortable, easy_to_borrow, marginable flags.
+    Used at universe resolution time to pre-check shortability / fractionability.
+    """
+    try:
+        client = _client(config)
+        asset = client.get_asset(symbol.upper())
+        return {
+            "symbol": str(asset.symbol),
+            "name": str(getattr(asset, "name", "") or ""),
+            "exchange": str(getattr(asset, "exchange", "") or "").split(".")[-1],
+            "status": str(getattr(asset, "status", "") or "").split(".")[-1],
+            "tradable": bool(getattr(asset, "tradable", False)),
+            "fractionable": bool(getattr(asset, "fractionable", False)),
+            "shortable": bool(getattr(asset, "shortable", False)),
+            "easy_to_borrow": bool(getattr(asset, "easy_to_borrow", False)),
+            "marginable": bool(getattr(asset, "marginable", False)),
+        }
+    except APIError as exc:
+        logger.warning("Failed to get Alpaca asset info for %s: %s", symbol, exc)
+        return {"error": str(exc), "symbol": symbol.upper()}
+    except Exception as exc:
+        logger.error("Unexpected error getting Alpaca asset info for %s: %s", symbol, exc)
+        return {"error": "Unexpected error", "symbol": symbol.upper()}
+
+
+def check_symbols_eligibility(
+    config: AlpacaClientConfig,
+    symbols: list[str],
+    *,
+    require_shortable: bool = False,
+    require_fractionable: bool = False,
+) -> dict[str, Any]:
+    """
+    Bulk-check symbol eligibility: shortability and fractionability.
+
+    Called at universe resolution time before adding symbols to a SymbolUniverse.
+
+    Returns:
+        eligible : list[str]
+        ineligible : list[dict] — symbol + reason
+        asset_info : dict[symbol, asset_flags]
+    """
+    eligible: list[str] = []
+    ineligible: list[dict[str, Any]] = []
+    asset_info: dict[str, Any] = {}
+
+    for symbol in symbols:
+        info = get_asset_info(config, symbol)
+        sym = symbol.upper()
+        asset_info[sym] = info
+
+        if info.get("error"):
+            ineligible.append({"symbol": sym, "reason": f"asset lookup failed: {info['error']}"})
+            continue
+
+        if not info.get("tradable"):
+            ineligible.append({"symbol": sym, "reason": "not tradable on Alpaca"})
+            continue
+
+        if require_shortable and not info.get("shortable"):
+            ineligible.append({"symbol": sym, "reason": "not shortable"})
+            continue
+
+        if require_fractionable and not info.get("fractionable"):
+            ineligible.append({"symbol": sym, "reason": "not fractionable"})
+            continue
+
+        eligible.append(sym)
+
+    return {
+        "eligible": eligible,
+        "ineligible": ineligible,
+        "asset_info": asset_info,
+        "eligible_count": len(eligible),
+        "ineligible_count": len(ineligible),
+    }
+
+
+def place_bracket_order(
+    config: AlpacaClientConfig,
+    symbol: str,
+    qty: float,
+    side: str,
+    *,
+    stop_price: float | None = None,
+    take_profit_price: float | None = None,
+    time_in_force: str = "day",
+    client_order_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Submit a bracket order (order_class=bracket) to Alpaca.
+
+    A bracket order is a market order with attached stop-loss and/or take-profit
+    legs. Reduces execution layer complexity — Alpaca manages the contingent legs.
+
+    At least one of stop_price or take_profit_price must be provided.
+    """
+    if not stop_price and not take_profit_price:
+        return {"error": "bracket_order requires at least one of stop_price or take_profit_price"}
+
+    try:
+        _check_rate_limit(config.api_key)
+        client = TradingClient(
+            api_key=config.api_key,
+            secret_key=config.secret_key,
+            paper=config.mode == "paper",
+            url_override=config.base_url,
+        )
+
+        order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+        tif = TIME_IN_FORCE_BY_NAME.get(time_in_force.lower(), TimeInForce.DAY)
+        coid = client_order_id or str(uuid.uuid4())
+
+        # Build the bracket order payload as a raw dict — alpaca-py MarketOrderRequest
+        # supports order_class and take_profit / stop_loss legs via keyword args.
+        order_data: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "qty": qty,
+            "side": order_side,
+            "time_in_force": tif,
+            "order_class": "bracket",
+            "client_order_id": coid,
+        }
+        if take_profit_price:
+            order_data["take_profit"] = {"limit_price": take_profit_price}
+        if stop_price:
+            order_data["stop_loss"] = {"stop_price": stop_price}
+
+        req = MarketOrderRequest(**{k: v for k, v in order_data.items() if v is not None})
+        submitted = client.submit_order(req)
+        result = _fmt_order(submitted)
+        result["order_class"] = "bracket"
+        result["stop_price"] = stop_price
+        result["take_profit_price"] = take_profit_price
+        return result
+    except APIError as exc:
+        logger.error("Failed to place Alpaca bracket order for %s: %s", symbol, exc)
+        return {"error": str(exc)}
+    except AlpacaRateLimitError as exc:
+        logger.warning("Alpaca rate limit hit: %s", exc)
+        return {"error": str(exc)}
+    except Exception as exc:
+        logger.error("Unexpected error placing bracket order for %s: %s", symbol, exc)
+        return {"error": "Unexpected error"}
 
 
 def _fmt_position(position: Any) -> dict[str, Any]:

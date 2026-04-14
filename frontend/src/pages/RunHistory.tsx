@@ -2,11 +2,15 @@ import React, { useState, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { backtestsApi } from '../api/backtests'
+import { strategiesApi } from '../api/strategies'
 import { ModeIndicator } from '../components/ModeIndicator'
+import { usePollingGate } from '../hooks/usePollingGate'
 import { TrendingUp, AlertCircle, ChevronUp, ChevronDown, Trash2, Search, GitCompareArrows, X } from 'lucide-react'
+import { SelectMenu } from '../components/SelectMenu'
+import { Tooltip } from '../components/Tooltip'
 import clsx from 'clsx'
 
-type SortKey = 'date' | 'return' | 'sharpe' | 'drawdown' | 'win_rate' | 'trades' | 'oos_return'
+type SortKey = 'date' | 'return' | 'sharpe' | 'drawdown' | 'win_rate' | 'trades' | 'oos_return' | 'strategy'
 type SortDir = 'asc' | 'desc'
 type StatusFilter = 'all' | 'completed' | 'failed' | 'running' | 'pending'
 
@@ -30,13 +34,36 @@ function fmtRunName(symbols: string[] | undefined, timeframe: string, startDate?
 }
 
 export function RunHistory() {
+  const pausePolling = usePollingGate()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { data: runs = [], isLoading, isFetching } = useQuery({
     queryKey: ['backtests'],
     queryFn: () => backtestsApi.list(undefined, 100),
-    refetchInterval: 10_000,
+    refetchInterval: pausePolling ? false : 10_000,
   })
+
+  const { data: strategies = [] } = useQuery({
+    queryKey: ['strategies'],
+    queryFn: strategiesApi.list,
+    staleTime: 60_000,
+  })
+
+  // Map strategy_id → name for the run table (runs have strategy_version_id, not strategy name)
+  // We need version→strategy mapping. The strategies API returns versions inline on get(), not list().
+  // Best effort: build a name map from run.strategy_version_id → strategy name by
+  // looking for version_id matches inside strategies that happen to carry versions.
+  // If not available, fall back to a truncated version id.
+  const strategyNameByVersionId = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const s of strategies) {
+      const versions = (s as any).versions ?? []
+      for (const v of versions) {
+        map[v.id] = s.name
+      }
+    }
+    return map
+  }, [strategies])
 
   const deleteRunMutation = useMutation({
     mutationFn: (runId: string) => backtestsApi.delete(runId),
@@ -60,6 +87,7 @@ export function RunHistory() {
   const [selectedRunIds, setSelectedRunIds] = useState<string[]>([])
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [symbolSearch, setSymbolSearch] = useState('')
+  const [strategySearch, setStrategySearch] = useState('')
 
   const toggleRunSelection = (runId: string) => {
     setSelectedRunIds((prev) =>
@@ -114,6 +142,7 @@ export function RunHistory() {
         case 'win_rate': return m?.win_rate_pct ?? -Infinity
         case 'trades': return m?.total_trades ?? -Infinity
         case 'oos_return': return wf?.aggregate_oos?.oos_total_return_pct ?? -Infinity
+        case 'strategy': return strategyNameByVersionId[run.strategy_version_id ?? ''] ?? ''
         default: return ''
       }
     }
@@ -132,9 +161,14 @@ export function RunHistory() {
         const needle = symbolSearch.trim().toLowerCase()
         if (!run.symbols?.join(',').toLowerCase().includes(needle)) return false
       }
+      if (strategySearch.trim()) {
+        const needle = strategySearch.trim().toLowerCase()
+        const stratName = strategyNameByVersionId[run.strategy_version_id ?? ''] ?? ''
+        if (!stratName.toLowerCase().includes(needle)) return false
+      }
       return true
     })
-  }, [sortedRuns, statusFilter, symbolSearch])
+  }, [sortedRuns, statusFilter, symbolSearch, strategySearch, strategyNameByVersionId])
 
   const SortIcon = ({ col }: { col: SortKey }) =>
     sortKey === col
@@ -195,7 +229,6 @@ export function RunHistory() {
                 <button
                   className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors"
                   onClick={clearSelection}
-                  title="Clear selection"
                 >
                   <X size={13} />
                   Clear
@@ -205,17 +238,17 @@ export function RunHistory() {
           )}
 
           <div className="flex items-center gap-3">
-            <select
+            <SelectMenu
               value={statusFilter}
-              onChange={e => setStatusFilter(e.target.value as StatusFilter)}
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-sky-600"
-            >
-              <option value="all">All Statuses</option>
-              <option value="completed">Completed</option>
-              <option value="failed">Failed</option>
-              <option value="running">Running</option>
-              <option value="pending">Pending</option>
-            </select>
+              onChange={v => setStatusFilter(v as StatusFilter)}
+              options={[
+                { value: 'all', label: 'All Statuses' },
+                { value: 'completed', label: 'Completed' },
+                { value: 'failed', label: 'Failed' },
+                { value: 'running', label: 'Running' },
+                { value: 'pending', label: 'Pending' },
+              ]}
+            />
             <div className="relative">
               <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
               <input
@@ -226,7 +259,17 @@ export function RunHistory() {
                 className="bg-gray-900 border border-gray-700 rounded pl-7 pr-3 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-sky-600 w-44"
               />
             </div>
-            {(statusFilter !== 'all' || symbolSearch.trim()) && (
+            <div className="relative">
+              <Search size={13} className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Search strategy…"
+                value={strategySearch}
+                onChange={e => setStrategySearch(e.target.value)}
+                className="bg-gray-900 border border-gray-700 rounded pl-7 pr-3 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-sky-600 w-40"
+              />
+            </div>
+            {(statusFilter !== 'all' || symbolSearch.trim() || strategySearch.trim()) && (
               <span className="text-xs text-gray-500">{filteredRuns.length} shown</span>
             )}
             {filteredRuns.length > 0 && (
@@ -246,8 +289,8 @@ export function RunHistory() {
                   <tr className="border-b border-gray-800 bg-gray-900/50">
                     <th
                       className="text-left px-3 py-2.5 text-xs text-gray-500 uppercase tracking-wide"
-                      title="Select rows to compare or delete in bulk"
                     />
+                    <th className="text-left px-4 py-2.5 text-xs text-gray-500 uppercase tracking-wide cursor-pointer select-none hover:text-gray-300" onClick={() => handleSort('strategy')}>Strategy <SortIcon col="strategy" /></th>
                     <th className="text-left px-4 py-2.5 text-xs text-gray-500 uppercase tracking-wide">Symbols</th>
                     <th className="text-left px-4 py-2.5 text-xs text-gray-500 uppercase tracking-wide">Mode</th>
                     <th className="text-left px-4 py-2.5 text-xs text-gray-500 uppercase tracking-wide">TF</th>
@@ -300,6 +343,17 @@ export function RunHistory() {
                             className="accent-sky-500"
                           />
                         </td>
+                        <td className="px-4 py-2.5 max-w-[140px]">
+                          {run.strategy_version_id && strategyNameByVersionId[run.strategy_version_id] ? (
+                            <span className="text-gray-300 text-xs truncate block" title={strategyNameByVersionId[run.strategy_version_id]}>
+                              {strategyNameByVersionId[run.strategy_version_id]}
+                            </span>
+                          ) : (
+                            <span className="text-gray-600 text-xs font-mono truncate block" title={run.strategy_version_id ?? ''}>
+                              {run.strategy_version_id ? run.strategy_version_id.slice(0, 8) + '…' : '—'}
+                            </span>
+                          )}
+                        </td>
                         <td className="px-4 py-2.5">
                           <Link to={`/runs/${run.id}`} className="text-sky-400 hover:text-sky-300 font-mono text-sm font-medium">
                             {run.symbols?.join(', ') || '—'}
@@ -351,29 +405,30 @@ export function RunHistory() {
                           )}
                         </td>
                         <td className="px-4 py-2.5">
-                          <span
-                            className={clsx('badge text-xs', {
-                              'badge-green':  run.status === 'completed',
-                              'badge-red':    run.status === 'failed',
-                              'badge-gray':   run.status === 'pending',
-                              'bg-sky-900/60 text-sky-300': run.status === 'running',
-                            })}
-                            title={isFailed && run.error_message ? run.error_message : undefined}
-                          >
-                            {run.status === 'running' && (
-                              <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping inline-block mr-1" />
-                            )}
-                            {isFailed && <AlertCircle size={10} className="inline mr-1" />}
-                            {fmtStatus(run.status)}
-                          </span>
+                          <Tooltip content={isFailed && run.error_message ? run.error_message : undefined}>
+                            <span
+                              className={clsx('badge text-xs', {
+                                'badge-green':  run.status === 'completed',
+                                'badge-red':    run.status === 'failed',
+                                'badge-gray':   run.status === 'pending',
+                                'bg-sky-900/60 text-sky-300': run.status === 'running',
+                              })}
+                            >
+                              {run.status === 'running' && (
+                                <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping inline-block mr-1" />
+                              )}
+                              {isFailed && <AlertCircle size={10} className="inline mr-1" />}
+                              {fmtStatus(run.status)}
+                            </span>
+                          </Tooltip>
                         </td>
                         <td className="px-4 py-2.5 text-gray-500 text-xs whitespace-nowrap">
                           {fmtDate(run.created_at, true)}
                         </td>
                         <td className="px-4 py-2.5 text-right">
+                          <Tooltip content="Delete run">
                           <button
                             type="button"
-                            title="Delete run"
                             className="inline-flex items-center justify-center p-1 rounded text-red-500 hover:text-red-300 hover:bg-red-950/40 disabled:text-gray-600 disabled:hover:bg-transparent transition-colors"
                             disabled={run.status === 'running' || deleteRunMutation.isPending}
                             onClick={async () => {
@@ -384,6 +439,7 @@ export function RunHistory() {
                           >
                             <Trash2 size={13} />
                           </button>
+                          </Tooltip>
                         </td>
                       </tr>
                     )

@@ -1,6 +1,5 @@
 """Tests for the Data Services API (/api/v1/services)."""
 import pytest
-import pytest_asyncio
 from httpx import AsyncClient
 
 
@@ -172,3 +171,31 @@ async def test_invalid_provider_rejected(client: AsyncClient):
 async def test_invalid_environment_rejected(client: AsyncClient):
     resp = await client.post("/api/v1/services", json={"name": "Bad", "environment": "staging"})
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_alpaca_stream_status_endpoint(client: AsyncClient):
+    resp = await client.get("/api/v1/services/alpaca-stream/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["stream_url"].startswith("wss://stream.data.alpaca.markets/v2/")
+    assert "subscribed_symbols" in body
+
+
+@pytest.mark.asyncio
+async def test_alpaca_stream_status_uses_preferred_data_service_credentials(client: AsyncClient):
+    svc = await _create_service(
+        client,
+        "Preferred Alpaca Data",
+        is_default=True,
+        api_key="PKABCDEFGHIJKLMN",
+        secret_key="mytopsecretkey1234567890",
+    )
+
+    resp = await client.get("/api/v1/services/alpaca-stream/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["auth_configured"] is True
+    assert body["credential_source"]["source_id"] == svc["id"]
+    assert body["credential_source"]["source_name"] == "Preferred Alpaca Data"
+    assert body["credential_source"]["environment"] == "paper"

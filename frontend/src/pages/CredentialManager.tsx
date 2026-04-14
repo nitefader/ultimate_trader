@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { accountsApi } from '../api/accounts'
 import { CreateAccountModal } from '../components/CreateAccountModal'
+import { usePollingGate } from '../hooks/usePollingGate'
 import clsx from 'clsx'
 import type { Account } from '../types'
 
@@ -25,13 +26,14 @@ export function CredentialManager() {
   const [validationStatus, setValidationStatus] = useState<'idle' | 'validating' | 'valid' | 'invalid'>('idle')
   const [validationMessage, setValidationMessage] = useState('')
 
+  const pausePolling = usePollingGate()
   const queryClient = useQueryClient()
 
   // ── Queries ───────────────────────────────────────────────────────────────
   const { data: accounts = [], isLoading, error } = useQuery<Account[]>({
     queryKey: ['accounts'],
     queryFn: () => accountsApi.list(),
-    refetchInterval: 15_000,
+    refetchInterval: pausePolling ? false : 15_000,
   })
 
   const credentialsQuery = useQuery({
@@ -310,7 +312,6 @@ export function CredentialManager() {
                     className="btn-primary text-sm"
                     onClick={handleSave}
                     disabled={saveMutation.isPending || !apiKey || !secretKey}
-                    title={(!apiKey || !secretKey) ? 'Both API key and secret key are required' : undefined}
                   >
                     {saveMutation.isPending ? 'Saving...' : 'Save Keys'}
                   </button>

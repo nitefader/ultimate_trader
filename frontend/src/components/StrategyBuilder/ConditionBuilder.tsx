@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { Plus, Trash2, ChevronDown } from 'lucide-react'
 import clsx from 'clsx'
 import type { Condition } from '../../types'
+import { SelectMenu } from '../SelectMenu'
 
 interface Props {
   conditions: Condition[]
@@ -47,22 +48,21 @@ function SingleConditionEditor({ cond, onUpdate, onDelete }: SingleConditionEdit
 
     return (
       <div className="flex items-center gap-1">
-        <select
-          className="input text-xs py-1 px-1.5"
+        <SelectMenu
           value={type}
-          onChange={(e) => {
-            const t = e.target.value as ValueType
+          onChange={(t) => {
             if (t === 'literal') onChange(50 as any)
             else if (t === 'field') onChange({ field: 'close' })
             else if (t === 'indicator') onChange({ indicator: 'rsi_14' })
             else if (t === 'prev_bar') onChange({ prev_bar: 'close' })
           }}
-        >
-          <option value="literal">Value</option>
-          <option value="field">Field</option>
-          <option value="indicator">Indicator</option>
-          <option value="prev_bar">Prev Bar</option>
-        </select>
+          options={[
+            { value: 'literal', label: 'Value' },
+            { value: 'field', label: 'Field' },
+            { value: 'indicator', label: 'Indicator' },
+            { value: 'prev_bar', label: 'Prev Bar' },
+          ]}
+        />
 
         {type === 'literal' && (
           <input
@@ -73,31 +73,25 @@ function SingleConditionEditor({ cond, onUpdate, onDelete }: SingleConditionEdit
           />
         )}
         {type === 'field' && (
-          <select
-            className="input text-xs py-1"
+          <SelectMenu
             value={val.field as string ?? 'close'}
-            onChange={(e) => onChange({ field: e.target.value })}
-          >
-            {FIELDS.map(f => <option key={f}>{f}</option>)}
-          </select>
+            onChange={(v) => onChange({ field: v })}
+            options={FIELDS.map(f => ({ value: f, label: f }))}
+          />
         )}
         {type === 'indicator' && (
-          <select
-            className="input text-xs py-1"
+          <SelectMenu
             value={val.indicator as string ?? 'rsi_14'}
-            onChange={(e) => onChange({ indicator: e.target.value })}
-          >
-            {INDICATORS.map(i => <option key={i}>{i}</option>)}
-          </select>
+            onChange={(v) => onChange({ indicator: v })}
+            options={INDICATORS.map(i => ({ value: i, label: i }))}
+          />
         )}
         {type === 'prev_bar' && (
-          <select
-            className="input text-xs py-1"
+          <SelectMenu
             value={val.prev_bar as string ?? 'close'}
-            onChange={(e) => onChange({ prev_bar: e.target.value })}
-          >
-            {FIELDS.map(f => <option key={f}>{f}</option>)}
-          </select>
+            onChange={(v) => onChange({ prev_bar: v })}
+            options={FIELDS.map(f => ({ value: f, label: f }))}
+          />
         )}
       </div>
     )
@@ -107,13 +101,11 @@ function SingleConditionEditor({ cond, onUpdate, onDelete }: SingleConditionEdit
     <div className="flex items-center gap-2 bg-gray-800 rounded p-2">
       {renderValueEditor(cond.left, (v) => onUpdate({ ...cond, left: v }), 'left')}
 
-      <select
-        className="input text-xs py-1"
+      <SelectMenu
         value={cond.op ?? '>'}
-        onChange={(e) => onUpdate({ ...cond, op: e.target.value })}
-      >
-        {OPERATORS.map(op => <option key={op}>{op}</option>)}
-      </select>
+        onChange={(v) => onUpdate({ ...cond, op: v })}
+        options={OPERATORS.map(op => ({ value: op, label: op }))}
+      />
 
       {renderValueEditor(cond.right, (v) => onUpdate({ ...cond, right: v }), 'right')}
 
@@ -158,15 +150,11 @@ export function ConditionBuilder({ conditions, onChange, logic, onLogicChange, l
       <div className="flex items-center justify-between">
         <label className="label">{label}</label>
         <div className="flex items-center gap-2">
-          <select
-            className="input text-xs py-1"
+          <SelectMenu
             value={logic}
-            onChange={(e) => onLogicChange(e.target.value)}
-          >
-            {LOGIC_OPTIONS.map(o => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
+            onChange={(v) => onLogicChange(v)}
+            options={LOGIC_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
+          />
           <button className="btn-ghost text-xs flex items-center gap-1 py-1 px-2" onClick={addCondition}>
             <Plus size={12} /> Add
           </button>

@@ -7,7 +7,15 @@ import './index.css'
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 30_000, retry: 1 },
+    queries: {
+      staleTime: 30_000,
+      retry: 1,
+      notifyOnChangeProps: ['data', 'error'],
+      // The app already uses explicit polling where live freshness matters.
+      // Disabling focus refetch avoids native <select> popups collapsing on
+      // Windows/Chromium when the browser briefly blurs/refocuses the page.
+      refetchOnWindowFocus: false,
+    },
   },
 })
 

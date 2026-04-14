@@ -1,0 +1,342 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Strategy: Trend Continuation Pullback
+# Mode:     POSITION  (multi-week hold; daily bars; overnight risk accepted)
+# Bars:     1-day (daily close)
+#
+# Edge / Hypothesis
+# ─────────────────
+# In confirmed bull-market regimes, the highest-probability entry is NOT
+# at the breakout high — it is during the first orderly pullback to the
+# EMA21 within an intact EMA50/200 trend stack.  When ADX confirms trend
+# strength (> 25) and RSI has cooled to a neutral zone (40–58) during the
+# pullback, the risk/reward of re-entering the trend direction is maximised.
+# An expanding ATR on the entry bar signals buyers returning.  The chandelier
+# trailing stop allows the position to compound gains over weeks to months
+# while defining exit risk clearly at every bar.
+#
+# Gap-Risk Controls
+# ─────────────────
+# Daily bars mean each position is exposed to overnight and weekend gaps.
+# Mitigants:
+#   1. Hard stop placed below the prior swing low at entry.
+#   2. Gap-open exit rule: if next-day open is below the stop level,
+#      exit at open (no waiting for close).
+#   3. Max position size capped at 10% of equity to limit gap impact.
+#   4. Earnings blackout: position closed EOD before earnings if holding.
+#   5. Max hold: 60 bars (~3 months) — prevents thesis drift.
+#
+# Optimization Parameter Ranges (for param optimizer)
+# ────────────────────────────────────────────────────
+# ema_fast:            [9, 13, 21]
+# ema_mid:             [50]          (keep fixed — standard benchmark)
+# adx_min:             [20, 25, 28, 30]
+# rsi_pullback_lo:     [38, 40, 42]
+# rsi_pullback_hi:     [55, 58, 62]
+# atr_stop_mult:       [2.0, 2.5, 3.0]
+# chandelier_period:   [14, 22]
+# chandelier_mult:     [2.5, 3.0, 3.5]
+# t1_r:                [1.0, 1.5]
+# max_hold_bars:       [40, 60, 90]
+#
+# Default Account Allocation Defaults
+# ─────────────────────────────────────
+# Suggested starting capital:   $10,000 (no PDT constraints — not a day trade)
+# Max concurrent positions:     8 (diversified portfolio of pullback entries)
+# Risk per trade:                1.0% of equity
+# Max daily loss:                3% of equity
+# Max portfolio heat:            8%   (8 positions × 1% = fully deployed)
+# Leverage:                      1× (cash equities; no leverage)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "Trend Continuation Pullback"
+category: momentum
+duration_mode: "position"
+
+description: >
+  A position-trading strategy that buys the first orderly pullback to the
+  EMA21 in stocks and ETFs with a confirmed EMA21 > EMA50 > EMA200 trend
+  stack.  ADX must be above 25 (confirming trend strength), and RSI must be
+  in the neutral-to-cool range (40–58) — indicating the pullback is a pause,
+  not a reversal.  Entry is triggered when the close reclaims the EMA21 with
+  expanding volume.  The chandelier trailing stop (22-bar, 3× ATR) locks in
+  gains as the trend resumes.  Earnings blackouts, gap-open rules, and a
+  60-bar max-hold cap manage overnight and event risk.  Regime filter
+  restricts entries to trending_up regimes only.
+
+# ── Watchlist ────────────────────────────────────────────────────────────────
+watchlist: "Position Trading — Trend Leaders Universe"
+
+symbols:
+  - SPY     # Benchmark — trend-following on the index itself
+  - QQQ     # Nasdaq growth leadership
+  - AAPL    # Mega-cap tech — clean EMA structure
+  - MSFT    # Mega-cap tech — consistent trend behaviour
+  - NVDA    # AI/semiconductor secular trend leader
+  - GOOGL   # Large-cap tech
+  - META    # Large-cap tech
+  - AMZN    # Large-cap e-commerce/cloud
+  - AMD     # Semiconductor cycle
+  - AVGO    # Broadcom — semiconductor strength
+  - TSM     # Taiwan Semi — global semiconductor
+  - LLY     # Pharmaceutical mega-cap trend
+  - UNH     # Healthcare mega-cap
+  - JPM     # Financials leadership
+  - V       # Payment networks — stable uptrend
+  - XLK     # Tech sector ETF — smoother than single names
+  - XLF     # Financials ETF
+  - SOXX    # Semiconductor ETF
+  - GLD     # Gold — position trade in trending regimes
+  - IEF     # Bond duration — counter-cyclical hedge slot
+
+timeframe: "1d"
+
+# ── Indicator configuration ──────────────────────────────────────────────────
+indicators:
+  ema_periods: [21, 50, 200]
+  sma_periods: [50, 200]
+  rsi_periods: [14]
+  atr_period: 14
+
+# ── Regime filter ────────────────────────────────────────────────────────────
+# Trend continuation only makes sense in trending-up environments.
+# In ranging or high-volatility regimes, switch to mean-reversion strategies.
+# In trending_down, only shorts are valid (disabled here — long-only version).
+regime_filter:
+  allowed:
+    - trending_up
+
+use_support_resistance: true    # use S/R for stop refinement
+use_fvg: false                  # FVG not primary on daily timeframe
+
+# ── Entry rules ───────────────────────────────────────────────────────────────
+entry:
+  directions:
+    - long             # Long-only version (position-trading suits long-only for retail)
+
+  # ALL conditions must be met — high-confidence filter set
+  logic: "all_of"
+
+  conditions:
+    # ── Trend stack: EMA21 > EMA50 > EMA200 ──────────────────────────────────
+    # Confirms intact multi-timeframe uptrend
+    - type: single
+      left: {indicator: "ema_21"}
+      op: ">"
+      right: {indicator: "ema_50"}
+
+    - type: single
+      left: {indicator: "ema_50"}
+      op: ">"
+      right: {indicator: "ema_200"}
+
+    # ── ADX trend strength ≥ 25 ───────────────────────────────────────────────
+    # Ensures we are in a trending environment, not a range
+    - type: single
+      left: {indicator: "adx"}
+      op: ">="
+      right: 25
+
+    # ── RSI pullback zone: 40–58 ──────────────────────────────────────────────
+    # RSI has cooled from overbought — pullback is a pause, not a reversal
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: ">="
+      right: 40
+
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: "<="
+      right: 58
+
+    # ── Price reclaims EMA21 ──────────────────────────────────────────────────
+    # Entry trigger: close crosses above EMA21 after the pullback
+    - type: single
+      left: {field: "close"}
+      op: "crosses_above"
+      right: {indicator: "ema_21"}
+
+    # ── Volume expansion on entry bar ─────────────────────────────────────────
+    # Buyers returning — volume > 1.1× 20-day average
+    - type: single
+      left: {field: "volume"}
+      op: ">"
+      right: {indicator: "volume_sma_20", mult: 1.1}
+
+# ── Stop loss ─────────────────────────────────────────────────────────────────
+# Structure-aware stop: below the swing low formed during the pullback,
+# OR 2.5× ATR — whichever is farther (more conservative).
+# Gap-open rule: if next open gaps below the stop, exit at open price.
+stop_loss:
+  method: "combined"
+  rule: "farthest"
+  stops:
+    - method: "swing_low"
+      lookback: 5               # low of last 5 bars (pullback low)
+    - method: "atr_multiple"
+      period: 14
+      mult: 2.5
+
+gap_open_exit: true             # if open < stop on any morning, exit immediately
+
+# ── Profit targets ────────────────────────────────────────────────────────────
+# T1 at 1R — move stop to breakeven (no more free risk on the trade).
+# T2: let the chandelier trail ride the rest of the move.
+# Max hold enforced at 60 bars (~3 months).
+targets:
+  - method: "r_multiple"
+    r: 1.0          # Target 1: 1R — risk-free the trade
+
+  - method: "r_multiple"
+    r: 4.0          # Target 2: fallback if trail not stopped out
+
+# ── Trailing stop (activated after T1) ───────────────────────────────────────
+# 22-bar Chandelier: robust trailing stop for multi-week holds.
+# 3× ATR provides room for normal daily fluctuations.
+trailing_stop:
+  method: "chandelier"
+  period: 22
+  mult: 3.0
+
+# ── Scale out ─────────────────────────────────────────────────────────────────
+scale_out:
+  move_stop_to_be_after_t1: true   # breakeven after T1 — critical for overnight risk
+  levels:
+    - pct: 40    # exit 40% at T1 (1R) — lock in profit, reduce overnight exposure
+    - pct: 60    # ride remainder with chandelier trailing stop
+
+# ── Scale in (pyramid on strength) ───────────────────────────────────────────
+# Add to a winning position if trend strengthens after initial entry.
+# Only add when ADX still rising and RSI confirming momentum.
+scale_in:
+  max_adds: 1
+  conditions:
+    - type: single
+      left: {indicator: "adx"}
+      op: ">"
+      right: 30
+    - type: single
+      left: {indicator: "rsi_14"}
+      op: ">"
+      right: 55
+  levels:
+    - level: 0
+      pct: 70    # 70% at initial entry
+    - level: 1
+      pct: 30    # 30% add if trend strengthens
+
+# ── Position sizing ───────────────────────────────────────────────────────────
+position_sizing:
+  method: "risk_pct"
+  risk_pct: 1.0     # Risk 1% of equity per trade
+                    # On $10k account: risk ≈ $100 per trade
+                    # On $50k account: risk ≈ $500 per trade
+                    # On $100k account: risk ≈ $1,000 per trade
+
+leverage: 1.0       # No leverage — gap risk makes leverage dangerous
+
+# ── Risk controls ─────────────────────────────────────────────────────────────
+risk:
+  max_position_size_pct: 0.10    # No single position > 10% of equity
+  max_daily_loss_pct: 0.03       # Daily stop-trading threshold: 3%
+  max_drawdown_lockout_pct: 0.08 # Lock out after 8% portfolio drawdown
+  max_open_positions: 8          # 8 positions × 1% risk = 8% max heat
+  max_portfolio_heat: 0.08       # 8% max simultaneous risk
+
+# ── Max hold period ────────────────────────────────────────────────────────────
+# Force exit after 60 bars (~3 months) even if neither stop nor target hit.
+# Prevents thesis drift and capital lock-up.
+exit:
+  max_bars: 60
+
+# ── Gap-risk controls ─────────────────────────────────────────────────────────
+gap_risk:
+  max_gap_pct: 0.05             # If expected gap > 5%, reduce position size by 50%
+  weekend_position_allowed: true # positions held over weekend (normal for daily)
+  earnings_blackout: true        # close position EOD before earnings release
+  earnings_blackout_days_before: 1
+
+# ── Earnings blackout ─────────────────────────────────────────────────────────
+event_filter:
+  categories: [earnings, fomc, cpi, nfp]
+  impact_levels: [high]
+  minutes_before: 0             # on daily bars, minutes_before applies to the session
+  minutes_after: 0
+  close_positions_before: true  # close positions before earnings announcement
+  disable_entries: true
+
+# ── Cooldown rules ────────────────────────────────────────────────────────────
+cooldown_rules:
+  # After 2 consecutive stop-outs on same symbol: 10-bar cooldown (2 weeks)
+  - trigger: "consecutive_loss"
+    consecutive_count: 2
+    duration_bars: 10
+    symbol_level: true
+
+  # After portfolio drawdown lockout: no new entries for 5 bars (1 week)
+  - trigger: "stop_out"
+    duration_bars: 5
+    symbol_level: false         # portfolio-level pause
+
+# ── Execution policy defaults ─────────────────────────────────────────────────
+execution:
+  fill_model: "next_bar_open"   # daily bars: fill at next day's open
+  slippage_ticks: 2             # 2 ticks daily bar (wider bid-ask on open)
+  commission_per_share: 0.005
+  min_commission: 1.00
+  order_type: "market"          # daily timeframe: market orders at open
+  gap_fill: true                # model gap-open fills accurately
+
+# ── Optimization parameter ranges ────────────────────────────────────────────
+optimization:
+  objective: "sharpe_ratio"
+  min_trades: 20
+  parameters:
+    adx_min:
+      type: int
+      values: [20, 25, 28, 30]
+    rsi_pullback_lo:
+      type: int
+      values: [38, 40, 42]
+    rsi_pullback_hi:
+      type: int
+      values: [55, 58, 62]
+    atr_stop_mult:
+      type: float
+      values: [2.0, 2.5, 3.0]
+    chandelier_mult:
+      type: float
+      values: [2.5, 3.0, 3.5]
+    t1_r:
+      type: float
+      values: [1.0, 1.5]
+    max_hold_bars:
+      type: int
+      values: [40, 60, 90]
+  walk_forward:
+    enabled: true
+    train_months: 12
+    test_months: 3
+
+# ── Sample account allocation defaults ───────────────────────────────────────
+account_defaults:
+  suggested_capital: 10000       # No PDT requirement — not a day trading strategy
+  account_mode: "margin"
+  leverage: 1.0
+  max_position_size_pct: 0.10
+  max_daily_loss_pct: 0.03
+  max_open_positions: 8
+  notes: >
+    No minimum capital requirement (not subject to PDT rules).
+    Start with 4 positions maximum during paper trading phase.
+    Increase to full 8-position allocation after 3 months of paper results.
+    Review each position at weekly intervals.
+
+tick_size: 0.01
+tags:
+  - swing
+  - position
+  - trend_following
+  - ema_pullback
+  - daily
+  - position_mode
+  - multi_week

@@ -200,6 +200,52 @@ async def test_launch_forwards_walk_forward_and_commission_pct(client, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_launch_forwards_cpcv_config(client, monkeypatch):
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Launch CPCV Forwarding",
+            "config": {
+                "entry": {
+                    "conditions": [{"type": "single", "left": {"field": "close"}, "op": ">", "right": 1}],
+                },
+            },
+        },
+    )
+    assert strategy_resp.status_code == 201
+    version_id = strategy_resp.json()["version_id"]
+
+    async def _fake_launch_backtest(db, strategy_version_id, strategy_config, run_config):
+        assert run_config["cpcv"]["enabled"] is True
+        assert run_config["cpcv"]["n_paths"] == 8
+        assert run_config["cpcv"]["k_test_paths"] == 2
+        return SimpleNamespace(id="run-cpcv", status="completed", error_message=None)
+
+    monkeypatch.setattr("app.api.routes.backtests.launch_backtest", _fake_launch_backtest)
+
+    resp = await client.post(
+        "/api/v1/backtests/launch",
+        json={
+            "strategy_version_id": version_id,
+            "symbols": ["SPY"],
+            "timeframe": "1d",
+            "start_date": "2018-01-01",
+            "end_date": "2024-12-31",
+            "cpcv": {
+                "enabled": True,
+                "n_paths": 8,
+                "k_test_paths": 2,
+                "embargo_bars": 3,
+                "max_combos": 20,
+                "min_bars_path": 25,
+            },
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["run_id"] == "run-cpcv"
+
+
+@pytest.mark.asyncio
 async def test_launch_forwards_provider_fields(client, monkeypatch):
     strategy_resp = await client.post(
         "/api/v1/strategies",

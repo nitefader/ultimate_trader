@@ -3,6 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Star, Trash2, TestTube, Eye, EyeOff, Pencil, Check, X, Server } from 'lucide-react'
 import clsx from 'clsx'
 import { servicesApi, type DataServiceRecord, type DataServiceCreate } from '../api/services'
+import { SelectMenu } from '../components/SelectMenu'
+import { Tooltip } from '../components/Tooltip'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -135,28 +137,32 @@ function ServiceCard({ service: svc, onEdit }: { service: DataServiceRecord; onE
         </div>
         <div className="flex items-center gap-1">
           {!svc.is_default && svc.is_active && (
-            <button
-              className="btn-ghost text-xs"
-              onClick={() => setDefaultMut.mutate()}
-              disabled={setDefaultMut.isPending}
-              title="Set as default data service"
-            >
-              <Star size={12} />
-            </button>
+            <Tooltip content="Set as default data service">
+              <button
+                className="btn-ghost text-xs"
+                onClick={() => setDefaultMut.mutate()}
+                disabled={setDefaultMut.isPending}
+              >
+                <Star size={12} />
+              </button>
+            </Tooltip>
           )}
-          <button className="btn-ghost text-xs" onClick={onEdit} title="Edit service">
-            <Pencil size={12} />
-          </button>
-          <button
-            className="btn-ghost text-xs text-red-400 hover:text-red-300"
-            onClick={() => {
-              if (confirm(`Delete "${svc.name}"?`)) deleteMut.mutate()
-            }}
-            disabled={deleteMut.isPending}
-            title="Delete service"
-          >
-            <Trash2 size={12} />
-          </button>
+          <Tooltip content="Edit service">
+            <button className="btn-ghost text-xs" onClick={onEdit}>
+              <Pencil size={12} />
+            </button>
+          </Tooltip>
+          <Tooltip content="Delete service">
+            <button
+              className="btn-ghost text-xs text-red-400 hover:text-red-300"
+              onClick={() => {
+                if (confirm(`Delete "${svc.name}"?`)) deleteMut.mutate()
+              }}
+              disabled={deleteMut.isPending}
+            >
+              <Trash2 size={12} />
+            </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -173,14 +179,15 @@ function ServiceCard({ service: svc, onEdit }: { service: DataServiceRecord; onE
 
       {/* Test connection */}
       <div className="flex items-center gap-2 mt-3">
-        <button
-          className="btn-secondary text-xs flex items-center gap-1"
-          onClick={() => testMut.mutate()}
-          disabled={testMut.isPending || !svc.has_credentials}
-          title={!svc.has_credentials ? 'Add credentials first' : 'Test connection to Alpaca'}
-        >
-          <TestTube size={12} /> {testMut.isPending ? 'Testing…' : 'Test Connection'}
-        </button>
+        <Tooltip content={!svc.has_credentials ? 'Add credentials first' : 'Test connection to Alpaca'}>
+          <button
+            className="btn-secondary text-xs flex items-center gap-1"
+            onClick={() => testMut.mutate()}
+            disabled={testMut.isPending || !svc.has_credentials}
+          >
+            <TestTube size={12} /> {testMut.isPending ? 'Testing…' : 'Test Connection'}
+          </button>
+        </Tooltip>
         {testMut.data && (
           <span className={clsx('text-xs', testMut.data.valid ? 'text-green-400' : 'text-red-400')}>
             {testMut.data.valid
@@ -243,15 +250,19 @@ function CreateServiceForm({ onClose, onCreated }: { onClose: () => void; onCrea
         </div>
         <div>
           <label className="label">Provider</label>
-          <select className="input w-full" value={provider} onChange={e => setProvider(e.target.value)}>
-            {PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-          </select>
+          <SelectMenu
+            value={provider}
+            onChange={setProvider}
+            options={PROVIDERS.map(p => ({ value: p.value, label: p.label }))}
+          />
         </div>
         <div>
           <label className="label">Environment</label>
-          <select className="input w-full" value={environment} onChange={e => setEnvironment(e.target.value)}>
-            {ENVIRONMENTS.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
-          </select>
+          <SelectMenu
+            value={environment}
+            onChange={setEnvironment}
+            options={ENVIRONMENTS.map(e => ({ value: e.value, label: e.label }))}
+          />
         </div>
       </div>
 
@@ -357,15 +368,19 @@ function EditServiceCard({ service: svc, onClose, onSaved }: {
         </div>
         <div>
           <label className="label">Provider</label>
-          <select className="input w-full" value={provider} onChange={e => setProvider(e.target.value)}>
-            {PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-          </select>
+          <SelectMenu
+            value={provider}
+            onChange={setProvider}
+            options={PROVIDERS.map(p => ({ value: p.value, label: p.label }))}
+          />
         </div>
         <div>
           <label className="label">Environment</label>
-          <select className="input w-full" value={environment} onChange={e => setEnvironment(e.target.value)}>
-            {ENVIRONMENTS.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
-          </select>
+          <SelectMenu
+            value={environment}
+            onChange={setEnvironment}
+            options={ENVIRONMENTS.map(e => ({ value: e.value, label: e.label }))}
+          />
         </div>
       </div>
 

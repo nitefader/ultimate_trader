@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import {
   TrendingUp, TrendingDown, Shield, Zap, AlertTriangle,
   Activity, Database, BarChart2, ArrowRight, CheckCircle2,
-  XCircle, Clock, DollarSign, Layers, Radio,
+  XCircle, Clock, DollarSign, Layers, Radio, Key,
 } from 'lucide-react'
 import {
   AreaChart, Area, ResponsiveContainer, Tooltip, BarChart, Bar,
@@ -12,7 +12,9 @@ import {
 } from 'recharts'
 import { accountsApi, controlApi } from '../api/accounts'
 import { backtestsApi } from '../api/backtests'
+import { strategiesApi } from '../api/strategies'
 import { useKillSwitchStore } from '../stores/useKillSwitchStore'
+import { usePollingGate } from '../hooks/usePollingGate'
 import { ModeIndicator } from '../components/ModeIndicator'
 import { deploymentsApi } from '../api/accounts'
 import clsx from 'clsx'
@@ -85,30 +87,41 @@ const EQUITY_COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ef4444', '#
 
 export function Dashboard() {
   const { status: ksStatus, platformMode } = useKillSwitchStore()
+  const pausePolling = usePollingGate()
 
   const { data: accounts = [], isFetching: accountsFetching, isLoading: accountsLoading } = useQuery({
     queryKey: ['accounts'],
     queryFn: () => accountsApi.list(true),
-    refetchInterval: 20_000,
+    refetchInterval: pausePolling ? false : 20_000,
   })
 
   const { data: recentRuns = [], isLoading: runsLoading } = useQuery({
     queryKey: ['backtests-recent'],
     queryFn: () => backtestsApi.list(undefined, 8),
-    refetchInterval: 30_000,
+    refetchInterval: pausePolling ? false : 30_000,
   })
 
   const { data: deployments = [], isLoading: deploymentsLoading } = useQuery({
     queryKey: ['deployments'],
     queryFn: () => deploymentsApi.list(),
-    refetchInterval: 15_000,
+    refetchInterval: pausePolling ? false : 15_000,
+  })
+
+  const { data: strategies = [] } = useQuery({
+    queryKey: ['strategies'],
+    queryFn: strategiesApi.list,
+    staleTime: 60_000,
   })
 
   // Derived stats
   const paperAccounts = accounts.filter(a => a.mode === 'paper')
   const liveAccounts  = accounts.filter(a => a.mode === 'live')
   const accountEquity = (a: Account) => a.equity ?? a.current_balance ?? 0
-  const totalEquity   = accounts.reduce((s, a) => s + accountEquity(a), 0)
+
+  const paperEquity       = paperAccounts.reduce((s, a) => s + accountEquity(a), 0)
+  const liveEquity        = liveAccounts.reduce((s, a) => s + accountEquity(a), 0)
+  const paperUnrealized   = paperAccounts.reduce((s, a) => s + (a.unrealized_pnl ?? 0), 0)
+  const liveUnrealized    = liveAccounts.reduce((s, a) => s + (a.unrealized_pnl ?? 0), 0)
   const activeDeployments = deployments.filter((d: any) =>
     d.status === 'running' || d.status === 'paused'
   )
@@ -161,10 +174,81 @@ export function Dashboard() {
         </div>
       </div>
 
+      {/* Getting Started — shown to new users with no data */}
+      {!accountsLoading && accounts.length === 0 && strategies.length === 0 && recentRuns.length === 0 && (
+        <div className="card border-indigo-900/60 bg-indigo-950/20 space-y-4">
+          <div>
+            <h2 className="text-sm font-semibold text-indigo-300">Getting Started with UltraTrader</h2>
+            <p className="text-xs text-gray-500 mt-1">Follow these steps to run your first end-to-end backtest and paper trade.</p>
+          </div>
+          <div className="grid md:grid-cols-2 gap-3">
+            {[
+              {
+                step: 1,
+                label: 'Add Alpaca Credentials',
+                desc: 'Connect your Alpaca paper account for live data and paper trading.',
+                to: '/security',
+                icon: Key,
+                done: false,
+              },
+              {
+                step: 2,
+                label: 'Create a Strategy',
+                desc: 'Define entry/exit conditions, stop loss, targets, and risk sizing.',
+                to: '/strategies/new',
+                icon: Layers,
+                done: strategies.length > 0,
+              },
+              {
+                step: 3,
+                label: 'Run a Backtest',
+                desc: 'Validate your strategy against historical data with walk-forward testing.',
+                to: '/backtest',
+                icon: TrendingUp,
+                done: recentRuns.length > 0,
+              },
+              {
+                step: 4,
+                label: 'Deploy to Paper Trading',
+                desc: 'Promote a completed backtest run to a live paper account.',
+                to: '/deployments',
+                icon: Zap,
+                done: deployments.length > 0,
+              },
+            ].map(({ step, label, desc, to, icon: Icon, done }) => (
+              <Link
+                key={step}
+                to={to}
+                className={clsx(
+                  'flex items-start gap-3 rounded border px-3 py-3 transition-colors',
+                  done
+                    ? 'border-emerald-800/50 bg-emerald-950/20'
+                    : 'border-gray-700 hover:border-indigo-700 hover:bg-indigo-950/30',
+                )}
+              >
+                <span className={clsx(
+                  'flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold mt-0.5',
+                  done ? 'bg-emerald-700 text-white' : 'bg-gray-700 text-gray-400',
+                )}>
+                  {done ? '✓' : step}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className={clsx('text-sm font-medium', done ? 'text-emerald-300' : 'text-gray-200')}>
+                    {label}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-0.5">{desc}</div>
+                </div>
+                <Icon size={14} className={done ? 'text-emerald-500' : 'text-gray-600'} />
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Top KPI row */}
       {(accountsLoading || deploymentsLoading) ? (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {[0, 1, 2, 3].map(i => (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {[0, 1, 2, 3, 4].map(i => (
             <div key={i} className="card animate-pulse">
               <div className="h-3 bg-gray-700 rounded w-1/2 mb-3" />
               <div className="h-7 bg-gray-600 rounded w-3/4 mb-2" />
@@ -173,15 +257,47 @@ export function Dashboard() {
           ))}
         </div>
       ) : (
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard
-          icon={DollarSign}
-          label="Total Equity"
-          value={`$${totalEquity.toLocaleString('en', { maximumFractionDigits: 0 })}`}
-          sub={accountsFetching ? '⟳ refreshing…' : `${accounts.length} account${accounts.length !== 1 ? 's' : ''}`}
-          color="sky"
-          to="/accounts"
-        />
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        {/* Paper equity */}
+        <Link to="/accounts" className={clsx('card flex items-start gap-3 transition-all hover:border-gray-600 cursor-pointer group', paperAccounts.length === 0 && 'opacity-50')}>
+          <div className="mt-0.5 flex-shrink-0 text-sky-500"><DollarSign size={18} /></div>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">Paper Equity</div>
+            <div className="text-2xl font-bold leading-none text-sky-400">
+              ${paperEquity.toLocaleString('en', { maximumFractionDigits: 0 })}
+            </div>
+            <div className={clsx('text-xs mt-1 font-mono', paperUnrealized >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {paperAccounts.length === 0
+                ? <span className="text-gray-600">no paper accounts</span>
+                : paperUnrealized !== 0
+                  ? `${paperUnrealized >= 0 ? '+' : ''}$${Math.abs(paperUnrealized).toLocaleString('en', { maximumFractionDigits: 0 })} open P&L`
+                  : <span className="text-gray-600">{paperAccounts.length} account{paperAccounts.length !== 1 ? 's' : ''}</span>
+              }
+            </div>
+          </div>
+          <ArrowRight size={14} className="text-gray-700 group-hover:text-gray-400 mt-1 flex-shrink-0 transition-colors" />
+        </Link>
+
+        {/* Live equity */}
+        <Link to="/accounts" className={clsx('card flex items-start gap-3 transition-all hover:border-gray-600 cursor-pointer group', liveAccounts.length === 0 && 'opacity-50')}>
+          <div className="mt-0.5 flex-shrink-0 text-amber-500"><DollarSign size={18} /></div>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">Live Equity</div>
+            <div className="text-2xl font-bold leading-none text-amber-400">
+              {liveAccounts.length === 0 ? '—' : `$${liveEquity.toLocaleString('en', { maximumFractionDigits: 0 })}`}
+            </div>
+            <div className={clsx('text-xs mt-1 font-mono', liveUnrealized >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {liveAccounts.length === 0
+                ? <span className="text-gray-600">no live accounts</span>
+                : liveUnrealized !== 0
+                  ? `${liveUnrealized >= 0 ? '+' : ''}$${Math.abs(liveUnrealized).toLocaleString('en', { maximumFractionDigits: 0 })} open P&L`
+                  : <span className="text-gray-600">{liveAccounts.length} account{liveAccounts.length !== 1 ? 's' : ''}</span>
+              }
+            </div>
+          </div>
+          <ArrowRight size={14} className="text-gray-700 group-hover:text-gray-400 mt-1 flex-shrink-0 transition-colors" />
+        </Link>
+
         <StatCard
           icon={Radio}
           label="Active Deployments"
@@ -341,6 +457,7 @@ export function Dashboard() {
                   <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Account</th>
                   <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Mode</th>
                   <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Equity</th>
+                  <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Open P&amp;L</th>
                   <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Broker</th>
                   <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Status</th>
                 </tr>
@@ -354,6 +471,15 @@ export function Dashboard() {
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-gray-200">
                       ${accountEquity(a).toLocaleString('en', { maximumFractionDigits: 0 })}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono text-xs">
+                      {(a.unrealized_pnl ?? 0) !== 0 ? (
+                        <span className={(a.unrealized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                          {(a.unrealized_pnl ?? 0) >= 0 ? '+' : ''}${Math.abs(a.unrealized_pnl ?? 0).toLocaleString('en', { maximumFractionDigits: 0 })}
+                        </span>
+                      ) : (
+                        <span className="text-gray-700">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-xs text-gray-500">{a.broker ?? 'Paper'}</td>
                     <td className="px-4 py-3">

@@ -1,5 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { usePollingGate } from '../hooks/usePollingGate'
+import { DatePickerInput } from '../components/DatePickerInput'
 import {
   Database, Search, Download, Trash2, RefreshCw, CheckCircle2,
   XCircle, AlertTriangle, ChevronRight, Info, Zap, BarChart2,
@@ -14,10 +16,11 @@ import {
   AreaChart,
   CartesianGrid,
   ResponsiveContainer,
-  Tooltip,
+  Tooltip as RechartsTooltip,
   XAxis,
   YAxis,
 } from 'recharts'
+import { Tooltip } from '../components/Tooltip'
 
 // ── Wizard step definitions ───────────────────────────────────────────────────
 
@@ -460,13 +463,12 @@ function ConfigureStep({
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="label">Start Date</label>
-          <input
-            type="date"
-            className="input w-full"
+          <DatePickerInput
+            className="w-full"
             value={start}
             min={minStart}
             max={end}
-            onChange={e => onStart(e.target.value)}
+            onChange={onStart}
           />
           {start < minStart && (
             <p className="text-xs text-red-400 mt-1">
@@ -476,13 +478,12 @@ function ConfigureStep({
         </div>
         <div>
           <label className="label">End Date</label>
-          <input
-            type="date"
-            className="input w-full"
+          <DatePickerInput
+            className="w-full"
             value={end}
             min={start}
             max={new Date().toISOString().split('T')[0]}
-            onChange={e => onEnd(e.target.value)}
+            onChange={onEnd}
           />
         </div>
       </div>
@@ -751,25 +752,27 @@ function InventoryTable({
                     {item.file_size_kb} KB
                   </td>
                   <td className="px-4 py-2.5 text-right">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setSelected(isSelected ? null : item); }}
-                      className={clsx('transition-colors p-1 mr-1', isSelected ? 'text-sky-400' : 'text-gray-500 hover:text-sky-400')}
-                      title="Visualize chart"
-                    >
-                      <BarChart2 size={13} />
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onDelete(item.symbol, item.timeframe, item.provider); }}
-                      disabled={isDeleting}
-                      className="text-gray-600 hover:text-red-400 transition-colors p-1"
-                      title="Delete cache"
-                    >
-                      {isDeleting ? (
-                        <RefreshCw size={13} className="animate-spin" />
-                      ) : (
-                        <Trash2 size={13} />
-                      )}
-                    </button>
+                    <Tooltip content="Visualize chart">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setSelected(isSelected ? null : item); }}
+                        className={clsx('transition-colors p-1 mr-1', isSelected ? 'text-sky-400' : 'text-gray-500 hover:text-sky-400')}
+                      >
+                        <BarChart2 size={13} />
+                      </button>
+                    </Tooltip>
+                    <Tooltip content="Delete cache">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDelete(item.symbol, item.timeframe, item.provider); }}
+                        disabled={isDeleting}
+                        className="text-gray-600 hover:text-red-400 transition-colors p-1"
+                      >
+                        {isDeleting ? (
+                          <RefreshCw size={13} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={13} />
+                        )}
+                      </button>
+                    </Tooltip>
                   </td>
                 </tr>
               )
@@ -823,7 +826,7 @@ function InventoryTable({
                     <XAxis dataKey="t" tick={{ fontSize: 11, fill: '#9ca3af' }} tickFormatter={(v) => String(v).slice(0, 10)} minTickGap={30} />
                     <YAxis yAxisId="price" orientation="right" tick={{ fontSize: 11, fill: '#9ca3af' }} width={68} domain={["auto", "auto"]} />
                     <YAxis yAxisId="volume" hide domain={[0, 'dataMax']} />
-                    <Tooltip
+                    <RechartsTooltip
                       contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: 8 }}
                       labelStyle={{ color: '#cbd5e1', fontSize: 12 }}
                       formatter={(value: number, name: string) => {
@@ -881,6 +884,7 @@ function InventoryTable({
 // ── Main DataManager ──────────────────────────────────────────────────────────
 
 export function DataManager() {
+  const pausePolling = usePollingGate()
   const queryClient = useQueryClient()
   const [showWizard, setShowWizard] = useState(false)
   const [step, setStep] = useState<WizardStep>('provider')
@@ -901,7 +905,7 @@ export function DataManager() {
   const { data: inventory = [], refetch: refetchInventory } = useQuery({
     queryKey: ['data-inventory'],
     queryFn: dataApi.getInventory,
-    refetchInterval: 30_000,
+    refetchInterval: pausePolling ? false : 30_000,
   })
 
   const downloadMutation = useMutation<BatchFetchResult>({

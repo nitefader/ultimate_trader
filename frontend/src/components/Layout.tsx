@@ -1,55 +1,60 @@
-import React, { useEffect } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import React, { memo, useEffect } from 'react'
+import { NavLink, Outlet, useOutlet } from 'react-router-dom'
 import {
   BarChart2, Database, Layers,
   Monitor, Shield, TrendingUp, Zap, Calendar,
-  Activity, Key, Radio, Server,
+  Activity, Key, Radio, Server, Target, FlaskConical,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { KillSwitch } from './KillSwitch'
+import { WatchlistToastRail } from './WatchlistToastRail'
 import { deploymentsApi } from '../api/accounts'
-import { useKillSwitchStore } from '../stores/useKillSwitchStore'
+import { usePollingGate } from '../hooks/usePollingGate'
 import clsx from 'clsx'
 
-const NAV = [
-  { to: '/', label: 'Dashboard', icon: Monitor, end: true },
-  { to: '/strategies', label: 'Strategies', icon: Layers },
-  { to: '/backtest', label: 'Backtest', icon: TrendingUp },
-  { to: '/runs', label: 'Run History', icon: BarChart2 },
-  { to: '/monitor', label: 'Live Monitor', icon: Radio },
-  { to: '/accounts', label: 'Accounts', icon: Shield },
-  { to: '/security', label: 'Security', icon: Key },
-  { to: '/services', label: 'Services', icon: Server },
-  { to: '/deployments', label: 'Deploy', icon: Zap },
-  { to: '/data', label: 'Data', icon: Database },
-  { to: '/events', label: 'Events', icon: Calendar },
-  { to: '/logs', label: 'Logs', icon: Activity },
+type NavItem = { to: string; label: string; icon: React.ElementType; end?: boolean }
+type NavGroup = { group: string; items: NavItem[] }
+
+const NAV_GROUPS: NavGroup[] = [
+  {
+    group: '',
+    items: [
+      { to: '/', label: 'Dashboard', icon: Monitor, end: true },
+    ],
+  },
+  {
+    group: 'Research',
+    items: [
+      { to: '/strategies', label: 'Strategies', icon: Layers },
+      { to: '/backtest', label: 'Backtest', icon: TrendingUp },
+      { to: '/runs', label: 'Run History', icon: BarChart2 },
+      { to: '/lab', label: 'Optim. Lab', icon: FlaskConical },
+      { to: '/watchlists', label: 'Watchlists', icon: Layers },
+    ],
+  },
+  {
+    group: 'Live Trading',
+    items: [
+      { to: '/monitor', label: 'Live Monitor', icon: Radio },
+      { to: '/deployments', label: 'Deploy', icon: Zap },
+      { to: '/accounts', label: 'Accounts', icon: Shield },
+      { to: '/programs', label: 'Programs', icon: Target },
+    ],
+  },
+  {
+    group: 'System',
+    items: [
+      { to: '/services', label: 'Services', icon: Server },
+      { to: '/security', label: 'Credentials', icon: Key },
+      { to: '/data', label: 'Data', icon: Database },
+      { to: '/events', label: 'Events', icon: Calendar },
+      { to: '/logs', label: 'Logs', icon: Activity },
+    ],
+  },
 ]
 
 export function Layout() {
-  const { fetch } = useKillSwitchStore()
   const [showKillSwitchWarning, setShowKillSwitchWarning] = React.useState(false)
-
-  const { data: deployments = [] } = useQuery({
-    queryKey: ['deployments', 'header'],
-    queryFn: async () => {
-      const [paper, live] = await Promise.all([
-        deploymentsApi.list(undefined, 'paper'),
-        deploymentsApi.list(undefined, 'live'),
-      ])
-      return [...paper, ...live]
-    },
-    refetchInterval: 10_000,
-  })
-
-  const paperActive = deployments.filter(d => d.status === 'running' && d.mode === 'paper').length
-  const liveActive = deployments.filter(d => d.status === 'running' && d.mode === 'live').length
-
-  useEffect(() => {
-    fetch()
-    const interval = setInterval(fetch, 10_000)
-    return () => clearInterval(interval)
-  }, [fetch])
 
   useEffect(() => {
     const wasKilled = localStorage.getItem('ultratrader.kill_switch_active') === '1'
@@ -85,24 +90,35 @@ export function Layout() {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-0.5">
-          {NAV.map(({ to, label, icon: Icon, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) =>
-                clsx(
-                  'flex items-center gap-2.5 px-3 py-2 rounded text-sm transition-colors',
-                  isActive
-                    ? 'bg-sky-900/60 text-sky-300 font-semibold'
-                    : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800',
-                )
-              }
-            >
-              <Icon size={15} />
-              {label}
-            </NavLink>
+        <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-4">
+          {NAV_GROUPS.map(({ group, items }) => (
+            <div key={group}>
+              {group && (
+                <div className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-gray-600 select-none">
+                  {group}
+                </div>
+              )}
+              <div className="space-y-0.5">
+                {items.map(({ to, label, icon: Icon, end }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    end={end}
+                    className={({ isActive }) =>
+                      clsx(
+                        'flex items-center gap-2.5 px-3 py-1.5 rounded text-sm transition-colors',
+                        isActive
+                          ? 'bg-sky-900/60 text-sky-300 font-semibold'
+                          : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800',
+                      )
+                    }
+                  >
+                    <Icon size={15} />
+                    {label}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 
@@ -111,40 +127,69 @@ export function Layout() {
         </div>
       </aside>
 
+      <WatchlistToastRail />
+
       {/* Main */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
         <header className="h-12 border-b border-gray-800 flex items-center justify-between px-4 bg-gray-900 flex-shrink-0">
-          <div className="flex items-center gap-3">
-            {(paperActive > 0 || liveActive > 0) ? (
-              <div className="flex items-center gap-2 text-xs">
-                {paperActive > 0 && (
-                  <span className="flex items-center gap-1.5 px-2 py-1 rounded bg-indigo-900/60 text-indigo-300 ring-1 ring-indigo-700 font-medium">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-                    Paper: {paperActive}
-                  </span>
-                )}
-                {liveActive > 0 && (
-                  <span className="flex items-center gap-1.5 px-2 py-1 rounded bg-red-900/60 text-red-300 ring-1 ring-red-700 font-medium animate-pulse">
-                    <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-                    Live: {liveActive}
-                  </span>
-                )}
-              </div>
-            ) : (
-              <span className="text-xs text-gray-600">No active deployments</span>
-            )}
-          </div>
+          <HeaderDeploymentStatus />
           <div className="flex items-center gap-3">
             <KillSwitch />
           </div>
         </header>
 
         {/* Content */}
-        <main className="flex-1 overflow-y-auto p-4">
-          <Outlet />
-        </main>
+        <StableOutlet />
       </div>
     </div>
   )
 }
+
+const HeaderDeploymentStatus = memo(function HeaderDeploymentStatus() {
+  const pausePolling = usePollingGate()
+  const { data: deployments = [] } = useQuery({
+    queryKey: ['deployments', 'header'],
+    queryFn: async () => {
+      const [paper, live] = await Promise.all([
+        deploymentsApi.list(undefined, 'paper'),
+        deploymentsApi.list(undefined, 'live'),
+      ])
+      return [...paper, ...live]
+    },
+    refetchInterval: pausePolling ? false : 10_000,
+    notifyOnChangeProps: ['data'],
+  })
+
+  const paperActive = deployments.filter(d => d.status === 'running' && d.mode === 'paper').length
+  const liveActive = deployments.filter(d => d.status === 'running' && d.mode === 'live').length
+
+  return (
+    <div className="flex items-center gap-3">
+      {(paperActive > 0 || liveActive > 0) ? (
+        <div className="flex items-center gap-2 text-xs">
+          {paperActive > 0 && (
+            <span className="flex items-center gap-1.5 px-2 py-1 rounded bg-indigo-900/60 text-indigo-300 ring-1 ring-indigo-700 font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+              Paper: {paperActive}
+            </span>
+          )}
+          {liveActive > 0 && (
+            <span className="flex items-center gap-1.5 px-2 py-1 rounded bg-red-900/60 text-red-300 ring-1 ring-red-700 font-medium animate-pulse">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+              Live: {liveActive}
+            </span>
+          )}
+        </div>
+      ) : (
+        <span className="text-xs text-gray-600">No active deployments</span>
+      )}
+    </div>
+  )
+})
+
+const StableOutlet = memo(function StableOutlet() {
+  const outlet = useOutlet()
+
+  return <main className="flex-1 overflow-y-auto p-4">{outlet}</main>
+})

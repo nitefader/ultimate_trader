@@ -15,12 +15,15 @@ from app.services.alpaca_service import (
     build_client_config,
     cancel_all_orders as svc_cancel_all_orders,
     cancel_order as svc_cancel_order,
+    check_symbols_eligibility as svc_check_symbols_eligibility,
     close_all_positions as svc_close_all_positions,
     close_position as svc_close_position,
     get_account as svc_get_account,
     get_account_status as svc_get_account_status,
+    get_asset_info as svc_get_asset_info,
     get_orders as svc_get_orders,
     get_positions as svc_get_positions,
+    place_bracket_order as svc_place_bracket_order,
     place_limit_order as svc_place_limit_order,
     place_market_order as svc_place_market_order,
 )
@@ -136,6 +139,47 @@ class AlpacaBroker:
 
     async def close_all_positions(self) -> list[dict[str, Any]]:
         return await self._run(svc_close_all_positions, self._config)
+
+    async def bracket_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        *,
+        stop_price: float | None = None,
+        take_profit_price: float | None = None,
+        time_in_force: str = "day",
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._run(
+            svc_place_bracket_order,
+            self._config,
+            symbol,
+            qty,
+            side,
+            stop_price=stop_price,
+            take_profit_price=take_profit_price,
+            time_in_force=time_in_force,
+            client_order_id=client_order_id,
+        )
+
+    async def get_asset_info(self, symbol: str) -> dict[str, Any]:
+        return await self._run(svc_get_asset_info, self._config, symbol)
+
+    async def check_symbols_eligibility(
+        self,
+        symbols: list[str],
+        *,
+        require_shortable: bool = False,
+        require_fractionable: bool = False,
+    ) -> dict[str, Any]:
+        return await self._run(
+            svc_check_symbols_eligibility,
+            self._config,
+            symbols,
+            require_shortable=require_shortable,
+            require_fractionable=require_fractionable,
+        )
 
     async def validate(self) -> dict[str, Any]:
         return await self.get_account()

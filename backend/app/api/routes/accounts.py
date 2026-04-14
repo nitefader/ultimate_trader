@@ -375,7 +375,7 @@ async def resume_account(account_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Account not found")
     a.is_killed = False
     a.kill_reason = None
-    get_kill_switch().resume_account(account_id)
+    get_kill_switch().unkill_account(account_id)
     event = KillSwitchEvent(scope="account", scope_id=account_id, action="resume", reason=None)
     db.add(event)
     await db.commit()

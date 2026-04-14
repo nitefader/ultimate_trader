@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { monitorApi, type LiveRun, type RunDetail, type LivePosition, type LiveOrder } from '../api/monitor'
+import { usePollingGate } from '../hooks/usePollingGate'
 import clsx from 'clsx'
 import { RefreshCw, X, AlertTriangle, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 
@@ -212,17 +213,18 @@ function StatPill({ label, value, sub }: { label: string; value: string; sub?: s
 
 function RunPanel({ run }: { run: LiveRun }) {
   const qc = useQueryClient()
+  const pausePolling = usePollingGate()
 
   const detailQuery = useQuery({
     queryKey: ['monitor-detail', run.id],
     queryFn: () => monitorApi.getRunDetail(run.id),
-    refetchInterval: 10_000,
+    refetchInterval: pausePolling ? false : 10_000,
   })
 
   const positionsQuery = useQuery({
     queryKey: ['monitor-positions', run.id],
     queryFn: () => monitorApi.getPositions(run.id),
-    refetchInterval: 8_000,
+    refetchInterval: pausePolling ? false : 8_000,
   })
 
   const closePositionMutation = useMutation({
@@ -327,13 +329,14 @@ function RunPanel({ run }: { run: LiveRun }) {
 // ── Page root ─────────────────────────────────────────────────────────────────
 
 export function LiveMonitor() {
+  const pausePolling = usePollingGate()
   const [openTabs, setOpenTabs] = useState<string[]>([])
   const [activeTab, setActiveTab] = useState<string | null>(null)
 
   const runsQuery = useQuery({
     queryKey: ['monitor-runs'],
     queryFn: monitorApi.listRuns,
-    refetchInterval: 15_000,
+    refetchInterval: pausePolling ? false : 15_000,
   })
 
   const runs = runsQuery.data ?? []

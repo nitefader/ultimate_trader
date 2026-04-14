@@ -250,3 +250,55 @@ async def test_start_deployment_sets_running_and_started_at(client):
     assert r.status_code == 200
     assert r.json()["status"] == "running"
     assert r.json()["started_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_start_and_stop_deployment_manage_stream_subscriptions(client):
+    from app.services.alpaca_stream_manager import reset_alpaca_stream_manager
+
+    await reset_alpaca_stream_manager()
+
+    r = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Stream Managed Strategy",
+            "category": "custom",
+            "config": {
+                "symbols": ["SPY", "QQQ"],
+                "entry": {"conditions": [{"type": "single", "left": {"field": "close"}, "op": ">", "right": 1}]},
+            },
+        },
+    )
+    assert r.status_code == 201
+    version_id = r.json()["version_id"]
+
+    r = await client.post("/api/v1/accounts", json={"name": "Paper Stream", "mode": "paper"})
+    assert r.status_code == 201
+    paper_account_id = r.json()["id"]
+    await seed_fake_credentials(client, paper_account_id, "paper")
+
+    r = await client.post(
+        "/api/v1/deployments/promote-to-paper",
+        json={"strategy_version_id": version_id, "account_id": paper_account_id},
+    )
+    assert r.status_code == 200
+    dep_id = r.json()["id"]
+
+    start_resp = await client.post(f"/api/v1/deployments/{dep_id}/start", json={})
+    assert start_resp.status_code == 200
+
+    stream_status = await client.get("/api/v1/services/alpaca-stream/status")
+    assert stream_status.status_code == 200
+    body = stream_status.json()
+    assert body["deployment_count"] >= 1
+    assert body["runner_count"] >= 1
+    assert body["desired_symbols"] == ["QQQ", "SPY"]
+    assert dep_id in body["market_data_bus"]["subscriptions"]
+
+    stop_resp = await client.post(f"/api/v1/deployments/{dep_id}/stop", json={"reason": "pytest"})
+    assert stop_resp.status_code == 200
+
+    stream_status_after = await client.get("/api/v1/services/alpaca-stream/status")
+    assert stream_status_after.status_code == 200
+    body_after = stream_status_after.json()
+    assert dep_id not in body_after["market_data_bus"]["subscriptions"]

@@ -70,37 +70,29 @@ def classify_regime(
 
     slope = close.rolling(slope_period).apply(slope_func, raw=True)
 
+    adx_vals  = adx_df["adx"]
+    plus_di   = adx_df["plus_di"]
+    minus_di  = adx_df["minus_di"]
+
+    has_data  = adx_vals.notna() & atr_pct.notna()
+
+    is_high_vol  = has_data & (atr_pct >= high_vol_percentile)
+    is_low_vol   = has_data & (atr_pct <= low_vol_percentile) & ~is_high_vol
+    is_trending  = has_data & ~is_high_vol & ~is_low_vol & (adx_vals >= adx_trend_threshold)
+
+    trend_up   = is_trending & (plus_di > minus_di) & ema_fast.notna() & (ema_fast > ema_slow)
+    trend_down = is_trending & (minus_di > plus_di) & ema_fast.notna() & (ema_fast < ema_slow)
+    ranging    = (has_data & ~is_high_vol & ~is_low_vol & ~trend_up & ~trend_down)
+
     labels = pd.Series("unknown", index=df.index, dtype=object)
+    labels = np.where(ranging,       "ranging",         labels)
+    labels = np.where(trend_down,    "trending_down",   labels)
+    labels = np.where(trend_up,      "trending_up",     labels)
+    labels = np.where(is_low_vol,    "low_volatility",  labels)
+    labels = np.where(is_high_vol,   "high_volatility", labels)
+    labels = np.where(~has_data,     "unknown",         labels)
 
-    for i in range(len(df)):
-        adx_val = adx_df["adx"].iloc[i]
-        plus_di = adx_df["plus_di"].iloc[i]
-        minus_di = adx_df["minus_di"].iloc[i]
-        atr_p = atr_pct.iloc[i]
-        sl = slope.iloc[i]
-        ef = ema_fast.iloc[i]
-        es = ema_slow.iloc[i]
-
-        if pd.isna(adx_val) or pd.isna(atr_p):
-            labels.iloc[i] = "unknown"
-            continue
-
-        # High / low volatility overrides trend classification
-        if atr_p >= high_vol_percentile:
-            labels.iloc[i] = "high_volatility"
-        elif atr_p <= low_vol_percentile:
-            labels.iloc[i] = "low_volatility"
-        elif adx_val >= adx_trend_threshold:
-            if plus_di > minus_di and not pd.isna(ef) and ef > es:
-                labels.iloc[i] = "trending_up"
-            elif minus_di > plus_di and not pd.isna(ef) and ef < es:
-                labels.iloc[i] = "trending_down"
-            else:
-                labels.iloc[i] = "ranging"
-        else:
-            labels.iloc[i] = "ranging"
-
-    return labels
+    return pd.Series(labels, index=df.index, dtype=object)
 
 
 def get_current_regime(df: pd.DataFrame, **kwargs) -> RegimeState:

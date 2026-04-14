@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from app.models.run import BacktestRun, RunMetrics
+from app.models.validation_evidence import ValidationEvidence
 
 
 async def _seed_run(db, *, with_walk_forward: bool = False) -> BacktestRun:
@@ -28,11 +29,18 @@ async def _seed_run(db, *, with_walk_forward: bool = False) -> BacktestRun:
     walk_forward = None
     if with_walk_forward:
         walk_forward = {
+            'cpcv': {
+                'aggregate': {
+                    'median_oos_sharpe': 0.9,
+                    'pass_primary_guard': True,
+                },
+            },
             'aggregate_oos': {
                 'oos_total_return_pct': 12.3,
                 'avg_oos_return_pct': 2.1,
             },
             'anti_bias': {
+                'cpcv_primary_guard_passed': True,
                 'leakage_checks_passed': True,
                 'parameter_locking_passed': True,
                 'causal_indicator_checks_passed': True,
@@ -52,6 +60,25 @@ async def _seed_run(db, *, with_walk_forward: bool = False) -> BacktestRun:
         walk_forward=walk_forward,
     )
     db.add(metrics)
+    if with_walk_forward:
+        db.add(
+            ValidationEvidence(
+                run_id=run_id,
+                method='cpcv_walk_forward',
+                cpcv=walk_forward['cpcv'],
+                walk_forward=walk_forward,
+                anti_bias=walk_forward['anti_bias'],
+                regime_performance={'trend_up': 1200.0},
+                per_symbol_oos_sharpe={'SPY': 0.8},
+                cost_sensitivity_curve=[
+                    {'slippage_bps': 0.0, 'sharpe_ratio': 1.2, 'total_return_pct': 10.0, 'trade_count': 42},
+                    {'slippage_bps': 0.5, 'sharpe_ratio': 1.1, 'total_return_pct': 9.6, 'trade_count': 42},
+                ],
+                warnings=[],
+                is_oos_degradation_ratio=1.4,
+                stability_score=0.82,
+            )
+        )
     await db.commit()
     return run
 
@@ -106,4 +133,19 @@ async def test_compare_runs_includes_walk_forward_fields(client, db):
 
     assert body['left_run']['oos_total_return_pct'] == 12.3
     assert body['left_run']['avg_oos_return_pct'] == 2.1
+    assert body['left_run']['cpcv_median_oos_sharpe'] == 0.9
+    assert body['left_run']['cpcv_passed'] is True
     assert body['left_run']['anti_bias_passed'] is True
+
+
+@pytest.mark.asyncio
+async def test_get_run_includes_validation_evidence(client, db):
+    run = await _seed_run(db, with_walk_forward=True)
+
+    resp = await client.get(f'/api/v1/backtests/{run.id}')
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body['validation_evidence']['method'] == 'cpcv_walk_forward'
+    assert body['validation_evidence']['stability_score'] == 0.82
+    assert body['validation_evidence']['per_symbol_oos_sharpe']['SPY'] == 0.8

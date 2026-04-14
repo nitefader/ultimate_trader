@@ -1,0 +1,62 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Watchlist: Day Trading — High-Liquidity Universe
+# Used by:  VWAP Mean-Reversion Scalp (DAY mode)
+#
+# Selection criteria:
+#   - Average daily volume > 20M shares (tight spreads, deep book)
+#   - ATR > $0.30/day (enough intraday range for scalp targets)
+#   - Strong VWAP relationship (large-cap institutional activity)
+#   - No earnings within 2 days (avoid binary event gaps)
+#
+# Refresh: market_open (09:30 ET weekdays) — re-evaluate each morning
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "Day Trading — High-Liquidity Universe"
+watchlist_type: "manual"
+refresh_cron: "30 9 * * 1-5"   # 09:30 ET Mon–Fri
+min_refresh_interval_minutes: 5
+
+config:
+  description: >
+    High-liquidity large-cap equities and ETFs with deep intraday books
+    and strong VWAP mean-reversion characteristics. Curated for the
+    VWAP Mean-Reversion Scalp strategy (DAY mode, 5m bars).
+  min_adv_shares: 20000000
+  min_atr_usd: 0.30
+  strategy_affinity: "vwap_mean_reversion"
+  notes: >
+    Avoid holding through earnings. Check for halts and trading suspensions
+    at market open. Remove any symbol with spread > $0.02 during pre-market.
+
+symbols:
+  # ── Broad-Market ETFs ─────────────────────────────────────────────────────
+  - SPY     # SPDR S&P 500 — 80–100M shares/day, $0.01 spread
+  - QQQ     # Invesco Nasdaq-100 — 40–60M shares/day
+  - IWM     # iShares Russell 2000 — 25–35M shares/day, higher vol
+  - DIA     # Dow Jones ETF — moderate vol, steady VWAP
+  - XLK     # Tech sector ETF
+  - XLF     # Financial sector ETF
+  - XLE     # Energy sector ETF
+  - SQQQ    # 3× inverse QQQ — high vol, use for short scalps only
+  - TQQQ    # 3× leveraged QQQ — high ATR, use on trending days only
+
+  # ── Mega-Cap Tech ─────────────────────────────────────────────────────────
+  - AAPL    # 60–80M shares/day, institutional VWAP anchoring
+  - MSFT    # 25–35M shares/day
+  - NVDA    # 40–60M shares/day, high ATR (best mean-reversion candidate)
+  - AMD     # 50–80M shares/day, semiconductor vol
+  - META    # 20–30M shares/day
+  - GOOGL   # 20–25M shares/day
+  - AMZN    # 40–60M shares/day
+  - TSLA    # 80–120M shares/day, very high intraday ATR
+
+  # ── Financial ─────────────────────────────────────────────────────────────
+  - BAC     # Bank of America — high volume financial
+  - WFC     # Wells Fargo
+
+  # ── Energy & Commodities ──────────────────────────────────────────────────
+  - XOM     # ExxonMobil
+  - CVX     # Chevron
+
+  # ── Biotech / Pharma (use only with tight stops — binary risk) ────────────
+  - XBI     # SPDR Biotech ETF (not individual names — reduces binary risk)

@@ -15,7 +15,6 @@ function persistKillSwitchState(active: boolean) {
 interface KillSwitchStore {
   status: KillSwitchStatus | null
   platformMode: 'backtest' | 'paper' | 'live'
-  loading: boolean
   fetch: () => Promise<void>
   killAll: (reason: string) => Promise<void>
   resumeAll: () => Promise<void>
@@ -24,20 +23,22 @@ interface KillSwitchStore {
 export const useKillSwitchStore = create<KillSwitchStore>((set) => ({
   status: null,
   platformMode: 'backtest',
-  loading: false,
 
   fetch: async () => {
-    set({ loading: true })
     try {
       const data = await controlApi.status()
       const isKilled = !!data.kill_switch?.global_killed
       persistKillSwitchState(isKilled)
-      set({
-        status: data.kill_switch,
-        platformMode: (data.platform_mode as 'backtest' | 'paper' | 'live') ?? 'backtest',
-      })
-    } finally {
-      set({ loading: false })
+      const newStatus = data.kill_switch
+      const newMode = (data.platform_mode as 'backtest' | 'paper' | 'live') ?? 'backtest'
+      const current = useKillSwitchStore.getState()
+      const statusChanged = JSON.stringify(current.status) !== JSON.stringify(newStatus)
+      const modeChanged = current.platformMode !== newMode
+      if (statusChanged || modeChanged) {
+        set({ status: newStatus, platformMode: newMode })
+      }
+    } catch {
+      // silently ignore poll errors
     }
   },
 

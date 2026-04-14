@@ -25,6 +25,14 @@ export const backtestsApi = {
       max_parameter_combinations?: number
       parameter_candidates?: Record<string, (string | number)[]>
     }
+    cpcv?: {
+      enabled?: boolean
+      n_paths?: number
+      k_test_paths?: number
+      embargo_bars?: number
+      max_combos?: number
+      min_bars_path?: number
+    }
   }) => api.post<{ run_id: string; status: string; error?: string | null }>('/backtests/launch', data).then(r => r.data),
 
   recommendProvider: (data: {

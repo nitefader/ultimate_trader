@@ -180,36 +180,25 @@ class SupportResistanceEngine:
         return zones
 
     def _merge_zones(self, zones: list[SRZone]) -> list[SRZone]:
-        """Merge overlapping zones of the same kind, boosting their strength."""
+        """Merge overlapping zones of the same kind (single pass), boosting strength."""
         if not zones:
             return []
-        # Sort by midpoint
+        all_merged: list[SRZone] = []
         for kind in ("support", "resistance"):
-            bucket = sorted([z for z in zones if z.kind == kind], key=lambda z: z.midpoint)
-            merged = []
+            bucket = sorted(
+                [z for z in zones if z.kind == kind],
+                key=lambda z: z.midpoint,
+            )
+            if not bucket:
+                continue
+            merged: list[SRZone] = []
             i = 0
             while i < len(bucket):
                 base = bucket[i]
                 j = i + 1
-                while j < len(bucket) and abs(bucket[j].midpoint - base.midpoint) / max(base.midpoint, 1) <= self.zone_merge_pct:
-                    # Merge j into base
-                    base.price_low = min(base.price_low, bucket[j].price_low)
-                    base.price_high = max(base.price_high, bucket[j].price_high)
-                    base.touch_count += 1
-                    base.strength = min(base.strength + 0.1, 1.0)
-                    j += 1
-                merged.append(base)
-                i = j
-        all_merged = []
-        for kind in ("support", "resistance"):
-            bucket = sorted([z for z in zones if z.kind == kind], key=lambda z: z.midpoint)
-            merged = []
-            i = 0
-            while i < len(bucket):
-                base = bucket[i]
-                j = i + 1
-                while j < len(bucket) and abs(bucket[j].midpoint - max(base.midpoint, 0.0001)) / max(base.midpoint, 0.0001) <= self.zone_merge_pct:
-                    base.price_low = min(base.price_low, bucket[j].price_low)
+                ref = max(base.midpoint, 1e-9)
+                while j < len(bucket) and abs(bucket[j].midpoint - ref) / ref <= self.zone_merge_pct:
+                    base.price_low  = min(base.price_low,  bucket[j].price_low)
                     base.price_high = max(base.price_high, bucket[j].price_high)
                     base.touch_count += 1
                     base.strength = min(base.strength + 0.1, 1.0)

@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models.data_service import DataService
+from app.services.alpaca_stream_manager import get_alpaca_stream_manager
 
 router = APIRouter(prefix="/services", tags=["services"])
 
@@ -59,6 +60,26 @@ async def _clear_other_defaults(db, exclude_id: str | None = None) -> None:
     for svc in result.scalars().all():
         if svc.id != exclude_id:
             svc.is_default = False
+
+
+async def _get_preferred_alpaca_service(db) -> DataService | None:
+    result = await db.execute(
+        select(DataService)
+        .where(
+            DataService.provider == "alpaca",
+            DataService.is_active == True,  # noqa: E712
+        )
+        .order_by(DataService.is_default.desc(), DataService.created_at.desc())
+    )
+    candidates = [svc for svc in result.scalars().all() if svc.has_credentials()]
+    if not candidates:
+        return None
+    defaults = [svc for svc in candidates if svc.is_default]
+    if defaults:
+        return defaults[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    return candidates[0]
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -224,3 +245,20 @@ async def test_inline_credentials(body: DataServiceTestRequest) -> dict[str, Any
         return result
     except Exception as exc:
         return {"valid": False, "error": str(exc)}
+
+
+@router.get("/alpaca-stream/status")
+async def alpaca_stream_status() -> dict[str, Any]:
+    """Return the shared Alpaca data stream manager status."""
+    async with AsyncSessionLocal() as db:
+        preferred = await _get_preferred_alpaca_service(db)
+    manager = await get_alpaca_stream_manager()
+    if preferred is not None:
+        manager.configure_credentials(
+            api_key=preferred.api_key,
+            secret_key=preferred.secret_key,
+            source_id=preferred.id,
+            source_name=preferred.name,
+            environment=preferred.environment,
+        )
+    return manager.status()

@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
-import { Save, CheckCircle, AlertCircle, Plus, Trash2, Code } from 'lucide-react'
+import { Save, CheckCircle, AlertCircle, Plus, Trash2, Code, Clock, ShieldAlert, TrendingUp } from 'lucide-react'
 import { strategiesApi } from '../api/strategies'
 import { ConditionBuilder } from '../components/StrategyBuilder/ConditionBuilder'
 import { TickerSearch } from '../components/TickerSearch'
-import type { StrategyConfig, Condition, CooldownRule, ScaleLevel } from '../types'
+import { SelectMenu } from '../components/SelectMenu'
+import type { StrategyConfig, Condition, CooldownRule, ScaleLevel, DurationMode } from '../types'
 
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '1d', '1wk', '1mo']
 const REGIMES = ['trending_up', 'trending_down', 'ranging', 'high_volatility', 'low_volatility']
@@ -15,10 +16,55 @@ const SIZING_METHODS = ['risk_pct', 'fixed_shares', 'fixed_dollar', 'fixed_pct_e
 const COOLDOWN_TRIGGERS = ['loss', 'win', 'stop_out', 'target_hit', 'any_exit', 'consecutive_loss']
 const DRAFT_STORAGE_KEY = 'strategy_creator_draft_v1'
 
+const DURATION_MODE_DEFAULTS: Record<DurationMode, Partial<StrategyConfig>> = {
+  day: {
+    timeframe: '5m',
+    market_hours: {
+      timezone: 'America/New_York',
+      entry_windows: [
+        { start: '09:35', end: '11:00' },
+        { start: '14:30', end: '15:30' },
+      ],
+      force_flat_by: '15:45',
+      skip_first_bar: true,
+    },
+    pdt: {
+      enforce: true,
+      max_day_trades_per_window: 3,
+      window_sessions: 5,
+      equity_threshold: 25000,
+      on_limit_reached: 'pause_entries',
+    },
+    gap_open_exit: false,
+    gap_risk: undefined,
+  },
+  swing: {
+    timeframe: '1d',
+    market_hours: undefined,
+    pdt: undefined,
+    gap_open_exit: false,
+    gap_risk: undefined,
+  },
+  position: {
+    timeframe: '1d',
+    market_hours: undefined,
+    pdt: undefined,
+    gap_open_exit: true,
+    gap_risk: {
+      max_gap_pct: 0.05,
+      weekend_position_allowed: true,
+      earnings_blackout: true,
+      earnings_blackout_days_before: 1,
+    },
+    exit: { max_bars: 60 },
+  },
+}
+
 const DEFAULT_CONFIG: StrategyConfig = {
   hypothesis: 'Breakouts with volume expansion in trending regimes have positive expectancy.',
   symbols: ['SPY'],
   timeframe: '1d',
+  duration_mode: 'swing',
   entry: {
     directions: ['long'],
     logic: 'all_of',
@@ -143,8 +189,15 @@ export function StrategyCreator() {
   const [name, setName] = useState('My Strategy')
   const [description, setDescription] = useState('')
   const [category, setCategory] = useState('custom')
+  const [durationMode, setDurationMode] = useState<DurationMode>('swing')
   const [previewFormat, setPreviewFormat] = useState<'json' | 'yaml'>('json')
   const [config, setConfig] = useState<StrategyConfig>(DEFAULT_CONFIG)
+
+  const handleDurationModeChange = (mode: DurationMode) => {
+    setDurationMode(mode)
+    const modeDefaults = DURATION_MODE_DEFAULTS[mode]
+    setConfig(c => ({ ...c, duration_mode: mode, ...modeDefaults }))
+  }
   const [validationResult, setValidationResult] = useState<{ valid: boolean; errors: string[]; warnings: string[] } | null>(null)
   const [draftStatus, setDraftStatus] = useState<string>('')
 
@@ -153,6 +206,14 @@ export function StrategyCreator() {
     if (!element) return
     element.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
+
+  // Sync durationMode state when draft is restored (config.duration_mode comes from localStorage)
+  useEffect(() => {
+    if (config.duration_mode && config.duration_mode !== durationMode) {
+      setDurationMode(config.duration_mode)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])  // only on mount — intentionally not tracking config here
 
   const localErrors = useMemo(() => {
     const errors: Record<string, string> = {}
@@ -291,7 +352,7 @@ export function StrategyCreator() {
   })
 
   const saveMutation = useMutation({
-    mutationFn: () => strategiesApi.create({ name, description, category, config }),
+    mutationFn: () => strategiesApi.create({ name, description, category, duration_mode: durationMode, config }),
     onSuccess: (data) => {
       window.localStorage.removeItem(DRAFT_STORAGE_KEY)
       navigate(`/strategies/${data.id}`)
@@ -388,7 +449,6 @@ export function StrategyCreator() {
             className="btn-ghost text-xs"
             onClick={() => validateMutation.mutate()}
             disabled={validateMutation.isPending || !canValidate}
-            title={!canValidate ? 'Complete hypothesis and rule checklist before validating' : undefined}
           >
             Validate
           </button>
@@ -396,7 +456,6 @@ export function StrategyCreator() {
             className="btn-primary flex items-center gap-1.5"
             onClick={() => saveMutation.mutate()}
             disabled={!canSave}
-            title={!validationResult?.valid ? 'Validate successfully before saving' : undefined}
           >
             <Save size={14} /> Save Strategy
           </button>
@@ -453,13 +512,17 @@ export function StrategyCreator() {
             <input className="input w-full" value={name} onChange={e => setName(e.target.value)} />
           </Field>
           <Field label="Category">
-            <select className="input w-full" value={category} onChange={e => setCategory(e.target.value)}>
-              <option value="custom">Custom</option>
-              <option value="momentum">Momentum</option>
-              <option value="mean_reversion">Mean Reversion</option>
-              <option value="breakout">Breakout</option>
-              <option value="scalp">Scalp</option>
-            </select>
+            <SelectMenu
+              value={category}
+              onChange={setCategory}
+              options={[
+                { value: 'custom', label: 'Custom' },
+                { value: 'momentum', label: 'Momentum' },
+                { value: 'mean_reversion', label: 'Mean Reversion' },
+                { value: 'breakout', label: 'Breakout' },
+                { value: 'scalp', label: 'Scalp' },
+              ]}
+            />
           </Field>
         </div>
         <Field label="Description">
@@ -471,6 +534,223 @@ export function StrategyCreator() {
             placeholder="What does this strategy do?"
           />
         </Field>
+      </Section>
+
+      {/* ── Trading Mode ──────────────────────────────────────────────────────── */}
+      <Section id="trading-mode" title="Trading Mode" status="neutral">
+        <Field
+          label="Duration Mode"
+          hint="Controls hold period, PDT enforcement, overnight risk rules, and eligible timeframes."
+        >
+          <div className="grid grid-cols-3 gap-3 mt-1">
+            {([
+              { value: 'day' as DurationMode, icon: <Clock size={14} />, label: 'Day', desc: 'Intraday only — flat by close. PDT rules apply. Best on 1m–15m bars.' },
+              { value: 'swing' as DurationMode, icon: <TrendingUp size={14} />, label: 'Swing', desc: 'Holds 1–10 days. Overnight risk. Daily or hourly bars.' },
+              { value: 'position' as DurationMode, icon: <ShieldAlert size={14} />, label: 'Position', desc: 'Multi-week hold. Daily bars. Gap risk controls + earnings blackout.' },
+            ] as const).map(({ value, icon, label, desc }) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => handleDurationModeChange(value)}
+                className={`flex flex-col items-start gap-1 p-3 rounded border text-left transition-colors ${
+                  durationMode === value
+                    ? 'border-sky-500 bg-sky-950/40 text-sky-200'
+                    : 'border-gray-700 bg-gray-900/40 text-gray-400 hover:border-gray-500'
+                }`}
+              >
+                <div className="flex items-center gap-1.5 font-semibold text-sm">
+                  {icon} {label}
+                </div>
+                <p className="text-[11px] leading-relaxed">{desc}</p>
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        {/* Day-mode: Market hours + PDT */}
+        {durationMode === 'day' && (
+          <div className="space-y-3 pt-2 border-t border-gray-800 mt-2">
+            <p className="text-xs font-semibold text-sky-400 flex items-center gap-1.5"><Clock size={12} /> Day Trading Controls</p>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Entry Window 1 Start" hint="Format: HH:MM (ET)">
+                <input
+                  type="text" className="input w-full" placeholder="09:35"
+                  value={config.market_hours?.entry_windows?.[0]?.start ?? '09:35'}
+                  onChange={e => setConfigKey('market_hours', {
+                    ...config.market_hours,
+                    entry_windows: [
+                      { start: e.target.value, end: config.market_hours?.entry_windows?.[0]?.end ?? '11:00' },
+                      ...(config.market_hours?.entry_windows?.slice(1) ?? []),
+                    ],
+                  })}
+                />
+              </Field>
+              <Field label="Entry Window 1 End">
+                <input
+                  type="text" className="input w-full" placeholder="11:00"
+                  value={config.market_hours?.entry_windows?.[0]?.end ?? '11:00'}
+                  onChange={e => setConfigKey('market_hours', {
+                    ...config.market_hours,
+                    entry_windows: [
+                      { start: config.market_hours?.entry_windows?.[0]?.start ?? '09:35', end: e.target.value },
+                      ...(config.market_hours?.entry_windows?.slice(1) ?? []),
+                    ],
+                  })}
+                />
+              </Field>
+              <Field label="Entry Window 2 Start (optional)" hint="Leave blank to disable">
+                <input
+                  type="text" className="input w-full" placeholder="14:30"
+                  value={config.market_hours?.entry_windows?.[1]?.start ?? ''}
+                  onChange={e => {
+                    const val = e.target.value
+                    const windows = [...(config.market_hours?.entry_windows ?? [{ start: '09:35', end: '11:00' }])]
+                    if (val) {
+                      windows[1] = { start: val, end: windows[1]?.end ?? '15:30' }
+                    } else {
+                      windows.splice(1, 1)
+                    }
+                    setConfigKey('market_hours', { ...config.market_hours, entry_windows: windows })
+                  }}
+                />
+              </Field>
+              <Field label="Entry Window 2 End">
+                <input
+                  type="text" className="input w-full" placeholder="15:30"
+                  value={config.market_hours?.entry_windows?.[1]?.end ?? ''}
+                  onChange={e => {
+                    const windows = [...(config.market_hours?.entry_windows ?? [{ start: '09:35', end: '11:00' }])]
+                    if (windows[1]) windows[1] = { ...windows[1], end: e.target.value }
+                    setConfigKey('market_hours', { ...config.market_hours, entry_windows: windows })
+                  }}
+                />
+              </Field>
+              <Field label="Force Flat By (ET)" hint="Hard close — all positions exited by this time">
+                <input
+                  type="text" className="input w-full" placeholder="15:45"
+                  value={config.market_hours?.force_flat_by ?? '15:45'}
+                  onChange={e => setConfigKey('market_hours', { ...config.market_hours, force_flat_by: e.target.value })}
+                />
+              </Field>
+              <Field label="Timezone">
+                <input
+                  type="text" className="input w-full" placeholder="America/New_York"
+                  value={config.market_hours?.timezone ?? 'America/New_York'}
+                  onChange={e => setConfigKey('market_hours', { ...config.market_hours, timezone: e.target.value })}
+                />
+              </Field>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox" className="accent-sky-500"
+                checked={config.market_hours?.skip_first_bar ?? true}
+                onChange={e => setConfigKey('market_hours', { ...config.market_hours, skip_first_bar: e.target.checked })}
+              />
+              Skip first bar (avoid 09:30 gap noise)
+            </label>
+
+            <div className="border-t border-gray-800 pt-3 space-y-2">
+              <p className="text-xs font-semibold text-amber-400 flex items-center gap-1.5"><ShieldAlert size={12} /> PDT (Pattern Day Trader) Protection</p>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Enforce PDT Cap" hint="Required for margin accounts &lt; $25k">
+                  <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer mt-1">
+                    <input
+                      type="checkbox" className="accent-sky-500"
+                      checked={config.pdt?.enforce ?? true}
+                      onChange={e => setConfigKey('pdt', { ...config.pdt, enforce: e.target.checked })}
+                    />
+                    Enable PDT enforcement
+                  </label>
+                </Field>
+                <Field label="Max Day Trades / Window" hint="FINRA limit: 3 per 5 sessions">
+                  <input
+                    type="number" className="input w-full"
+                    value={config.pdt?.max_day_trades_per_window ?? 3}
+                    onChange={e => setConfigKey('pdt', { ...config.pdt, max_day_trades_per_window: parseInt(e.target.value) })}
+                  />
+                </Field>
+                <Field label="Equity Threshold ($)" hint="Accounts above this bypass PDT cap">
+                  <input
+                    type="number" className="input w-full"
+                    value={config.pdt?.equity_threshold ?? 25000}
+                    onChange={e => setConfigKey('pdt', { ...config.pdt, equity_threshold: parseInt(e.target.value) })}
+                  />
+                </Field>
+                <Field label="On Limit Reached">
+                  <SelectMenu
+                    value={config.pdt?.on_limit_reached ?? 'pause_entries'}
+                    onChange={v => setConfigKey('pdt', { ...config.pdt, on_limit_reached: v as any })}
+                    options={[
+                      { value: 'pause_entries', label: 'Pause new entries' },
+                      { value: 'block_new', label: 'Block all new orders' },
+                      { value: 'warn_only', label: 'Warn only (no enforcement)' },
+                    ]}
+                  />
+                </Field>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Position-mode: Gap risk + max hold */}
+        {durationMode === 'position' && (
+          <div className="space-y-3 pt-2 border-t border-gray-800 mt-2">
+            <p className="text-xs font-semibold text-amber-400 flex items-center gap-1.5"><ShieldAlert size={12} /> Overnight & Gap Risk Controls</p>
+
+            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox" className="accent-sky-500"
+                checked={config.gap_open_exit ?? true}
+                onChange={e => setConfigKey('gap_open_exit', e.target.checked)}
+              />
+              Gap-open exit — if next open gaps below stop, exit at open price immediately
+            </label>
+
+            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox" className="accent-sky-500"
+                checked={config.gap_risk?.earnings_blackout ?? true}
+                onChange={e => setConfigKey('gap_risk', { ...config.gap_risk, earnings_blackout: e.target.checked })}
+              />
+              Earnings blackout — close position EOD before earnings release
+            </label>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Earnings Blackout Days Before" hint="Close position N days before earnings">
+                <input
+                  type="number" className="input w-full"
+                  value={config.gap_risk?.earnings_blackout_days_before ?? 1}
+                  onChange={e => setConfigKey('gap_risk', { ...config.gap_risk, earnings_blackout_days_before: parseInt(e.target.value) })}
+                />
+              </Field>
+              <Field label="Max Gap % (reduce size above)" hint="e.g. 0.05 = 5% expected gap">
+                <input
+                  type="number" step="0.01" className="input w-full"
+                  value={config.gap_risk?.max_gap_pct ?? 0.05}
+                  onChange={e => setConfigKey('gap_risk', { ...config.gap_risk, max_gap_pct: parseFloat(e.target.value) })}
+                />
+              </Field>
+              <Field label="Max Hold Bars" hint="Force exit after N daily bars (~60 bars = 3 months)">
+                <input
+                  type="number" className="input w-full"
+                  value={config.exit?.max_bars ?? 60}
+                  onChange={e => setConfigKey('exit', { max_bars: parseInt(e.target.value) })}
+                />
+              </Field>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox" className="accent-sky-500"
+                checked={config.gap_risk?.weekend_position_allowed ?? true}
+                onChange={e => setConfigKey('gap_risk', { ...config.gap_risk, weekend_position_allowed: e.target.checked })}
+              />
+              Allow weekend positions (normal for daily-bar strategies)
+            </label>
+          </div>
+        )}
       </Section>
 
       <Section id="blueprint-checklist" title="Backtest Blueprint Checklist" status={missingBlueprint.length > 0 ? 'error' : 'ready'}>
@@ -530,9 +810,11 @@ export function StrategyCreator() {
           />
         </Field>
         <Field label="Timeframe" error={localErrors.timeframe}>
-          <select className="input" value={config.timeframe} onChange={e => setConfigKey('timeframe', e.target.value)}>
-            {TIMEFRAMES.map(tf => <option key={tf}>{tf}</option>)}
-          </select>
+          <SelectMenu
+            value={config.timeframe ?? '1d'}
+            onChange={v => setConfigKey('timeframe', v)}
+            options={TIMEFRAMES.map(tf => ({ value: tf, label: tf }))}
+          />
         </Field>
       </Section>
 
@@ -574,13 +856,11 @@ export function StrategyCreator() {
       <Section id="stop-loss" title="Stop Loss" status={sectionStatus.stopLoss}>
         <div className="grid grid-cols-3 gap-3">
           <Field label="Method">
-            <select
-              className="input w-full"
+            <SelectMenu
               value={config.stop_loss?.method ?? 'fixed_pct'}
-              onChange={e => handleStopMethodChange(e.target.value)}
-            >
-              {STOP_METHODS.map(m => <option key={m}>{m}</option>)}
-            </select>
+              onChange={v => handleStopMethodChange(v)}
+              options={STOP_METHODS.map(m => ({ value: m, label: m }))}
+            />
           </Field>
           {(config.stop_loss?.method === 'fixed_pct' || config.stop_loss?.method === 'fixed_dollar') && (
             <Field label="Value" error={localErrors.stopValue}>
@@ -615,17 +895,15 @@ export function StrategyCreator() {
         {(config.targets ?? []).map((target, i) => (
           <div key={i} className="flex items-center gap-2 bg-gray-800 rounded p-2">
             <span className="text-xs text-gray-500 w-16">Target {i + 1}</span>
-            <select
-              className="input text-xs py-1"
+            <SelectMenu
               value={target.method}
-              onChange={e => {
+              onChange={v => {
                 const targets = [...(config.targets ?? [])]
-                targets[i] = { ...targets[i], method: e.target.value }
+                targets[i] = { ...targets[i], method: v }
                 setConfigKey('targets', targets)
               }}
-            >
-              {TARGET_METHODS.map(m => <option key={m}>{m}</option>)}
-            </select>
+              options={TARGET_METHODS.map(m => ({ value: m, label: m }))}
+            />
             {target.method === 'r_multiple' && (
               <input
                 type="number" step="0.5" className="input text-xs py-1 w-20"
@@ -658,13 +936,11 @@ export function StrategyCreator() {
       <Section id="position-sizing" title="Position Sizing" status={sectionStatus.positionSizing}>
         <div className="grid grid-cols-3 gap-3">
           <Field label="Method">
-            <select
-              className="input w-full"
+            <SelectMenu
               value={config.position_sizing?.method ?? 'risk_pct'}
-              onChange={e => setConfigKey('position_sizing', { ...config.position_sizing, method: e.target.value })}
-            >
-              {SIZING_METHODS.map(m => <option key={m}>{m}</option>)}
-            </select>
+              onChange={v => setConfigKey('position_sizing', { ...config.position_sizing, method: v })}
+              options={SIZING_METHODS.map(m => ({ value: m, label: m }))}
+            />
           </Field>
           {config.position_sizing?.method === 'risk_pct' && (
             <Field label="Risk % per trade" error={localErrors.riskPct} hint="Use 1 for 1% risk per trade.">
@@ -750,17 +1026,15 @@ export function StrategyCreator() {
       <Section id="cooldown-rules" title="Cooldown Rules" status={sectionStatus.cooldownRules}>
         {(config.cooldown_rules ?? []).map((rule, i) => (
           <div key={i} className="flex items-center gap-2 bg-gray-800 rounded p-2">
-            <select
-              className="input text-xs py-1"
+            <SelectMenu
               value={rule.trigger}
-              onChange={e => {
+              onChange={v => {
                 const rules = [...(config.cooldown_rules ?? [])]
-                rules[i] = { ...rules[i], trigger: e.target.value }
+                rules[i] = { ...rules[i], trigger: v }
                 setConfigKey('cooldown_rules', rules)
               }}
-            >
-              {COOLDOWN_TRIGGERS.map(t => <option key={t}>{t}</option>)}
-            </select>
+              options={COOLDOWN_TRIGGERS.map(t => ({ value: t, label: t }))}
+            />
             <input
               type="number" className="input text-xs py-1 w-24" placeholder="Minutes"
               value={rule.duration_minutes ?? ''}

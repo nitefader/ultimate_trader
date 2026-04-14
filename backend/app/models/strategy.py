@@ -42,6 +42,12 @@ class StrategyVersion(Base):
     created_by: Mapped[str] = mapped_column(String(128), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
+    # Duration mode — first-class signal intent (immutable once set)
+    # day:      enters and exits within the same session; PDT rules apply
+    # swing:    holds 2–10 days; overnight risk, gap risk, max_hold_days exit
+    # position: holds weeks to months; earnings exposure, benchmark-relative risk
+    duration_mode: Mapped[str] = mapped_column(String(16), default="swing")
+
     # Promotion chain
     promoted_from_run_id: Mapped[str | None] = mapped_column(String(36))  # backtest run that triggered promotion
     promotion_status: Mapped[str] = mapped_column(String(32), default="backtest_only")

@@ -43,6 +43,9 @@ from app.strategies.conditions import EvalContext, evaluate_conditions, evaluate
 from app.strategies.stops import calculate_stop, calculate_target, update_trailing_stop
 from app.strategies.sizing import calculate_position_size, scale_quantity
 from app.strategies.cooldown import CooldownManager
+from app.models.session_window import SessionWindowConfig
+from app.models.universe_snapshot import UniverseSchedule
+from app.services.earnings_calendar import get_earnings_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +88,16 @@ class BacktestEngine:
 
         self.portfolio = Portfolio(self.initial_capital, self.commission_per_share)
         self.result = BacktestResult()
+
+        # Session window: built from duration_mode (day/swing/position) or run_config override.
+        # Controls entry cutoff, exit cutoff, and hard liquidation time for each bar.
+        duration_mode = strategy_config.get("duration_mode") or run_config.get("duration_mode", "swing")
+        self.session_window = SessionWindowConfig.from_duration_mode(duration_mode)
+
+        # Universe schedule: point-in-time constituent snapshots.
+        # When present, only symbols active at each bar's date are eligible for entry.
+        # Open positions on symbols that leave the universe are still managed to exit.
+        self.universe_schedule = UniverseSchedule.from_run_config(run_config)
 
         # Per-symbol indicator cache
         self._indicator_cache: dict[str, pd.DataFrame] = {}
@@ -194,10 +207,19 @@ class BacktestEngine:
                 )
 
                 # ── Manage existing positions (exits first) ─────────────────
+                # Exits are always processed regardless of universe membership —
+                # we never force-close a position just because a symbol left the universe.
                 self._process_exits(symbol, bar, bar_index, ts, ctx, df)
 
                 # ── Check for new entries ────────────────────────────────────
-                self._process_entries(symbol, bar, bar_index, ts, ctx, df, current_regime, sr_engine)
+                # Universe schedule: skip entry if symbol not active at this bar date.
+                # This prevents survivorship bias from symbols added retroactively.
+                if self.universe_schedule is not None:
+                    active = self.universe_schedule.active_symbols_at(current_date)
+                    if active is not None and symbol.upper() not in active:
+                        continue
+
+                self._process_entries(symbol, bar, bar_index, ts, ctx, df, current_regime, sr_engine, current_date)
 
             # Record equity
             self.portfolio.record_equity(ts, current_regime)
@@ -346,9 +368,25 @@ class BacktestEngine:
         df: pd.DataFrame,
         regime: str,
         sr_engine: SupportResistanceEngine | None,
+        current_date: date | None = None,
     ) -> None:
         if self.signal_start_ts is not None and pd.Timestamp(ts) < self.signal_start_ts:
             return
+
+        # Session window: block new entries outside the allowed entry window.
+        # Uses bar timestamp converted to ET time-of-day.
+        _ET = ZoneInfo("America/New_York")
+        ts_et = pd.Timestamp(ts).tz_localize("UTC").tz_convert(_ET) if pd.Timestamp(ts).tzinfo is None else pd.Timestamp(ts).tz_convert(_ET)
+        if not self.session_window.can_enter(ts_et.time()):
+            return
+
+        # Earnings exclusion: block new entries within the exclusion window.
+        # Open positions are unaffected — exits are always processed.
+        if current_date is not None:
+            earnings_cal = get_earnings_calendar()
+            if earnings_cal.is_excluded(symbol, current_date):
+                logger.debug("Earnings exclusion: skipping entry for %s on %s", symbol, current_date)
+                return
 
         # Skip if already have a position (unless scale-in is configured)
         existing_long = self.portfolio.get_position(symbol, "long")
@@ -375,9 +413,6 @@ class BacktestEngine:
                 if allowed_regimes and regime not in allowed_regimes:
                     continue
 
-            # Event filter (simplified: check if we have event blackouts)
-            # Full event filter handled in services layer
-
             # Evaluate entry conditions
             entry_conditions = entry_config.get(f"{direction}_conditions", entry_config.get("conditions", []))
             entry_logic = entry_config.get("logic", "all_of")
@@ -395,24 +430,9 @@ class BacktestEngine:
             fill_ts = pd.Timestamp(next_bar.name)
             entry_price = float(next_bar["open"])
 
-            # Apply slippage: supports fixed, percent, tick, or model-based
+            # Apply slippage
             tick_size = float(self.strategy.get("tick_size", 0.01))
             entry_price = self._apply_slippage(entry_price, direction, bar, bar_index, symbol, tick_size)
-
-    def _apply_slippage(self, price, direction, bar, bar_index, symbol, tick_size):
-        # If a callable/model is provided, use it
-        if callable(self.slippage_model):
-            return self.slippage_model(price, direction, bar, bar_index, symbol, tick_size)
-        # Built-in: random normal slippage
-        if self.slippage_model == "random_normal":
-            # Example: mean=0, std=1 tick
-            slip = np.random.normal(0, 1) * tick_size
-            return price + slip if direction == "long" else price - slip
-        # Default: fixed percent and tick slippage
-        if direction == "long":
-            return price * (1.0 + self.slippage_pct / 100.0) + self.slippage_ticks * tick_size
-        else:
-            return price * (1.0 - self.slippage_pct / 100.0) - self.slippage_ticks * tick_size
 
             # Calculate stop
             stop_config = self.strategy.get("stop_loss", {"method": "fixed_pct", "value": 2.0})
@@ -439,7 +459,6 @@ class BacktestEngine:
 
             # Size the position
             sizing_config = self.strategy.get("position_sizing", {"method": "risk_pct", "risk_pct": 1.0})
-            # Pass closed trades for rolling_kelly adaptive sizing
             if sizing_config.get("method") == "rolling_kelly":
                 from app.strategies.sizing import _rolling_kelly
                 quantity = _rolling_kelly(
@@ -462,7 +481,7 @@ class BacktestEngine:
                 )
 
             if quantity < 1e-6:
-                return
+                continue
 
             initial_risk = None
             if stop_price is not None:
@@ -476,18 +495,18 @@ class BacktestEngine:
                     quantity = scale_quantity(quantity, levels, 0)  # first entry
 
             if quantity < 1e-6:
-                return
+                continue
 
             # Risk check
             commission = self._calc_commission(quantity, entry_price)
             approved, reason = self.risk.check_entry(symbol, direction, quantity, entry_price, stop_price, self.portfolio)
             if not approved:
                 logger.debug(f"Entry rejected for {symbol} {direction}: {reason}")
-                return
+                continue
 
             # Open position
             trade_id = str(uuid.uuid4())
-            pos = self.portfolio.open_position(
+            self.portfolio.open_position(
                 symbol=symbol,
                 direction=direction,
                 quantity=quantity,
@@ -504,6 +523,17 @@ class BacktestEngine:
             )
             logger.debug(f"Opened {direction} {symbol} @ {entry_price:.4f} qty={quantity:.2f} stop={stop_price}")
 
+    def _apply_slippage(self, price: float, direction: str, bar: pd.Series, bar_index: int, symbol: str, tick_size: float) -> float:
+        if callable(self.slippage_model):
+            return self.slippage_model(price, direction, bar, bar_index, symbol, tick_size)
+        if self.slippage_model == "random_normal":
+            slip = np.random.normal(0, 1) * tick_size
+            return price + slip if direction == "long" else price - slip
+        if direction == "long":
+            return price * (1.0 + self.slippage_pct / 100.0) + self.slippage_ticks * tick_size
+        else:
+            return price * (1.0 - self.slippage_pct / 100.0) - self.slippage_ticks * tick_size
+
     # ── Exit processing ───────────────────────────────────────────────────────
 
     def _process_exits(
@@ -519,6 +549,12 @@ class BacktestEngine:
         exit_config = self.strategy.get("exit", {})
         scale_out_config = self.strategy.get("scale_out")
 
+        # Session window: check for forced close / hard liquidation before individual position logic.
+        _ET = ZoneInfo("America/New_York")
+        ts_et = pd.Timestamp(ts).tz_localize("UTC").tz_convert(_ET) if pd.Timestamp(ts).tzinfo is None else pd.Timestamp(ts).tz_convert(_ET)
+        force_liquidate = self.session_window.should_liquidate_all(ts_et.time())
+        force_close = force_liquidate or self.session_window.should_close_positions(ts_et.time())
+
         for pos in positions_to_check:
             price = float(bar["close"])
             high = float(bar["high"])
@@ -528,6 +564,16 @@ class BacktestEngine:
             exit_price = None
             exit_reason = None
             exit_qty = None  # None = full close
+
+            # 0. Session window forced exit — takes priority over all other checks.
+            #    Hard liquidation (15:55 ET for day mode) uses aggressive close price.
+            #    Soft close window (15:50 ET) also triggers immediate exit.
+            if force_liquidate:
+                exit_price = price
+                exit_reason = "session_liquidation"
+            elif force_close and not self.session_window.allow_overnight:
+                exit_price = price
+                exit_reason = "session_exit"
 
             # 1. Gap through stop (open gaps past stop)
             if pos.stop_price:

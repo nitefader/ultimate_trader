@@ -13,12 +13,29 @@ from app.core.kill_switch import get_kill_switch
 from app.models.account import Account
 from app.models.deployment import Deployment, DeploymentApproval
 from app.models.strategy import StrategyVersion
+from app.services.alpaca_stream_manager import get_alpaca_stream_manager
 
 
 def _enforce_kill_switch(account_id: str, strategy_id: str) -> None:
     ok, reason = get_kill_switch().can_trade(account_id=account_id, strategy_id=strategy_id)
     if not ok:
         raise ValueError(reason)
+
+
+def _deployment_symbols(strategy_config: dict, config_overrides: dict | None) -> list[str]:
+    overrides = config_overrides or {}
+    symbols_raw = overrides.get("symbols") or strategy_config.get("symbols", [])
+    if isinstance(symbols_raw, str):
+        symbols_raw = [item.strip() for item in symbols_raw.split(",")]
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for raw in symbols_raw:
+        symbol = str(raw).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        symbols.append(symbol)
+        seen.add(symbol)
+    return symbols
 
 
 async def promote_to_paper(
@@ -177,6 +194,12 @@ async def start_deployment(db: AsyncSession, deployment_id: str) -> Deployment:
 
     dep.status = "running"
     dep.started_at = datetime.now(timezone.utc)
+    sv = await db.get(StrategyVersion, dep.strategy_version_id)
+    strategy_config = sv.config if sv else {}
+    symbols = _deployment_symbols(strategy_config, dep.config_overrides)
+    if symbols:
+        manager = await get_alpaca_stream_manager()
+        await manager.register_runner(dep.id, symbols)
     await db.flush()
     return dep
 
@@ -186,6 +209,8 @@ async def pause_deployment(db: AsyncSession, deployment_id: str, reason: str = "
     if not dep:
         raise ValueError(f"Deployment {deployment_id} not found")
     dep.status = "paused"
+    manager = await get_alpaca_stream_manager()
+    await manager.unregister_runner(dep.id)
     await db.flush()
     return dep
 
@@ -197,5 +222,7 @@ async def stop_deployment(db: AsyncSession, deployment_id: str, reason: str = "m
     dep.status = "stopped"
     dep.stopped_at = datetime.now(timezone.utc)
     dep.stop_reason = reason
+    manager = await get_alpaca_stream_manager()
+    await manager.unregister_runner(dep.id)
     await db.flush()
     return dep

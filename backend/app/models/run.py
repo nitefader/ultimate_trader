@@ -64,6 +64,7 @@ class RunMetrics(Base):
     sharpe_ratio: Mapped[float | None] = mapped_column(Float)
     sortino_ratio: Mapped[float | None] = mapped_column(Float)
     calmar_ratio: Mapped[float | None] = mapped_column(Float)
+    sqn: Mapped[float | None] = mapped_column(Float)
 
     # Drawdown
     max_drawdown_pct: Mapped[float | None] = mapped_column(Float)

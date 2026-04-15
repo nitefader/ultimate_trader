@@ -64,3 +64,13 @@ async def create_all_tables() -> None:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA synchronous=NORMAL"))
             await conn.execute(text("PRAGMA busy_timeout=30000"))
+            # Additive column migrations — safe to re-run (SQLite ignores duplicate columns
+            # when we catch the error). Add new columns here when the model grows.
+            _additive_migrations = [
+                "ALTER TABLE run_metrics ADD COLUMN sqn REAL",
+            ]
+            for stmt in _additive_migrations:
+                try:
+                    await conn.execute(text(stmt))
+                except Exception:
+                    pass  # Column already exists

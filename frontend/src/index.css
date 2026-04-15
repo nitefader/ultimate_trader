@@ -6,13 +6,13 @@
 
 @layer base {
   body {
-    @apply bg-gray-950 text-gray-100 font-mono;
+    @apply font-mono;
     background-color: var(--color-bg-page);
     color: var(--color-text-primary);
   }
   * {
     scrollbar-width: thin;
-    scrollbar-color: #374151 #111827;
+    scrollbar-color: var(--sb-thumb) var(--sb-track);
   }
 }
 
@@ -42,8 +42,13 @@
     @apply btn bg-transparent border border-gray-700 hover:bg-gray-800 text-gray-300;
   }
   .input {
-    @apply bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-sky-500 appearance-auto;
-    border-color: var(--color-border);
+    @apply rounded px-3 py-2 text-sm focus:outline-none appearance-auto;
+    background-color: var(--color-bg-hover);
+    border: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+  }
+  .input:focus {
+    border-color: var(--color-accent);
   }
   .label {
     @apply block text-xs text-gray-400 mb-1 uppercase tracking-wide;
@@ -57,6 +62,20 @@
   .badge-green { @apply badge bg-green-900 text-green-300; }
   .badge-red { @apply badge bg-red-900 text-red-300; }
   .badge-gray { @apply badge bg-gray-800 text-gray-400; }
+  /* Nav link states — use CSS vars so they work across all themes */
+  .nav-active {
+    font-weight: 600;
+    color: var(--color-accent);
+    background-color: var(--color-accent-dim);
+  }
+  .nav-idle {
+    color: var(--color-text-muted);
+  }
+  .nav-idle:hover {
+    color: var(--color-text-primary);
+    background-color: var(--color-bg-hover);
+  }
+
   .metric-card {
     @apply card flex flex-col gap-1;
   }

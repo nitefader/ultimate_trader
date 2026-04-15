@@ -317,3 +317,180 @@ def vwap_session(df: pd.DataFrame) -> pd.Series:
     cumvol = df.groupby(df.index.date)["volume"].cumsum()
     cumtp_vol = df.groupby(df.index.date).apply(lambda g: (typical[g.index] * g["volume"]).cumsum()).values
     return pd.Series(cumtp_vol / cumvol.values, index=df.index)
+
+
+# ── Parabolic SAR ────────────────────────────────────────────────────────────
+
+def parabolic_sar(
+    high: pd.Series,
+    low: pd.Series,
+    af_start: float = 0.02,
+    af_step: float = 0.02,
+    af_max: float = 0.20,
+) -> pd.DataFrame:
+    """
+    Wilder's Parabolic SAR.
+
+    Returns a DataFrame with two columns:
+        sar       — the SAR value for each bar
+        sar_trend — +1 when in an uptrend (price above SAR), -1 when in a downtrend
+
+    Parameters
+    ----------
+    af_start : initial acceleration factor (default 0.02)
+    af_step  : increment added each time a new extreme is set (default 0.02)
+    af_max   : maximum acceleration factor (default 0.20)
+
+    Computed causally: each bar only references data up to and including itself.
+    """
+    highs = high.values.astype(float)
+    lows  = low.values.astype(float)
+    n     = len(highs)
+
+    sar_arr   = np.full(n, np.nan)
+    trend_arr = np.zeros(n, dtype=int)
+
+    if n < 2:
+        return pd.DataFrame({"sar": sar_arr, "sar_trend": trend_arr}, index=high.index)
+
+    # Seed: determine initial trend from first two bars
+    trend   = 1 if highs[1] > highs[0] else -1
+    ep      = highs[0] if trend == 1 else lows[0]   # extreme point
+    af      = af_start
+    sar_val = lows[0]  if trend == 1 else highs[0]
+
+    for i in range(1, n):
+        # Apply SAR
+        sar_arr[i]   = sar_val
+        trend_arr[i] = trend
+
+        if trend == 1:
+            # Uptrend: SAR is below price
+            new_sar = sar_val + af * (ep - sar_val)
+            # SAR cannot be above the two prior lows
+            new_sar = min(new_sar, lows[i - 1], lows[i - 2] if i >= 2 else lows[i - 1])
+            if lows[i] < new_sar:
+                # Reversal to downtrend
+                trend   = -1
+                new_sar = ep           # SAR flips to the prior extreme point
+                ep      = lows[i]
+                af      = af_start
+            else:
+                if highs[i] > ep:
+                    ep = highs[i]
+                    af = min(af + af_step, af_max)
+        else:
+            # Downtrend: SAR is above price
+            new_sar = sar_val + af * (ep - sar_val)
+            new_sar = max(new_sar, highs[i - 1], highs[i - 2] if i >= 2 else highs[i - 1])
+            if highs[i] > new_sar:
+                # Reversal to uptrend
+                trend   = 1
+                new_sar = ep
+                ep      = highs[i]
+                af      = af_start
+            else:
+                if lows[i] < ep:
+                    ep = lows[i]
+                    af = min(af + af_step, af_max)
+
+        sar_val = new_sar
+
+    return pd.DataFrame({"sar": sar_arr, "sar_trend": trend_arr}, index=high.index)
+
+
+# ── IBS (Internal Bar Strength) ───────────────────────────────────────────────
+
+def ibs(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    """
+    Internal Bar Strength = (close - low) / (high - low), clipped to [0, 1].
+    Measures where the close falls within the day's range.
+    Values near 0 = closed near the low (bearish pressure).
+    Values near 1 = closed near the high (bullish pressure).
+    """
+    rng = (high - low).replace(0, np.nan)
+    return ((close - low) / rng).clip(0.0, 1.0)
+
+
+# ── Z-Score ───────────────────────────────────────────────────────────────────
+
+def zscore(close: pd.Series, period: int = 20) -> pd.Series:
+    """
+    Rolling Z-score = (close - rolling_mean(period)) / rolling_std(period).
+    Zero when std == 0 (flat price series).
+    Values > 2 or < -2 indicate statistically extreme price levels.
+    """
+    mean = close.rolling(period).mean()
+    std = close.rolling(period).std(ddof=0)
+    z = (close - mean) / std
+    return z.where(std != 0, 0.0)
+
+
+# ── BT_Snipe ──────────────────────────────────────────────────────────────────
+
+def bt_snipe(close: pd.Series, ema_period: int = 20, zscore_period: int = 20) -> pd.Series:
+    """
+    BT_Snipe — momentum exhaustion signal.
+    Z-score of (close - EMA(ema_period)) over zscore_period bars.
+    High positive values = price stretched above its EMA (mean-reversion short signal).
+    High negative values = price stretched below its EMA (mean-reversion long signal).
+    """
+    deviation = close - ema(close, ema_period)
+    mean = deviation.rolling(zscore_period).mean()
+    std = deviation.rolling(zscore_period).std(ddof=0)
+    z = (deviation - mean) / std
+    return z.where(std != 0, 0.0)
+
+
+# ── TheStrat classification ───────────────────────────────────────────────────
+
+def thestrat(high: pd.Series, low: pd.Series) -> pd.Series:
+    """
+    Rob Smith's TheStrat bar classification based on current vs prior bar range.
+
+    Returns a string category per bar:
+        '1'   — Inside bar:   high <= prev_high AND low >= prev_low
+        '2u'  — Two-up:       high > prev_high AND low >= prev_low  (bullish expansion)
+        '2d'  — Two-down:     low < prev_low  AND high <= prev_high (bearish expansion)
+        '3'   — Outside bar:  high > prev_high AND low < prev_low   (full engulf)
+
+    First bar is NaN (no prior bar to compare against).
+    """
+    prev_high = high.shift(1)
+    prev_low  = low.shift(1)
+
+    inside  = (high <= prev_high) & (low >= prev_low)
+    two_up  = (high >  prev_high) & (low >= prev_low)
+    two_dn  = (low  <  prev_low)  & (high <= prev_high)
+    outside = (high >  prev_high) & (low  <  prev_low)
+
+    result = pd.Series(np.nan, index=high.index, dtype=object)
+    result[inside]  = "1"
+    result[two_up]  = "2u"
+    result[two_dn]  = "2d"
+    result[outside] = "3"
+    return result
+
+
+def thestrat_num(high: pd.Series, low: pd.Series) -> pd.Series:
+    """
+    Numeric encoding of TheStrat classification for use in numeric comparisons:
+        1  = inside bar
+        2  = two-up
+        -2 = two-down
+        3  = outside bar
+    """
+    prev_high = high.shift(1)
+    prev_low  = low.shift(1)
+
+    inside  = (high <= prev_high) & (low >= prev_low)
+    two_up  = (high >  prev_high) & (low >= prev_low)
+    two_dn  = (low  <  prev_low)  & (high <= prev_high)
+    outside = (high >  prev_high) & (low  <  prev_low)
+
+    result = pd.Series(np.nan, index=high.index, dtype=float)
+    result[inside]  = 1.0
+    result[two_up]  = 2.0
+    result[two_dn]  = -2.0
+    result[outside] = 3.0
+    return result

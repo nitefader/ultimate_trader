@@ -986,30 +986,39 @@ async def launch_backtest(
     strategy_version_id: str,
     strategy_config: dict,
     run_config: dict,
+    run_id: str | None = None,
 ) -> BacktestRun:
-    """Create a run record and execute the backtest."""
-    run = BacktestRun(
-        id=str(uuid.uuid4()),
-        strategy_version_id=strategy_version_id,
-        mode="backtest",
-        status="running",
-        symbols=run_config.get("symbols", []),
-        timeframe=run_config.get("timeframe", "1d"),
-        start_date=run_config.get("start_date", "2020-01-01"),
-        end_date=run_config.get("end_date", "2023-12-31"),
-        initial_capital=run_config.get("initial_capital", 100_000),
-        commission_per_share=run_config.get("commission_per_share", 0.005),
-        slippage_ticks=run_config.get("slippage_ticks", 1),
-        parameters={
-            **(run_config.get("parameters", {}) or {}),
-            "commission_pct_per_trade": run_config.get("commission_pct_per_trade", 0.0),
-            "walk_forward": run_config.get("walk_forward", {}),
-            "cpcv": run_config.get("cpcv", {}),
-        },
-        started_at=datetime.now(timezone.utc),
-    )
-    db.add(run)
-    await db.flush()
+    """Execute the backtest. If run_id is given, load the existing pending record; otherwise create one."""
+    if run_id:
+        run = await db.get(BacktestRun, run_id)
+        if run is None:
+            raise ValueError(f"BacktestRun {run_id} not found")
+        run.status = "running"
+        run.started_at = datetime.now(timezone.utc)
+        await db.flush()
+    else:
+        run = BacktestRun(
+            id=str(uuid.uuid4()),
+            strategy_version_id=strategy_version_id,
+            mode="backtest",
+            status="running",
+            symbols=run_config.get("symbols", []),
+            timeframe=run_config.get("timeframe", "1d"),
+            start_date=run_config.get("start_date", "2020-01-01"),
+            end_date=run_config.get("end_date", "2023-12-31"),
+            initial_capital=run_config.get("initial_capital", 100_000),
+            commission_per_share=run_config.get("commission_per_share", 0.005),
+            slippage_ticks=run_config.get("slippage_ticks", 1),
+            parameters={
+                **(run_config.get("parameters", {}) or {}),
+                "commission_pct_per_trade": run_config.get("commission_pct_per_trade", 0.0),
+                "walk_forward": run_config.get("walk_forward", {}),
+                "cpcv": run_config.get("cpcv", {}),
+            },
+            started_at=datetime.now(timezone.utc),
+        )
+        db.add(run)
+        await db.flush()
 
     try:
         # Load data
@@ -1170,6 +1179,7 @@ async def launch_backtest(
             sharpe_ratio=m.get("sharpe_ratio"),
             sortino_ratio=m.get("sortino_ratio"),
             calmar_ratio=m.get("calmar_ratio"),
+            sqn=m.get("sqn"),
             max_drawdown_pct=m.get("max_drawdown_pct"),
             max_drawdown_duration_days=m.get("max_drawdown_duration_days"),
             recovery_factor=m.get("recovery_factor"),

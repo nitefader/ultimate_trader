@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
-import { Save, CheckCircle, AlertCircle, Plus, Trash2, Code, Clock, ShieldAlert, TrendingUp } from 'lucide-react'
+import { Save, CheckCircle, AlertCircle, Plus, Trash2, Code, Clock, ShieldAlert, TrendingUp, ArrowDownUp } from 'lucide-react'
 import { strategiesApi } from '../api/strategies'
 import { ConditionBuilder } from '../components/StrategyBuilder/ConditionBuilder'
 import { TickerSearch } from '../components/TickerSearch'
 import { SelectMenu } from '../components/SelectMenu'
-import type { StrategyConfig, Condition, CooldownRule, ScaleLevel, DurationMode } from '../types'
+import type { StrategyConfig, DurationMode } from '../types'
 
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '1d', '1wk', '1mo']
 const REGIMES = ['trending_up', 'trending_down', 'ranging', 'high_volatility', 'low_volatility']
@@ -15,6 +15,40 @@ const TARGET_METHODS = ['r_multiple', 'fixed_pct', 'atr_multiple', 'sr_resistanc
 const SIZING_METHODS = ['risk_pct', 'fixed_shares', 'fixed_dollar', 'fixed_pct_equity', 'atr_risk', 'kelly']
 const COOLDOWN_TRIGGERS = ['loss', 'win', 'stop_out', 'target_hit', 'any_exit', 'consecutive_loss']
 const DRAFT_STORAGE_KEY = 'strategy_creator_draft_v1'
+
+// ── Mirror long→short ─────────────────────────────────────────────────────────
+// Flips the directional operators in every condition so long rules become short.
+// >/<, >=/<= and crosses_above/crosses_below are inverted; == and != are left alone.
+const MIRROR_OP: Record<string, string> = {
+  '>':             '<',
+  '>=':            '<=',
+  '<':             '>',
+  '<=':            '>=',
+  'crosses_above': 'crosses_below',
+  'crosses_below': 'crosses_above',
+}
+
+function mirrorConditions(conditions: any[]): any[] {
+  return JSON.parse(JSON.stringify(conditions)).map(mirrorCond)
+}
+
+function mirrorCond(cond: any): any {
+  if (!cond || typeof cond !== 'object') return cond
+  const type = cond.type ?? 'single'
+  if (type === 'single') {
+    const flipped = MIRROR_OP[cond.op]
+    return flipped ? { ...cond, op: flipped } : { ...cond }
+  }
+  if (type === 'all_of' || type === 'any_of' || type === 'n_of_m') {
+    return { ...cond, conditions: (cond.conditions ?? []).map(mirrorCond) }
+  }
+  if (type === 'not') {
+    return { ...cond, condition: mirrorCond(cond.condition) }
+  }
+  return cond
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const DURATION_MODE_DEFAULTS: Record<DurationMode, Partial<StrategyConfig>> = {
   day: {
@@ -103,27 +137,33 @@ function Section({
 
   const statusClass =
     status === 'error'
-      ? 'text-red-400 border-red-700/70 bg-red-950/40'
+      ? 'text-red-300 border-red-800/80 bg-red-950/40'
       : status === 'ready'
-        ? 'text-emerald-400 border-emerald-700/70 bg-emerald-950/30'
-        : 'text-gray-400 border-gray-700 bg-gray-900/40'
+        ? 'text-emerald-300 border-emerald-800/80 bg-emerald-950/30'
+        : 'text-gray-300 border-gray-700 bg-gray-950/50'
 
   const statusText = status === 'error' ? 'Needs attention' : status === 'ready' ? 'Ready' : 'Optional'
 
   return (
-    <div className="card" id={id}>
+    <section
+      className="rounded-2xl border border-gray-800 bg-gradient-to-br from-gray-900 via-gray-900 to-slate-950/80 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.2)]"
+      id={id}
+    >
       <button
-        className="flex items-center justify-between w-full text-left"
-        onClick={() => setOpen(o => !o)}
+        className="flex w-full items-center justify-between text-left"
+        onClick={() => setOpen((o) => !o)}
       >
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold text-gray-200">{title}</h3>
-          <span className={`text-[11px] border rounded px-1.5 py-0.5 ${statusClass}`}>{statusText}</span>
+        <div className="flex items-center gap-3">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.28em] text-gray-500">Builder block</div>
+            <h3 className="mt-1 text-sm font-semibold text-gray-100">{title}</h3>
+          </div>
+          <span className={`rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.2em] ${statusClass}`}>{statusText}</span>
         </div>
-        <span className="text-gray-500 text-xs">{open ? '▲' : '▼'}</span>
+        <span className="text-xs text-gray-500">{open ? 'Collapse' : 'Expand'}</span>
       </button>
-      {open && <div className="mt-4 space-y-3">{children}</div>}
-    </div>
+      {open && <div className="mt-4 space-y-4">{children}</div>}
+    </section>
   )
 }
 
@@ -139,11 +179,11 @@ function Field({
   hint?: string
 }) {
   return (
-    <div>
+    <div className="rounded-xl border border-transparent bg-gray-950/30 p-0.5">
       <label className="label">{label}</label>
       {children}
-      {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
-      {!error && hint && <p className="text-xs text-gray-500 mt-1">{hint}</p>}
+      {error && <p className="mt-1 text-xs text-red-400">{error}</p>}
+      {!error && hint && <p className="mt-1 text-xs text-gray-500">{hint}</p>}
     </div>
   )
 }
@@ -231,8 +271,10 @@ export function StrategyCreator() {
     if (!config.entry?.directions?.length) {
       errors.entryDirections = 'Select at least one direction.'
     }
-    if (!config.entry?.conditions?.length) {
-      errors.entryConditions = 'Add at least one entry condition.'
+    const hasLongRules = Boolean(config.entry?.conditions?.length)
+    const hasShortRules = Boolean(config.entry?.short_conditions?.length)
+    if (!hasLongRules && !hasShortRules) {
+      errors.entryConditions = 'Add at least one long or short entry rule.'
     }
 
     const stopMethod = config.stop_loss?.method
@@ -348,7 +390,15 @@ export function StrategyCreator() {
 
   const validateMutation = useMutation({
     mutationFn: () => strategiesApi.validate(config),
-    onSuccess: setValidationResult,
+    onSuccess: (result) => {
+      // Strip false-positive "Unknown indicator kind" warnings for parameterised
+      // variants like rsi_14, ema_9, sma_200 — the backend regex fix may not be
+      // deployed yet; filter client-side as a safety net.
+      const filteredWarnings = result.warnings.filter(
+        (w: string) => !/^Unknown indicator kind '[a-z_]+_\d+'/.test(w)
+      )
+      setValidationResult({ ...result, warnings: filteredWarnings })
+    },
   })
 
   const saveMutation = useMutation({
@@ -362,11 +412,11 @@ export function StrategyCreator() {
   const blueprintChecks = [
     { key: 'hypothesis', label: 'Hypothesis defined', ok: Boolean(config.hypothesis?.trim()) },
     { key: 'timeframe', label: 'Timeframe specified', ok: Boolean(config.timeframe) },
-    { key: 'entry', label: 'Entry rules specified', ok: Boolean(config.entry?.conditions?.length) },
+    { key: 'entry', label: 'Entry rules specified', ok: Boolean((config.entry?.conditions?.length ?? 0) > 0 || (config.entry?.short_conditions?.length ?? 0) > 0) },
     {
       key: 'exit',
       label: 'Exit rules specified',
-      ok: Boolean(config.stop_loss?.method) && Boolean((config.targets?.length ?? 0) > 0 || config.entry?.conditions?.length),
+      ok: Boolean(config.stop_loss?.method) && Boolean((config.targets?.length ?? 0) > 0 || (config.entry?.conditions?.length ?? 0) > 0 || (config.entry?.short_conditions?.length ?? 0) > 0),
     },
     { key: 'sizing', label: 'Sizing specified', ok: Boolean(config.position_sizing?.method) },
     { key: 'risk', label: 'Risk limits specified', ok: Boolean(config.risk?.max_position_size_pct && config.risk?.max_daily_loss_pct && config.risk?.max_open_positions) },
@@ -436,65 +486,148 @@ export function StrategyCreator() {
     setConfigKey('stop_loss', { method })
   }
 
+  const summaryStats = [
+    { label: 'Mode', value: durationMode.toUpperCase(), tone: 'text-sky-300' },
+    { label: 'Studies', value: String(config.entry?.conditions?.length ?? 0), tone: 'text-emerald-300' },
+    { label: 'Targets', value: String(config.targets?.length ?? 0), tone: 'text-amber-300' },
+    { label: 'Universe', value: `${config.symbols?.length ?? 0} ticker${(config.symbols?.length ?? 0) === 1 ? '' : 's'}`, tone: 'text-fuchsia-300' },
+  ]
+
+  const navSections = [
+    { id: 'strategy-info', label: 'Identity' },
+    { id: 'trading-mode', label: 'Mode' },
+    { id: 'universe-timeframe', label: 'Universe' },
+    { id: 'entry-rules', label: 'Studies' },
+    { id: 'stop-loss', label: 'Stops' },
+    { id: 'profit-targets', label: 'Targets' },
+    { id: 'position-sizing', label: 'Sizing' },
+    { id: 'risk-controls', label: 'Risk' },
+    { id: 'regime-filter', label: 'Regimes' },
+    { id: 'cooldown-rules', label: 'Cooldowns' },
+  ]
+
+  const previewContent = previewFormat === 'json'
+    ? JSON.stringify(config, null, 2)
+    : toSimpleYaml(config)
+
   return (
-    <div className="max-w-4xl space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-gray-100">Strategy Creator</h1>
-          <p className="text-xs text-gray-500 mt-0.5">Define entry/exit rules, stops, targets, and risk parameters</p>
-          {draftStatus && <p className="text-xs text-sky-400 mt-1">{draftStatus}</p>}
-        </div>
-        <div className="flex gap-2">
-          <button
-            className="btn-ghost text-xs"
-            onClick={() => validateMutation.mutate()}
-            disabled={validateMutation.isPending || !canValidate}
-          >
-            Validate
-          </button>
-          <button
-            className="btn-primary flex items-center gap-1.5"
-            onClick={() => saveMutation.mutate()}
-            disabled={!canSave}
-          >
-            <Save size={14} /> Save Strategy
-          </button>
+    <div className="space-y-5">
+      <div className="overflow-hidden rounded-3xl border border-gray-800 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_25%),linear-gradient(135deg,_rgba(15,23,42,0.96),_rgba(3,7,18,0.98))] shadow-[0_18px_60px_rgba(0,0,0,0.28)]">
+        <div className="grid gap-6 px-5 py-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(320px,0.9fr)] lg:px-6">
+          <div className="space-y-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.34em] text-sky-300">Strategy Lab</div>
+              <h1 className="mt-2 text-2xl font-bold text-white">Thinkorswim-style Strategy Builder</h1>
+              <p className="mt-2 max-w-2xl text-sm text-gray-300">Define trade logic as a denser workstation with studies, timing, and risk visible at once.</p>
+              {draftStatus && <p className="mt-2 text-xs text-sky-300">{draftStatus}</p>}
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {summaryStats.map((stat) => (
+                <div key={stat.label} className="rounded-2xl border border-gray-800 bg-black/20 px-4 py-3 backdrop-blur-sm">
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-gray-500">{stat.label}</div>
+                  <div className={`mt-2 text-lg font-semibold ${stat.tone}`}>{stat.value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-gray-800 bg-black/25 p-4 backdrop-blur-sm">
+            <div className="text-[10px] uppercase tracking-[0.28em] text-gray-500">Trade Ticket</div>
+            <div className="mt-2 text-lg font-semibold text-gray-100">{name || 'Untitled strategy'}</div>
+            <div className="mt-1 text-xs text-gray-500">{category} strategy</div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                className="btn-ghost text-xs"
+                onClick={() => validateMutation.mutate()}
+                disabled={validateMutation.isPending || !canValidate}
+              >
+                {validateMutation.isPending ? 'Validating...' : 'Validate'}
+              </button>
+              <button
+                className="btn-primary flex items-center gap-1.5 text-xs"
+                onClick={() => saveMutation.mutate()}
+                disabled={!canSave}
+              >
+                <Save size={14} /> {saveMutation.isPending ? 'Saving...' : 'Save Strategy'}
+              </button>
+            </div>
+            <div className="mt-4 rounded-xl border border-gray-800 bg-gray-950/70 p-3 text-xs text-gray-400">
+              Validation requires a complete blueprint. Save unlocks only after a successful validation pass.
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Validation result */}
-      {validationResult && (
-        <div className={`card border ${validationResult.valid ? 'border-emerald-700' : 'border-red-700'}`}>
-          <div className="flex items-center gap-2 mb-2">
-            {validationResult.valid ? <CheckCircle size={16} className="text-emerald-400" /> : <AlertCircle size={16} className="text-red-400" />}
-            <span className="text-sm font-semibold">{validationResult.valid ? 'Valid configuration' : 'Validation failed'}</span>
-          </div>
-          {validationResult.errors.map((e, i) => <div key={i} className="text-xs text-red-400">✗ {e}</div>)}
-          {validationResult.warnings.map((w, i) => <div key={i} className="text-xs text-amber-400">⚠ {w}</div>)}
-        </div>
-      )}
-
-      {Object.keys(localErrors).length > 0 && (
-        <div className="card border border-amber-700">
-          <div className="flex items-center gap-2 mb-1">
-            <AlertCircle size={16} className="text-amber-400" />
-            <span className="text-sm font-semibold text-amber-300">Resolve {Object.keys(localErrors).length} field issue(s) before validate/save</span>
-          </div>
-          {errorSections.length > 0 && (
-            <div className="flex flex-wrap gap-2 pt-2">
-              {errorSections.map((section) => (
-                <button
-                  key={section.id}
-                  className="text-xs px-2 py-1 rounded border border-amber-700/70 text-amber-200 hover:bg-amber-950/30"
-                  onClick={() => scrollToSection(section.id)}
-                >
-                  Go to {section.label} ({section.count})
-                </button>
+      {/* Floating validation panel — fixed to bottom-right, always visible while scrolling */}
+      {(validationResult || Object.keys(localErrors).length > 0) && (
+        <div className="fixed bottom-5 right-5 z-50 w-80 max-h-[70vh] overflow-y-auto flex flex-col gap-2 pointer-events-none">
+          {/* Backend validation result */}
+          {validationResult && (
+            <div className={`pointer-events-auto rounded-xl border shadow-2xl backdrop-blur-sm px-4 py-3 ${
+              validationResult.valid
+                ? 'border-emerald-700 bg-emerald-950/90 text-emerald-200'
+                : 'border-red-700 bg-red-950/90 text-red-200'
+            }`}>
+              <div className="flex items-center gap-2 mb-2">
+                {validationResult.valid
+                  ? <CheckCircle size={14} className="text-emerald-400 shrink-0" />
+                  : <AlertCircle size={14} className="text-red-400 shrink-0" />}
+                <span className="text-xs font-semibold">
+                  {validationResult.valid ? 'Configuration valid' : 'Validation failed'}
+                </span>
+              </div>
+              {validationResult.errors.map((e, i) => (
+                <div key={i} className="text-xs text-red-300 flex gap-1.5 mt-0.5">
+                  <span className="shrink-0">✗</span><span>{e}</span>
+                </div>
               ))}
+              {validationResult.warnings.map((w, i) => (
+                <div key={i} className="text-xs text-amber-300 flex gap-1.5 mt-0.5">
+                  <span className="shrink-0">⚠</span><span>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Local field errors */}
+          {Object.keys(localErrors).length > 0 && (
+            <div className="pointer-events-auto rounded-xl border border-amber-700 bg-amber-950/90 shadow-2xl backdrop-blur-sm px-4 py-3">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertCircle size={14} className="text-amber-400 shrink-0" />
+                <span className="text-xs font-semibold text-amber-200">
+                  {Object.keys(localErrors).length} field issue{Object.keys(localErrors).length !== 1 ? 's' : ''}
+                </span>
+              </div>
+              {errorSections.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {errorSections.map((section) => (
+                    <button
+                      key={section.id}
+                      className="text-xs px-2 py-0.5 rounded border border-amber-700/70 text-amber-200 hover:bg-amber-900/40"
+                      onClick={() => scrollToSection(section.id)}
+                    >
+                      {section.label} ({section.count})
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
+
+      <Section id="workbench-nav" title="Workbench Nav" status="neutral">
+        <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-5">
+          {navSections.map((section) => (
+            <button
+              key={section.id}
+              className="rounded-xl border border-gray-800 bg-gray-950/50 px-3 py-2 text-left text-xs text-gray-300 transition hover:border-sky-700 hover:text-sky-200"
+              onClick={() => scrollToSection(section.id)}
+            >
+              {section.label}
+            </button>
+          ))}
+        </div>
+      </Section>
 
       {/* Metadata */}
       <Section id="strategy-info" title="Strategy Info" status={sectionStatus.strategyInfo}>
@@ -793,9 +926,7 @@ export function StrategyCreator() {
             {previewFormat === 'json' ? 'strategy-config.json' : 'strategy-config.yaml'}
           </div>
           <pre className="text-xs text-gray-300 whitespace-pre-wrap break-words max-h-80 overflow-auto">
-            {previewFormat === 'json'
-              ? JSON.stringify(config, null, 2)
-              : toSimpleYaml(config)}
+            {previewContent}
           </pre>
         </div>
       </Section>
@@ -846,8 +977,43 @@ export function StrategyCreator() {
           conditions={config.entry?.conditions ?? []}
           onChange={(conds) => setConfigKey('entry', { ...config.entry, conditions: conds })}
           logic={config.entry?.logic ?? 'all_of'}
-          onLogicChange={(logic) => setConfigKey('entry', { ...config.entry, logic })}
-          label="Entry Conditions"
+          onLogicChange={(logic) => setConfigKey('entry', { ...config.entry, logic, long_logic: logic })}
+          label="Long Conditions"
+        />
+        {/* Mirror button — copies long conditions with inverted operators into short */}
+        {(config.entry?.conditions?.length ?? 0) > 0 && (
+          <div className="flex justify-center -my-1">
+            <button
+              type="button"
+              onClick={() => {
+                const mirrored = mirrorConditions(config.entry?.conditions ?? [])
+                setConfigKey('entry', {
+                  ...config.entry,
+                  short_conditions: mirrored,
+                  short_logic: config.entry?.logic ?? 'all_of',
+                  directions: Array.from(new Set([...(config.entry?.directions ?? []), 'short'])),
+                })
+              }}
+              className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-all hover:opacity-80"
+              style={{
+                background: 'color-mix(in srgb, var(--color-accent) 15%, transparent)',
+                border: '1px solid color-mix(in srgb, var(--color-accent) 40%, transparent)',
+                color: 'var(--color-accent)',
+              }}
+              title="Copies Long conditions into Short with all operators flipped (> becomes <, crosses_above becomes crosses_below, etc.)"
+            >
+              <ArrowDownUp size={12} />
+              Mirror Long → Short
+            </button>
+          </div>
+        )}
+
+        <ConditionBuilder
+          conditions={config.entry?.short_conditions ?? []}
+          onChange={(conds) => setConfigKey('entry', { ...config.entry, short_conditions: conds })}
+          logic={config.entry?.short_logic ?? config.entry?.logic ?? 'all_of'}
+          onLogicChange={(logic) => setConfigKey('entry', { ...config.entry, short_logic: logic })}
+          label="Short Conditions"
         />
         {localErrors.entryConditions && <p className="text-xs text-red-400 -mt-1">{localErrors.entryConditions}</p>}
       </Section>

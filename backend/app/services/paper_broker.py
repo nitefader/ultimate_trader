@@ -245,11 +245,14 @@ async def _process_deployment(
 
         # ── ENTRY processing ─────────────────────────────────────────────
         if not has_position:
-            entry_conditions = entry_config.get("conditions", [])
-            entry_logic = entry_config.get("logic", "any_of")
+            default_logic = entry_config.get("logic", "any_of")
             directions = entry_config.get("directions", ["long"])
 
             for direction in directions:
+                entry_conditions = entry_config.get(f"{direction}_conditions", entry_config.get("conditions", []))
+                entry_logic = entry_config.get(f"{direction}_logic", default_logic)
+                if not entry_conditions:
+                    continue
                 if evaluate_conditions(entry_conditions, ctx, entry_logic):
                     entry_price = price
 

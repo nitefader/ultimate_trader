@@ -63,8 +63,14 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function conditionToHuman(c: Condition): string {
   if (c.type === 'single') {
-    const left = c.left?.indicator ?? c.left?.field ?? c.left?.prev_bar ?? '?'
-    const right = typeof c.right === 'object' ? (c.right?.indicator ?? c.right?.field ?? c.right?.prev_bar ?? JSON.stringify(c.right)) : String(c.right ?? '?')
+    const fmt = (side: any) => {
+      if (!side || typeof side !== 'object') return String(side ?? '?')
+      const base = side.indicator ?? side.field ?? side.prev_bar ?? JSON.stringify(side)
+      const offset = typeof side.n_bars_back === 'number' && side.n_bars_back > 0 ? `[${side.n_bars_back}]` : ''
+      return `${base}${offset}`
+    }
+    const left = fmt(c.left)
+    const right = typeof c.right === 'object' ? fmt(c.right) : String(c.right ?? '?')
     return `${left} ${c.op ?? '?'} ${right}`
   }
   if (c.type === 'all_of' && c.conditions) return `ALL( ${c.conditions.map(conditionToHuman).join(' AND ')} )`
@@ -108,10 +114,11 @@ function ConfigViewer({ config }: { config: StrategyConfig }) {
             {(!config.entry?.directions || config.entry.directions.length === 0) && <span className="text-gray-500 text-xs">None</span>}
           </div>
         </Row>
-        <Row label="Logic"><Pill>{config.entry?.logic ?? 'all_of'}</Pill></Row>
-        {config.entry?.conditions && config.entry.conditions.length > 0 ? (
+        <Row label="Long Logic"><Pill>{config.entry?.logic ?? config.entry?.long_logic ?? 'all_of'}</Pill></Row>
+        {(config.entry?.conditions ?? []).length > 0 ? (
           <div className="space-y-1 mt-2">
-            {config.entry.conditions.map((c, i) => (
+            <div className="text-[11px] uppercase tracking-wide text-emerald-400">Long Conditions</div>
+            {(config.entry?.conditions ?? []).map((c, i) => (
               <div key={i} className="flex items-center gap-2 rounded bg-gray-800/60 px-3 py-2 text-xs font-mono text-gray-300">
                 <span className="text-gray-600 w-4">{i + 1}.</span>
                 {conditionToHuman(c)}
@@ -119,7 +126,21 @@ function ConfigViewer({ config }: { config: StrategyConfig }) {
             ))}
           </div>
         ) : (
-          <div className="text-xs text-gray-500 mt-1">No entry conditions defined</div>
+          <div className="text-xs text-gray-500 mt-1">No long entry conditions defined</div>
+        )}
+        <Row label="Short Logic"><Pill>{config.entry?.short_logic ?? config.entry?.logic ?? 'all_of'}</Pill></Row>
+        {(config.entry?.short_conditions ?? []).length > 0 ? (
+          <div className="space-y-1 mt-2">
+            <div className="text-[11px] uppercase tracking-wide text-red-400">Short Conditions</div>
+            {(config.entry?.short_conditions ?? []).map((c, i) => (
+              <div key={i} className="flex items-center gap-2 rounded bg-gray-800/60 px-3 py-2 text-xs font-mono text-gray-300">
+                <span className="text-gray-600 w-4">{i + 1}.</span>
+                {conditionToHuman(c)}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-xs text-gray-500 mt-1">No short entry conditions defined</div>
         )}
       </SectionCard>
 
@@ -277,8 +298,15 @@ function ConfigEditor({ config, onChange }: { config: StrategyConfig; onChange: 
           conditions={config.entry?.conditions ?? []}
           onChange={conds => set('entry', { ...config.entry, conditions: conds })}
           logic={config.entry?.logic ?? 'all_of'}
-          onLogicChange={logic => set('entry', { ...config.entry, logic })}
-          label="Entry Conditions"
+          onLogicChange={logic => set('entry', { ...config.entry, logic, long_logic: logic })}
+          label="Long Conditions"
+        />
+        <ConditionBuilder
+          conditions={config.entry?.short_conditions ?? []}
+          onChange={conds => set('entry', { ...config.entry, short_conditions: conds })}
+          logic={config.entry?.short_logic ?? config.entry?.logic ?? 'all_of'}
+          onLogicChange={logic => set('entry', { ...config.entry, short_logic: logic })}
+          label="Short Conditions"
         />
       </SectionCard>
 
@@ -450,6 +478,19 @@ export function StrategyDetails() {
     },
   })
 
+  const patchVersionMutation = useMutation({
+    mutationFn: async () => {
+      if (!data || !editConfig || !selected) throw new Error('No config to save')
+      return strategiesApi.patchVersion(data.id, selected.id, { config: editConfig, notes: editNotes.trim() || undefined })
+    },
+    onSuccess: () => {
+      setEditing(false)
+      setEditConfig(null)
+      setEditNotes('')
+      qc.invalidateQueries({ queryKey: ['strategy', strategyId] })
+    },
+  })
+
   const saveEditMutation = useMutation({
     mutationFn: async () => {
       if (!data || !editConfig) throw new Error('No config to save')
@@ -496,6 +537,15 @@ export function StrategyDetails() {
   const strategy: Strategy = data
   const versions: StrategyVersion[] = data.versions ?? []
   const selected = versions.find(v => v.id === (selectedVersionId ?? versions[0]?.id)) ?? versions[0]
+
+  // A version can be edited in-place only when it has no runs, no deployments,
+  // and has never been promoted. The backend enforces the same rules — this just
+  // drives the UI label and save path.
+  const canEditInPlace = Boolean(
+    selected &&
+    (selected.promotion_status == null || selected.promotion_status === 'backtest_only') &&
+    !(selected as any).has_runs  // optimistic — backend is authoritative
+  )
 
   const startEditing = () => {
     setEditConfig(JSON.parse(JSON.stringify(selected?.config ?? {})))
@@ -773,27 +823,55 @@ export function StrategyDetails() {
             <div className="space-y-4">
               <div className="card border border-indigo-900/50 bg-indigo-950/10">
                 <div className="flex items-center justify-between mb-2">
-                  <div className="text-sm font-semibold text-indigo-300">Editing — saves as new version</div>
-                  <div className="flex items-center gap-2">
-                    <button className="btn-ghost text-xs flex items-center gap-1" onClick={cancelEditing}>
-                      <X size={12} /> Cancel
-                    </button>
+                  <div className="text-sm font-semibold" style={{ color: canEditInPlace ? 'var(--color-accent)' : '#818cf8' }}>
+                    {canEditInPlace ? 'Editing in place — no runs yet' : 'Editing — saves as new version'}
                   </div>
+                  <button className="btn-ghost text-xs flex items-center gap-1" onClick={cancelEditing}>
+                    <X size={12} /> Cancel
+                  </button>
                 </div>
-                <div>
-                  <label className="label">Version notes (required)</label>
-                  <input className="input w-full" value={editNotes} onChange={e => setEditNotes(e.target.value)} placeholder="What changed?" />
-                </div>
-                {saveEditMutation.isError && (
-                  <div className="text-xs text-red-400 mt-2">{(saveEditMutation.error as Error).message}</div>
+
+                {canEditInPlace ? (
+                  /* ── In-place path: no notes required, just save ── */
+                  <div className="rounded-lg px-3 py-2 text-xs mb-1" style={{
+                    background: 'color-mix(in srgb, var(--color-accent) 8%, transparent)',
+                    border: '1px solid color-mix(in srgb, var(--color-accent) 30%, transparent)',
+                    color: 'var(--color-text-muted)',
+                  }}>
+                    This version has no backtest runs yet — changes will be saved directly without creating a new version.
+                    Once you run a backtest, future edits will require a new version.
+                  </div>
+                ) : (
+                  /* ── New version path: notes required ── */
+                  <div>
+                    <label className="label">Version notes (required)</label>
+                    <input className="input w-full" value={editNotes} onChange={e => setEditNotes(e.target.value)} placeholder="What changed?" />
+                  </div>
                 )}
-                <button
-                  className="btn-primary mt-3 flex items-center gap-1.5"
-                  disabled={saveEditMutation.isPending || !editNotes.trim()}
-                  onClick={() => saveEditMutation.mutate()}
-                >
-                  <Save size={14} /> {saveEditMutation.isPending ? 'Saving…' : 'Save as New Version'}
-                </button>
+
+                {(patchVersionMutation.isError || saveEditMutation.isError) && (
+                  <div className="text-xs text-red-400 mt-2">
+                    {((patchVersionMutation.error || saveEditMutation.error) as Error)?.message ?? 'Save failed'}
+                  </div>
+                )}
+                <div className="flex items-center gap-2 mt-3">
+                  {canEditInPlace && (
+                    <button
+                      className="btn-primary flex items-center gap-1.5"
+                      disabled={patchVersionMutation.isPending}
+                      onClick={() => patchVersionMutation.mutate()}
+                    >
+                      <Save size={14} /> {patchVersionMutation.isPending ? 'Saving…' : 'Save Changes'}
+                    </button>
+                  )}
+                  <button
+                    className={canEditInPlace ? 'btn-ghost flex items-center gap-1.5 text-xs' : 'btn-primary flex items-center gap-1.5'}
+                    disabled={saveEditMutation.isPending || (!canEditInPlace && !editNotes.trim())}
+                    onClick={() => saveEditMutation.mutate()}
+                  >
+                    <Save size={14} /> {saveEditMutation.isPending ? 'Saving…' : canEditInPlace ? 'Save as New Version instead' : 'Save as New Version'}
+                  </button>
+                </div>
               </div>
 
               <ConfigEditor config={editConfig} onChange={setEditConfig} />

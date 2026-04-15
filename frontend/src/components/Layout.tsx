@@ -1,15 +1,17 @@
-import React, { memo, useEffect } from 'react'
-import { NavLink, Outlet, useOutlet } from 'react-router-dom'
+import React, { memo, useEffect, useRef, useState } from 'react'
+import { NavLink, Outlet, useOutlet, Link } from 'react-router-dom'
 import {
   BarChart2, Database, Layers,
   Monitor, Shield, TrendingUp, Zap, Calendar,
-  Activity, Key, Radio, Server, Target, FlaskConical,
+  Activity, Key, Radio, Server, Target, FlaskConical, Palette, CandlestickChart,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { KillSwitch } from './KillSwitch'
 import { WatchlistToastRail } from './WatchlistToastRail'
 import { deploymentsApi } from '../api/accounts'
+import { backtestsApi } from '../api/backtests'
 import { usePollingGate } from '../hooks/usePollingGate'
+import { useTheme, THEMES } from '../context/ThemeContext'
 import clsx from 'clsx'
 
 type NavItem = { to: string; label: string; icon: React.ElementType; end?: boolean }
@@ -29,6 +31,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/backtest', label: 'Backtest', icon: TrendingUp },
       { to: '/runs', label: 'Run History', icon: BarChart2 },
       { to: '/lab', label: 'Optim. Lab', icon: FlaskConical },
+      { to: '/charts', label: 'Chart Lab', icon: CandlestickChart },
       { to: '/watchlists', label: 'Watchlists', icon: Layers },
     ],
   },
@@ -64,7 +67,7 @@ export function Layout() {
   }, [])
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-950">
+    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: 'var(--color-bg-page)' }}>
       {showKillSwitchWarning && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
           <div className="card max-w-lg w-full border-red-800 bg-red-950/40 space-y-3">
@@ -82,11 +85,11 @@ export function Layout() {
       )}
 
       {/* Sidebar */}
-      <aside className="w-56 flex-shrink-0 border-r border-gray-800 flex flex-col bg-gray-900">
+      <aside className="w-56 flex-shrink-0 flex flex-col" style={{ backgroundColor: 'var(--color-bg-card)', borderRight: '1px solid var(--color-border)' }}>
         {/* Logo */}
-        <div className="px-4 py-5 border-b border-gray-800">
-          <div className="text-sky-400 font-bold text-lg tracking-tight">UltraTrader</div>
-          <div className="text-gray-500 text-xs">2026 Edition</div>
+        <div className="px-4 py-5" style={{ borderBottom: '1px solid var(--color-border)' }}>
+          <div className="font-bold text-lg tracking-tight" style={{ color: 'var(--color-accent)' }}>UltraTrader</div>
+          <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>2026 Edition</div>
         </div>
 
         {/* Nav */}
@@ -94,7 +97,7 @@ export function Layout() {
           {NAV_GROUPS.map(({ group, items }) => (
             <div key={group}>
               {group && (
-                <div className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-gray-600 select-none">
+                <div className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest select-none" style={{ color: 'var(--color-text-faint)' }}>
                   {group}
                 </div>
               )}
@@ -105,12 +108,7 @@ export function Layout() {
                     to={to}
                     end={end}
                     className={({ isActive }) =>
-                      clsx(
-                        'flex items-center gap-2.5 px-3 py-1.5 rounded text-sm transition-colors',
-                        isActive
-                          ? 'bg-sky-900/60 text-sky-300 font-semibold'
-                          : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800',
-                      )
+                      clsx('flex items-center gap-2.5 px-3 py-1.5 rounded text-sm transition-colors', isActive ? 'nav-active' : 'nav-idle')
                     }
                   >
                     <Icon size={15} />
@@ -122,8 +120,11 @@ export function Layout() {
           ))}
         </nav>
 
-        <div className="px-3 pb-4 border-t border-gray-800 pt-3">
-          <div className="text-xs text-gray-600">v1.0.0</div>
+        {/* Theme picker */}
+        <ThemePicker />
+
+        <div className="px-3 pb-3 pt-2" style={{ borderTop: '1px solid var(--color-border)' }}>
+          <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>v1.0.0</div>
         </div>
       </aside>
 
@@ -132,8 +133,11 @@ export function Layout() {
       {/* Main */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <header className="h-12 border-b border-gray-800 flex items-center justify-between px-4 bg-gray-900 flex-shrink-0">
-          <HeaderDeploymentStatus />
+        <header className="h-12 flex items-center justify-between px-4 flex-shrink-0" style={{ backgroundColor: 'var(--color-bg-card)', borderBottom: '1px solid var(--color-border)' }}>
+          <div className="flex items-center gap-3">
+            <HeaderDeploymentStatus />
+            <BacktestRunningIndicator />
+          </div>
           <div className="flex items-center gap-3">
             <KillSwitch />
           </div>
@@ -188,8 +192,106 @@ const HeaderDeploymentStatus = memo(function HeaderDeploymentStatus() {
   )
 })
 
+const BacktestRunningIndicator = memo(function BacktestRunningIndicator() {
+  const pausePolling = usePollingGate()
+  const { data: runs = [] } = useQuery({
+    queryKey: ['backtests', 'header'],
+    queryFn: () => backtestsApi.list(undefined, 20),
+    refetchInterval: pausePolling ? false : 4_000,
+    notifyOnChangeProps: ['data'],
+    select: (data) => data.filter((r: any) => r.status === 'running' || r.status === 'pending'),
+  })
+
+  if (!runs.length) return null
+
+  const run = runs[0]
+  const label = run.status === 'pending' ? 'Queued' : 'Running'
+  const symbols = (run.symbols as string[] | undefined)?.join(', ') ?? '…'
+
+  return (
+    <Link
+      to={`/runs/${run.id}`}
+      className="flex items-center gap-2 text-xs px-2.5 py-1 rounded-full transition-opacity hover:opacity-80"
+      style={{ backgroundColor: 'color-mix(in srgb, var(--color-accent) 15%, transparent)', color: 'var(--color-accent)', border: '1px solid var(--color-accent)', textDecoration: 'none' }}
+      title="Click to view backtest progress"
+    >
+      <span className="relative flex h-2 w-2 flex-shrink-0">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: 'var(--color-accent)' }} />
+        <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: 'var(--color-accent)' }} />
+      </span>
+      Backtest {label} · {symbols}
+      {runs.length > 1 && <span className="ml-1 opacity-70">+{runs.length - 1}</span>}
+    </Link>
+  )
+})
+
 const StableOutlet = memo(function StableOutlet() {
   const outlet = useOutlet()
 
-  return <main className="flex-1 overflow-y-auto p-4">{outlet}</main>
+  return <main className="flex-1 overflow-y-auto p-4" style={{ backgroundColor: 'var(--color-bg-page)' }}>{outlet}</main>
 })
+
+function ThemePicker() {
+  const { theme, setTheme } = useTheme()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [])
+
+  return (
+    <div ref={ref} className="relative px-3 pb-2" style={{ borderTop: '1px solid var(--color-border)', paddingTop: '0.5rem' }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 w-full px-2 py-1.5 rounded text-xs transition-colors"
+        style={{ color: 'var(--color-text-muted)' }}
+        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--color-bg-hover)')}
+        onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '')}
+      >
+        <Palette size={13} />
+        <span>Theme</span>
+        <span className="ml-auto capitalize text-[11px]" style={{ color: 'var(--color-text-faint)' }}>{theme}</span>
+      </button>
+
+      {open && (
+        <div
+          className="absolute left-3 right-3 rounded-lg p-2 z-50 space-y-1 shadow-2xl"
+          style={{
+            bottom: '100%',
+            marginBottom: '4px',
+            backgroundColor: 'var(--color-bg-card)',
+            border: '1px solid var(--color-border)',
+            boxShadow: 'var(--shadow-float)',
+          }}
+        >
+          <div className="text-[10px] uppercase tracking-widest px-2 pb-1" style={{ color: 'var(--color-text-faint)' }}>Themes</div>
+          {THEMES.map((t) => (
+            <button
+              key={t.value}
+              onClick={() => { setTheme(t.value); setOpen(false) }}
+              className="flex items-center gap-2.5 w-full px-2 py-1.5 rounded text-xs transition-colors"
+              style={{
+                color: theme === t.value ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                backgroundColor: theme === t.value ? 'var(--color-accent-dim)' : 'transparent',
+              }}
+              onMouseEnter={(e) => { if (theme !== t.value) e.currentTarget.style.backgroundColor = 'var(--color-bg-hover)' }}
+              onMouseLeave={(e) => { if (theme !== t.value) e.currentTarget.style.backgroundColor = 'transparent' }}
+            >
+              <span
+                className="w-3 h-3 rounded-full border"
+                style={{ backgroundColor: t.preview, borderColor: 'var(--color-border)' }}
+              />
+              {t.label}
+              {theme === t.value && <span className="ml-auto text-[10px]">✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}

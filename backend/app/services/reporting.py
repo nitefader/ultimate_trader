@@ -159,12 +159,28 @@ def compute_full_metrics(
             r = t.get("regime_at_entry", "unknown") or "unknown"
             regime_pnl[r] = regime_pnl.get(r, 0.0) + float(t["net_pnl"])
 
+        # SQN (System Quality Number) — Van Tharp's metric
+        # Uses R-multiples when available, falls back to dollar P&L as a proxy.
+        r_values = [float(t["r_multiple"]) for t in closed_trades if t.get("r_multiple") is not None]
+        if len(r_values) >= 2:
+            sqn_r_arr = np.array(r_values)
+            sqn_std = float(np.std(sqn_r_arr, ddof=1))
+            sqn = float(np.sqrt(len(r_values)) * np.mean(sqn_r_arr) / sqn_std) if sqn_std > 0 else 0.0
+        elif len(trade_pnls) >= 2:
+            # Fallback: normalise dollar P&L by initial capital to get pseudo-R
+            pnl_arr = np.array(trade_pnls) / initial_capital * 100.0
+            sqn_std = float(np.std(pnl_arr, ddof=1))
+            sqn = float(np.sqrt(len(pnl_arr)) * np.mean(pnl_arr) / sqn_std) if sqn_std > 0 else 0.0
+        else:
+            sqn = 0.0
+
     else:
         total_trades = win_count = loss_count = 0
         win_rate = avg_win = avg_loss = avg_win_pct = avg_loss_pct = 0.0
         expectancy = profit_factor = avg_hold = long_trades = short_trades = 0
         exit_reasons = {}
         regime_pnl = {}
+        sqn = 0.0
 
     # no_trades: True if there were no closed trades with confirmed P&L
     no_trades = len(trades) == 0 or (trades and all(t.get("net_pnl") is None for t in trades))
@@ -194,6 +210,7 @@ def compute_full_metrics(
         "sharpe_ratio": round(sharpe, 3),
         "sortino_ratio": round(sortino, 3),
         "calmar_ratio": round(calmar, 3),
+        "sqn": round(sqn, 3),
         # Drawdown
         "max_drawdown_pct": round(max_drawdown, 2),
         "max_drawdown_duration_days": max_dd_duration,

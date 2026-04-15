@@ -162,7 +162,7 @@ async def rename_watchlist(
     return serialize_watchlist(wl)
 
 
-@router.delete("/{watchlist_id}/members/{symbol}", status_code=204)
+@router.delete("/{watchlist_id}/members/{symbol}", status_code=204, response_model=None)
 async def remove_member(
     watchlist_id: str,
     symbol: str,

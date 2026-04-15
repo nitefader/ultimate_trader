@@ -20,6 +20,7 @@ const Services = lazy(() => import('./pages/Services').then((m) => ({ default: m
 const TradingPrograms = lazy(() => import('./pages/TradingPrograms').then((m) => ({ default: m.TradingPrograms })))
 const WatchlistLibrary = lazy(() => import('./pages/WatchlistLibrary').then((m) => ({ default: m.WatchlistLibrary })))
 const OptimizationLab = lazy(() => import('./pages/OptimizationLab').then((m) => ({ default: m.OptimizationLab })))
+const ChartLab = lazy(() => import('./pages/ChartLab').then((m) => ({ default: m.ChartLab })))
 
 export default function App() {
   return (
@@ -46,6 +47,7 @@ export default function App() {
             <Route path="programs" element={<TradingPrograms />} />
             <Route path="watchlists" element={<WatchlistLibrary />} />
             <Route path="lab" element={<OptimizationLab />} />
+            <Route path="charts" element={<ChartLab />} />
           </Route>
         </Routes>
       </Suspense>

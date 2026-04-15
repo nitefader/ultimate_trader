@@ -2,7 +2,6 @@ import React, { useState, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { backtestsApi } from '../api/backtests'
-import { strategiesApi } from '../api/strategies'
 import { ModeIndicator } from '../components/ModeIndicator'
 import { usePollingGate } from '../hooks/usePollingGate'
 import { TrendingUp, AlertCircle, ChevronUp, ChevronDown, Trash2, Search, GitCompareArrows, X } from 'lucide-react'
@@ -43,27 +42,17 @@ export function RunHistory() {
     refetchInterval: pausePolling ? false : 10_000,
   })
 
-  const { data: strategies = [] } = useQuery({
-    queryKey: ['strategies'],
-    queryFn: strategiesApi.list,
-    staleTime: 60_000,
-  })
-
-  // Map strategy_id → name for the run table (runs have strategy_version_id, not strategy name)
-  // We need version→strategy mapping. The strategies API returns versions inline on get(), not list().
-  // Best effort: build a name map from run.strategy_version_id → strategy name by
-  // looking for version_id matches inside strategies that happen to carry versions.
-  // If not available, fall back to a truncated version id.
+  // strategy_name is now returned directly by the runs API
   const strategyNameByVersionId = useMemo(() => {
     const map: Record<string, string> = {}
-    for (const s of strategies) {
-      const versions = (s as any).versions ?? []
-      for (const v of versions) {
-        map[v.id] = s.name
+    for (const run of runs) {
+      const name = (run as any).strategy_name
+      if (name && run.strategy_version_id) {
+        map[run.strategy_version_id] = name
       }
     }
     return map
-  }, [strategies])
+  }, [runs])
 
   const deleteRunMutation = useMutation({
     mutationFn: (runId: string) => backtestsApi.delete(runId),

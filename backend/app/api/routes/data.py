@@ -68,6 +68,185 @@ def _cache_file_for(symbol: str, timeframe: str, provider: str) -> Path:
     return cache_path_for(symbol, timeframe, provider)
 
 
+@router.get("/indicators/{symbol}/{timeframe}")
+async def get_bars_with_indicators(
+    symbol: str,
+    timeframe: str,
+    provider: str = "yfinance",
+    limit: int = 300,
+    indicators: str = "",
+):
+    """
+    Return cached OHLCV bars with computed indicator columns.
+
+    `indicators` is a comma-separated list of indicator specs, e.g.:
+        ema_20,sma_50,rsi_14,macd,bollinger_20,atr_14,adx_14,stochastic,ibs,zscore_20,sar
+    Each spec may include an optional _N period suffix.
+    """
+    if limit < 10 or limit > 2000:
+        raise HTTPException(status_code=422, detail="limit must be between 10 and 2000")
+
+    import re as _re
+    from app.indicators.technical import (
+        sma, ema, wma, vwma, hull_ma, rsi, macd, bollinger_bands,
+        atr, adx, stochastic, keltner_channel, donchian_channel,
+        obv, parabolic_sar, ibs, zscore, bt_snipe,
+    )
+
+    symbol = symbol.upper()
+    cache_file = _cache_file_for(symbol, timeframe, provider)
+    if not cache_file.exists():
+        # Fall back to any provider that has this symbol/timeframe cached
+        for fallback in ["alpaca", "yfinance"]:
+            if fallback == provider:
+                continue
+            alt = _cache_file_for(symbol, timeframe, fallback)
+            if alt.exists():
+                cache_file = alt
+                break
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No cache file found for {symbol}/{timeframe}. Download it in Data Manager first.",
+            )
+
+    try:
+        df = pd.read_parquet(cache_file)
+        if df.empty:
+            return {"symbol": symbol, "timeframe": timeframe, "bars": [], "series": {}}
+
+        df = df.sort_index().tail(limit)
+        # Normalise column names to lowercase
+        df.columns = [c.lower() for c in df.columns]
+
+        requested = [s.strip() for s in indicators.split(",") if s.strip()]
+
+        computed: dict[str, list] = {}
+
+        def _period(spec: str, default: int) -> int:
+            m = _re.search(r'_(\d+)$', spec)
+            return int(m.group(1)) if m else default
+
+        for spec in requested:
+            base = _re.sub(r'_\d+$', '', spec)
+            p = _period(spec, 0)
+
+            try:
+                if base == "sma":
+                    s = sma(df["close"], p or 20)
+                    computed[spec] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+                elif base == "ema":
+                    s = ema(df["close"], p or 20)
+                    computed[spec] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+                elif base == "wma":
+                    s = wma(df["close"], p or 20)
+                    computed[spec] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+                elif base == "hull_ma" or base == "hma":
+                    s = hull_ma(df["close"], p or 20)
+                    computed[spec] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+                elif base == "rsi":
+                    s = rsi(df["close"], p or 14)
+                    computed[spec] = [round(v, 2) if pd.notna(v) else None for v in s]
+
+                elif base == "macd":
+                    mdf = macd(df["close"])
+                    computed["macd"] = [round(v, 4) if pd.notna(v) else None for v in mdf["macd"]]
+                    computed["macd_signal"] = [round(v, 4) if pd.notna(v) else None for v in mdf["macd_signal"]]
+                    computed["macd_hist"] = [round(v, 4) if pd.notna(v) else None for v in mdf["macd_hist"]]
+
+                elif base == "bollinger" or base == "bb":
+                    bdf = bollinger_bands(df["close"], p or 20)
+                    computed["bb_upper"] = [round(v, 4) if pd.notna(v) else None for v in bdf["bb_upper"]]
+                    computed["bb_mid"] = [round(v, 4) if pd.notna(v) else None for v in bdf["bb_mid"]]
+                    computed["bb_lower"] = [round(v, 4) if pd.notna(v) else None for v in bdf["bb_lower"]]
+
+                elif base == "atr":
+                    s = atr(df["high"], df["low"], df["close"], p or 14)
+                    computed[spec] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+                elif base == "adx":
+                    adf = adx(df["high"], df["low"], df["close"], p or 14)
+                    computed["adx"] = [round(v, 2) if pd.notna(v) else None for v in adf["adx"]]
+                    computed["plus_di"] = [round(v, 2) if pd.notna(v) else None for v in adf["plus_di"]]
+                    computed["minus_di"] = [round(v, 2) if pd.notna(v) else None for v in adf["minus_di"]]
+
+                elif base == "stochastic" or base == "stoch":
+                    sdf = stochastic(df["high"], df["low"], df["close"], p or 14)
+                    computed["stoch_k"] = [round(v, 2) if pd.notna(v) else None for v in sdf["stoch_k"]]
+                    computed["stoch_d"] = [round(v, 2) if pd.notna(v) else None for v in sdf["stoch_d"]]
+
+                elif base == "keltner" or base == "kc":
+                    kdf = keltner_channel(df["high"], df["low"], df["close"], p or 20)
+                    computed["kc_upper"] = [round(v, 4) if pd.notna(v) else None for v in kdf["kc_upper"]]
+                    computed["kc_mid"] = [round(v, 4) if pd.notna(v) else None for v in kdf["kc_mid"]]
+                    computed["kc_lower"] = [round(v, 4) if pd.notna(v) else None for v in kdf["kc_lower"]]
+
+                elif base == "donchian" or base == "dc":
+                    ddf = donchian_channel(df["high"], df["low"], p or 20)
+                    computed["dc_upper"] = [round(v, 4) if pd.notna(v) else None for v in ddf["dc_upper"]]
+                    computed["dc_mid"] = [round(v, 4) if pd.notna(v) else None for v in ddf["dc_mid"]]
+                    computed["dc_lower"] = [round(v, 4) if pd.notna(v) else None for v in ddf["dc_lower"]]
+
+                elif base == "obv":
+                    s = obv(df["close"], df["volume"])
+                    computed["obv"] = [round(v, 0) if pd.notna(v) else None for v in s]
+
+                elif base == "sar":
+                    sdf = parabolic_sar(df["high"], df["low"])
+                    computed["sar"] = [round(v, 4) if pd.notna(v) else None for v in sdf["sar"]]
+                    computed["sar_trend"] = [int(v) for v in sdf["sar_trend"]]
+
+                elif base == "ibs":
+                    s = ibs(df["high"], df["low"], df["close"])
+                    computed["ibs"] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+                elif base == "zscore":
+                    s = zscore(df["close"], p or 20)
+                    computed[spec] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+                elif base == "bt_snipe":
+                    s = bt_snipe(df["close"], p or 20, p or 20)
+                    computed["bt_snipe"] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+                elif base == "vwma":
+                    s = vwma(df["close"], df["volume"], p or 20)
+                    computed[spec] = [round(v, 4) if pd.notna(v) else None for v in s]
+
+            except Exception:
+                pass  # Skip indicators that fail (e.g. missing columns for intraday)
+
+        _idx = pd.to_datetime(df.index)
+        if _idx.tz is not None:
+            _idx = _idx.tz_convert("UTC").tz_localize(None)
+        idx = _idx
+        bars = []
+        for ts, row in zip(idx, df.itertuples(index=False)):
+            bars.append({
+                "t": ts.isoformat(),
+                "open": float(row.open),
+                "high": float(row.high),
+                "low": float(row.low),
+                "close": float(row.close),
+                "volume": float(row.volume),
+            })
+
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "provider": provider,
+            "bars": bars,
+            "series": computed,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute indicators: {e}")
+
+
 @router.get("/bars/{symbol}/{timeframe}")
 async def get_cached_bars(
     symbol: str,
@@ -93,7 +272,10 @@ async def get_cached_bars(
             return {"symbol": symbol, "timeframe": timeframe, "provider": provider, "bars": []}
 
         df = df.sort_index().tail(limit)
-        idx = pd.to_datetime(df.index, utc=True).tz_localize(None)
+        _idx2 = pd.to_datetime(df.index)
+        if _idx2.tz is not None:
+            _idx2 = _idx2.tz_convert("UTC").tz_localize(None)
+        idx = _idx2
 
         bars = []
         for ts, row in zip(idx, df.itertuples(index=False)):

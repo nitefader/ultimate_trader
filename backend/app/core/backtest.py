@@ -38,6 +38,7 @@ from app.indicators.regime import classify_regime
 from app.indicators.technical import (
     sma, ema, atr, rsi, macd, bollinger_bands, stochastic, adx,
     pivot_points, chandelier_exit, keltner_channel, swing_highs_lows, vwap_session,
+    hull_ma, ibs, zscore, bt_snipe, thestrat, thestrat_num, parabolic_sar,
 )
 from app.strategies.conditions import EvalContext, evaluate_conditions, evaluate_condition_group
 from app.strategies.stops import calculate_stop, calculate_target, update_trailing_stop
@@ -354,6 +355,47 @@ class BacktestEngine:
                 period = int(ind_config.get("donchian_period", 20))
                 out[ref] = low.rolling(period).min().shift(1)
 
+        # ── Parabolic SAR ─────────────────────────────────────────────────────
+        af_start = float(ind_config.get("sar_af_start", 0.02))
+        af_step  = float(ind_config.get("sar_af_step",  0.02))
+        af_max   = float(ind_config.get("sar_af_max",   0.20))
+        sar_df = parabolic_sar(high, low, af_start=af_start, af_step=af_step, af_max=af_max)
+        out = pd.concat([out, sar_df], axis=1)
+
+        # ── IBS (Internal Bar Strength) ───────────────────────────────────────
+        # Always computed — cheap and useful for filtering/conditions.
+        out["ibs"] = ibs(high, low, close)
+
+        # ── Z-Score ───────────────────────────────────────────────────────────
+        zscore_period = int(ind_config.get("zscore_period", 20))
+        out["zscore"] = zscore(close, zscore_period)
+        # Also honour explicit per-period refs, e.g. zscore_10
+        for ref in indicator_refs:
+            if ref in out.columns:
+                continue
+            if match := re.fullmatch(r"zscore_(\d+)", ref):
+                out[ref] = zscore(close, int(match.group(1)))
+
+        # ── BT_Snipe ─────────────────────────────────────────────────────────
+        bt_ema_period = int(ind_config.get("bt_snipe_ema_period", 20))
+        out["bt_snipe"] = bt_snipe(close, ema_period=bt_ema_period, zscore_period=zscore_period)
+
+        # ── Hull MA ───────────────────────────────────────────────────────────
+        # Computed on demand for any hull_ma_N ref, plus a default hull_ma_20.
+        if "hull_ma" in indicator_refs or not any(r.startswith("hull_ma") for r in indicator_refs):
+            out["hull_ma"] = hull_ma(close, 20)
+        for ref in indicator_refs:
+            if ref in out.columns:
+                continue
+            if match := re.fullmatch(r"hull_ma_(\d+)", ref):
+                out[ref] = hull_ma(close, int(match.group(1)))
+
+        # ── TheStrat ─────────────────────────────────────────────────────────
+        # strat_dir:  categorical string ('1', '2u', '2d', '3')
+        # strat_num:  numeric encoding (1, 2, -2, 3)
+        out["strat_dir"] = thestrat(high, low)
+        out["strat_num"] = thestrat_num(high, low)
+
         return out
 
     # ── Entry processing ──────────────────────────────────────────────────────
@@ -654,8 +696,13 @@ class BacktestEngine:
                 pos.stop_price = new_stop
 
             # 5. Exit conditions (strategy-defined exit rules)
+            # Supports generic `conditions` (all positions) OR per-direction
+            # `long_conditions` / `short_conditions`.
             if exit_price is None:
-                exit_conditions = exit_config.get("conditions", [])
+                if pos.direction == "long":
+                    exit_conditions = exit_config.get("long_conditions") or exit_config.get("conditions", [])
+                else:
+                    exit_conditions = exit_config.get("short_conditions") or exit_config.get("conditions", [])
                 exit_logic = exit_config.get("logic", "any_of")
                 if exit_conditions and evaluate_conditions(exit_conditions, ctx, exit_logic):
                     exit_price = float(bar["close"])

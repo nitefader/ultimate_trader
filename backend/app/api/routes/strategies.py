@@ -1,6 +1,7 @@
 """Strategy CRUD and version management endpoints."""
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -57,6 +58,21 @@ VALID_INDICATOR_KINDS = {
     "opening_range_high", "opening_range_low",
     # Gap
     "open_gap_pct",
+    # Parabolic SAR
+    "sar",        # SAR value
+    "sar_trend",  # +1 uptrend, -1 downtrend
+    # IBS — Internal Bar Strength (close position within bar range, 0–1)
+    "ibs",
+    # Z-score — rolling standardised deviation of close
+    "zscore",
+    # BT_Snipe — z-score of (close - EMA), momentum exhaustion signal
+    "bt_snipe",
+    # TheStrat bar classification
+    "strat_dir",   # categorical: '1', '2u', '2d', '3'
+    "strat_num",   # numeric: 1, 2, -2, 3
+    # Donchian channel components (explicit column names)
+    "dc_upper", "dc_mid", "dc_lower",
+    "donchian_high", "donchian_low",
 }
 
 
@@ -81,6 +97,153 @@ class StrategyValidateRequest(BaseModel):
     duration_mode: str | None = None
 
 
+def _spec_signature(spec: Any) -> tuple | None:
+    if isinstance(spec, (int, float, str, bool)):
+        return ("literal", spec)
+    if not isinstance(spec, dict):
+        return None
+    if "field" in spec:
+        return ("field", spec.get("field"), spec.get("n_bars_back", 0))
+    if "indicator" in spec:
+        return ("indicator", spec.get("indicator"), spec.get("n_bars_back", 0))
+    if "prev_bar" in spec:
+        return ("prev_bar", spec.get("prev_bar"), spec.get("n", 1))
+    return None
+
+
+def _condition_signature(cond: Any) -> tuple | None:
+    if not isinstance(cond, dict) or cond.get("type", "single") != "single":
+        return None
+    return (
+        _spec_signature(cond.get("left")),
+        cond.get("op"),
+        _spec_signature(cond.get("right")),
+    )
+
+
+def _validate_condition_quality(conditions: list[Any], path: str) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    lower_bounds: dict[tuple, list[tuple[float, bool, str]]] = {}
+    upper_bounds: dict[tuple, list[tuple[float, bool, str]]] = {}
+
+    def _walk(cond: Any, cond_path: str) -> None:
+        if not isinstance(cond, dict):
+            errors.append(f"{cond_path} must be an object")
+            return
+
+        ctype = cond.get("type", "single")
+        if ctype == "single":
+            left = cond.get("left")
+            right = cond.get("right")
+            op = cond.get("op")
+            if left is None or right is None or not op:
+                errors.append(f"{cond_path} is missing left/right/op")
+                return
+
+            left_sig = _spec_signature(left)
+            right_sig = _spec_signature(right)
+            if left_sig == right_sig and op in {">", "<", "crosses_above", "crosses_below"}:
+                errors.append(f"{cond_path} compares the same value on both sides with '{op}', which can never be true")
+                return
+
+            if isinstance(right, (int, float)) and left_sig is not None:
+                value = float(right)
+                if op in {">", ">="}:
+                    lower_bounds.setdefault(left_sig, []).append((value, op == ">=", cond_path))
+                elif op in {"<", "<="}:
+                    upper_bounds.setdefault(left_sig, []).append((value, op == "<=", cond_path))
+            return
+
+        if ctype in {"all_of", "any_of", "n_of_m"}:
+            sub_conditions = cond.get("conditions", [])
+            if not isinstance(sub_conditions, list) or not sub_conditions:
+                errors.append(f"{cond_path}.conditions must be a non-empty list")
+                return
+            for i, sub in enumerate(sub_conditions):
+                _walk(sub, f"{cond_path}.conditions[{i}]")
+            return
+
+        if ctype == "not":
+            if "condition" not in cond:
+                errors.append(f"{cond_path}.condition is required for not groups")
+                return
+            _walk(cond.get("condition"), f"{cond_path}.condition")
+            return
+
+        if ctype == "regime_filter":
+            allowed = cond.get("allowed", [])
+            if not isinstance(allowed, list) or not allowed:
+                warnings.append(f"{cond_path} has an empty regime filter")
+            return
+
+    for i, cond in enumerate(conditions):
+        _walk(cond, f"{path}[{i}]")
+
+    for left_sig, lowers in lower_bounds.items():
+        uppers = upper_bounds.get(left_sig, [])
+        if not uppers:
+            continue
+        max_lower = max(v for v, _, _ in lowers)
+        min_upper = min(v for v, _, _ in uppers)
+        if max_lower > min_upper:
+            errors.append(
+                f"{path} contains contradictory bounds on {_spec_signature_to_text(left_sig)}: lower bound {max_lower} exceeds upper bound {min_upper}"
+            )
+        elif max_lower == min_upper:
+            strict_lower = any(v == max_lower and not inclusive for v, inclusive, _ in lowers)
+            strict_upper = any(v == min_upper and not inclusive for v, inclusive, _ in uppers)
+            if strict_lower or strict_upper:
+                errors.append(
+                    f"{path} contains impossible bounds on {_spec_signature_to_text(left_sig)} at exactly {max_lower}"
+                )
+
+    return errors, warnings
+
+
+def _spec_signature_to_text(sig: tuple | None) -> str:
+    if sig is None:
+        return "value"
+    if sig[0] == "literal":
+        return repr(sig[1])
+    if sig[0] in {"field", "indicator"}:
+        offset = f"[{sig[2]}]" if len(sig) > 2 and sig[2] else ""
+        return f"{sig[1]}{offset}"
+    if sig[0] == "prev_bar":
+        return f"prev_bar.{sig[1]}"
+    return "value"
+
+
+def _validate_entry_quality(entry: dict[str, Any]) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    long_conditions = entry.get("conditions", [])
+    short_conditions = entry.get("short_conditions", [])
+
+    if isinstance(long_conditions, list) and long_conditions:
+        e, w = _validate_condition_quality(long_conditions, "entry.conditions")
+        errors.extend(e)
+        warnings.extend(w)
+    if isinstance(short_conditions, list) and short_conditions:
+        e, w = _validate_condition_quality(short_conditions, "entry.short_conditions")
+        errors.extend(e)
+        warnings.extend(w)
+
+    if isinstance(long_conditions, list) and isinstance(short_conditions, list) and long_conditions and short_conditions:
+        long_sigs = {_condition_signature(c) for c in long_conditions if _condition_signature(c) is not None}
+        short_sigs = {_condition_signature(c) for c in short_conditions if _condition_signature(c) is not None}
+        if long_sigs and long_sigs == short_sigs:
+            warnings.append("Long and short entry rules are identical; this usually produces incoherent directional behavior")
+
+    directions = entry.get("directions", [])
+    if "short" in directions and not short_conditions:
+        warnings.append("Short direction is enabled but no short_conditions are defined, so the generic long rule set may be reused for shorts")
+
+    return errors, warnings
+
+
 def _validate_indicator_kinds(config: dict[str, Any]) -> list[str]:
     """
     Walk all ValueSpec references in conditions and check that any 'indicator'
@@ -93,7 +256,12 @@ def _validate_indicator_kinds(config: dict[str, Any]) -> list[str]:
         if not isinstance(spec, dict):
             return
         kind = spec.get("indicator") or spec.get("kind")
-        if kind and kind not in VALID_INDICATOR_KINDS:
+        if not kind:
+            return
+        # Accept parameterised variants: ema_9, rsi_14, sma_50, zscore_20, etc.
+        # Strip a trailing _<digits> suffix and check the base kind.
+        base_kind = re.sub(r'_\d+$', '', kind)
+        if base_kind not in VALID_INDICATOR_KINDS and kind not in VALID_INDICATOR_KINDS:
             warnings.append(
                 f"Unknown indicator kind '{kind}' at {path}. "
                 f"Supported: {', '.join(sorted(VALID_INDICATOR_KINDS))}"
@@ -141,8 +309,15 @@ def _validate_strategy_config(config: dict[str, Any], duration_mode: str | None 
         entry = {}
 
     conditions = entry.get("conditions", [])
-    if not isinstance(conditions, list) or len(conditions) == 0:
-        errors.append("Entry has no conditions")
+    short_conditions = entry.get("short_conditions", [])
+    has_long_conditions = isinstance(conditions, list) and len(conditions) > 0
+    has_short_conditions = isinstance(short_conditions, list) and len(short_conditions) > 0
+    if not has_long_conditions and not has_short_conditions:
+        errors.append("Entry has no long or short conditions")
+    elif isinstance(entry, dict):
+        quality_errors, quality_warnings = _validate_entry_quality(entry)
+        errors += quality_errors
+        warnings += quality_warnings
 
     stop_loss = config.get("stop_loss")
     if not stop_loss:
@@ -482,6 +657,69 @@ async def delete_version(strategy_id: str, version_id: str, db: AsyncSession = D
     await db.delete(sv)
     await db.flush()
     return {"status": "deleted", "version_id": version_id}
+
+
+@router.patch("/{strategy_id}/versions/{version_id}")
+async def patch_version(
+    strategy_id: str,
+    version_id: str,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Edit a version's config in-place — only allowed when the version has no
+    backtest runs, no deployments, no optimizations, and has never been promoted
+    beyond backtest_only.  This lets users fix typos and tweak indicators during
+    initial development without creating version noise.
+    """
+    sv = await db.get(StrategyVersion, version_id)
+    if not sv or sv.strategy_id != strategy_id:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    # Promotion guard
+    if sv.promotion_status not in (None, "backtest_only"):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot edit a version that has been promoted to paper or live.",
+        )
+
+    # Run guard
+    run_result = await db.execute(
+        select(BacktestRun.id).where(BacktestRun.strategy_version_id == version_id).limit(1)
+    )
+    if run_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot edit a version that has backtest runs. Create a new version instead.",
+        )
+
+    # Deployment guard
+    dep_result = await db.execute(
+        select(Deployment.id).where(Deployment.strategy_version_id == version_id).limit(1)
+    )
+    if dep_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot edit a version that is used by a deployment.",
+        )
+
+    new_config = body.get("config")
+    if new_config is not None:
+        errors, warnings = _validate_strategy_config(new_config, sv.duration_mode)
+        if errors:
+            raise HTTPException(status_code=422, detail={"errors": errors, "warnings": warnings})
+        sv.config = new_config
+
+    if "notes" in body:
+        sv.notes = body["notes"]
+    if "duration_mode" in body:
+        dm_errors = _validate_duration_mode(body["duration_mode"])
+        if dm_errors:
+            raise HTTPException(status_code=422, detail={"errors": dm_errors, "warnings": []})
+        sv.duration_mode = body["duration_mode"]
+
+    await db.flush()
+    return {"id": sv.id, "version": sv.version, "status": "updated"}
 
 
 @router.post("/validate")

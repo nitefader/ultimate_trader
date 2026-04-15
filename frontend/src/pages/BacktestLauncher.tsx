@@ -8,6 +8,7 @@ import { servicesApi } from '../api/services'
 import { strategiesApi } from '../api/strategies'
 import { DatePickerInput } from '../components/DatePickerInput'
 import { SelectMenu } from '../components/SelectMenu'
+import { BacktestLaunchOverlay } from '../components/BacktestLaunchOverlay'
 import { TickerSearch } from '../components/TickerSearch'
 import { useKillSwitchStore } from '../stores/useKillSwitchStore'
 
@@ -27,12 +28,50 @@ const dataProviderOptions = [
 
 const optimizationMetricOptions = [
   { value: 'sharpe_ratio', label: 'Sharpe Ratio' },
-  { value: 'total_return_pct', label: 'Total Return %' },
+  { value: 'sqn', label: 'SQN (System Quality Number)' },
   { value: 'sortino_ratio', label: 'Sortino Ratio' },
   { value: 'calmar_ratio', label: 'Calmar Ratio' },
+  { value: 'total_return_pct', label: 'Total Return %' },
   { value: 'win_rate_pct', label: 'Win Rate %' },
   { value: 'profit_factor', label: 'Profit Factor' },
+  { value: 'max_drawdown_pct', label: 'Max Drawdown % (minimize)' },
+  { value: 'expectancy', label: 'Expectancy ($)' },
 ]
+
+/** Derive the natural window unit and sensible defaults from the selected timeframe */
+function wfUnitFromTimeframe(tf: string): {
+  unit: 'bars' | 'days' | 'months'
+  label: string
+  defaultTrain: number
+  defaultTest: number
+  minTrain: number
+  minTest: number
+  tip: string
+} {
+  if (['1m', '5m', '15m', '30m'].includes(tf)) {
+    return { unit: 'bars', label: 'bars', defaultTrain: 500, defaultTest: 150, minTrain: 100, minTest: 30, tip: 'Try 500 bars train + 150 bars test for minute charts.' }
+  }
+  if (['1h', '4h'].includes(tf)) {
+    return { unit: 'days', label: 'days', defaultTrain: 60, defaultTest: 20, minTrain: 10, minTest: 3, tip: 'Try 60 days train + 20 days test for hourly charts.' }
+  }
+  // 1d, 1wk
+  return { unit: 'months', label: 'months', defaultTrain: 12, defaultTest: 3, minTrain: 3, minTest: 1, tip: 'Try 12 months train + 3 months test for daily charts.' }
+}
+
+/** Convert a window value to the backend months field (backend always takes months) */
+function toMonths(value: number, unit: 'bars' | 'days' | 'months', barsPerDay: number): number {
+  if (unit === 'months') return value
+  if (unit === 'days') return Math.max(1, Math.round(value / 30))
+  // bars → days → months
+  const days = value / barsPerDay
+  return Math.max(1, Math.round(days / 30))
+}
+
+/** Approximate trading bars per day for a given timeframe */
+function barsPerDayForTf(tf: string): number {
+  const map: Record<string, number> = { '1m': 390, '5m': 78, '15m': 26, '30m': 13, '1h': 7, '4h': 2, '1d': 1, '1wk': 1 }
+  return map[tf] ?? 1
+}
 
 export function BacktestLauncher() {
   const navigate = useNavigate()
@@ -60,8 +99,8 @@ export function BacktestLauncher() {
   const [commissionPct, setCommissionPct] = useState(0.1)
   const [slippage, setSlippage] = useState(1)
   const [walkForwardEnabled, setWalkForwardEnabled] = useState(true)
-  const [trainWindowMonths, setTrainWindowMonths] = useState(12)
-  const [testWindowMonths, setTestWindowMonths] = useState(3)
+  const [trainWindow, setTrainWindow] = useState(12)
+  const [testWindow, setTestWindow] = useState(3)
   const [warmupBars, setWarmupBars] = useState(100)
   const [maxFolds, setMaxFolds] = useState(24)
   const [selectionMetric, setSelectionMetric] = useState<string>('sharpe_ratio')
@@ -100,6 +139,18 @@ export function BacktestLauncher() {
       setAlpacaSecretKey('')
     }
   }, [alpacaServices, selectedServiceId])
+
+  // Reset window defaults when timeframe changes so the unit/values make sense
+  const prevTimeframeRef = React.useRef(timeframe)
+  useEffect(() => {
+    if (prevTimeframeRef.current === timeframe) return
+    prevTimeframeRef.current = timeframe
+    const { defaultTrain, defaultTest } = wfUnitFromTimeframe(timeframe)
+    setTrainWindow(defaultTrain)
+    setTestWindow(defaultTest)
+  }, [timeframe])
+
+  const wfInfo = wfUnitFromTimeframe(timeframe)
 
   const symbolList = symbols
     .split(',')
@@ -147,8 +198,8 @@ export function BacktestLauncher() {
         alpaca_secret_key: alpacaSecretKey,
         walk_forward: {
           enabled: walkForwardEnabled,
-          train_window_months: trainWindowMonths,
-          test_window_months: testWindowMonths,
+          train_window_months: toMonths(trainWindow, wfInfo.unit, barsPerDayForTf(timeframe)),
+          test_window_months: toMonths(testWindow, wfInfo.unit, barsPerDayForTf(timeframe)),
           warmup_bars: warmupBars,
           max_folds: maxFolds,
           selection_metric: selectionMetric,
@@ -220,11 +271,11 @@ export function BacktestLauncher() {
       '4h timeframe is not available on yfinance. Use auto or alpaca.',
     )
   }
-  if (walkForwardEnabled && trainWindowMonths < 3) {
-    launchValidationErrors.push('Training window should be at least 3 months.')
+  if (walkForwardEnabled && trainWindow < wfInfo.minTrain) {
+    launchValidationErrors.push(`Training window should be at least ${wfInfo.minTrain} ${wfInfo.label}.`)
   }
-  if (walkForwardEnabled && testWindowMonths < 1) {
-    launchValidationErrors.push('Test window should be at least 1 month.')
+  if (walkForwardEnabled && testWindow < wfInfo.minTest) {
+    launchValidationErrors.push(`Test window should be at least ${wfInfo.minTest} ${wfInfo.label}.`)
   }
   if (walkForwardEnabled && warmupBars < 20) {
     launchValidationErrors.push('Warmup bars should be at least 20 for stable indicators.')
@@ -482,33 +533,30 @@ export function BacktestLauncher() {
         {walkForwardEnabled && (
           <>
             <div className="text-[11px] text-gray-600 bg-gray-900/60 rounded px-3 py-2 border border-gray-800">
-              <strong className="text-gray-500">Tip:</strong> For daily strategies, try 12m train + 3m test. For intraday, try 3m train + 1m test.
-              Ensure your date range spans at least (train + test) × 2 months for meaningful folds.
+              <strong className="text-gray-500">Tip:</strong> {wfInfo.tip} Ensure your date range spans at least (train + test) × 2 for meaningful folds.
             </div>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
               <div>
-                <label className="label">Train Window (months)</label>
+                <label className="label">Train Window ({wfInfo.label})</label>
                 <input
                   type="number"
                   className="input w-full"
-                  min={3}
-                  max={60}
-                  value={trainWindowMonths}
+                  min={wfInfo.minTrain}
+                  value={trainWindow}
                   onChange={(event) =>
-                    setTrainWindowMonths(parseInt(event.target.value, 10) || 12)
+                    setTrainWindow(parseInt(event.target.value, 10) || wfInfo.defaultTrain)
                   }
                 />
               </div>
               <div>
-                <label className="label">Test Window (months)</label>
+                <label className="label">Test Window ({wfInfo.label})</label>
                 <input
                   type="number"
                   className="input w-full"
-                  min={1}
-                  max={24}
-                  value={testWindowMonths}
+                  min={wfInfo.minTest}
+                  value={testWindow}
                   onChange={(event) =>
-                    setTestWindowMonths(parseInt(event.target.value, 10) || 3)
+                    setTestWindow(parseInt(event.target.value, 10) || wfInfo.defaultTest)
                   }
                 />
               </div>
@@ -612,7 +660,7 @@ export function BacktestLauncher() {
         </div>
       </div>
 
-      {errorMsg && (
+      {errorMsg && !launchMutation.isPending && (
         <div className="flex items-start gap-2 rounded-lg border border-red-800 bg-red-900/30 p-3 text-sm text-red-400">
           <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
           <div>
@@ -625,30 +673,38 @@ export function BacktestLauncher() {
       {isKilled && (
         <div className="flex items-center gap-2 rounded border border-red-800 bg-red-900/20 px-3 py-2 text-xs text-red-400">
           <AlertCircle size={14} />
-          Kill switch is active - backtests are disabled. Resume trading from the Accounts
-          screen.
+          Kill switch is active — backtests are disabled. Resume trading from the Accounts screen.
         </div>
       )}
 
-      <button
-        type="button"
-        className={clsx(
-          'btn-primary flex w-full items-center justify-center gap-2 py-3 text-sm font-semibold',
-          !canLaunch && 'cursor-not-allowed opacity-50',
-        )}
-        onClick={() => launchMutation.mutate()}
-        disabled={!canLaunch}
-      >
-        {launchMutation.isPending ? (
-          <>
-            <Loader size={16} className="animate-spin" /> Running Backtest...
-          </>
-        ) : (
-          <>
-            <Play size={16} /> Launch Backtest
-          </>
-        )}
-      </button>
+      {/* Launch button — hidden while overlay is showing */}
+      {!launchMutation.isPending && !launchMutation.isSuccess && (
+        <button
+          type="button"
+          className={clsx(
+            'btn-primary flex w-full items-center justify-center gap-2 py-3 text-sm font-semibold',
+            !canLaunch && 'cursor-not-allowed opacity-50',
+          )}
+          onClick={() => launchMutation.mutate()}
+          disabled={!canLaunch}
+        >
+          <Play size={16} /> Launch Backtest
+        </button>
+      )}
+
+      {/* Live status overlay — shown from click until redirect */}
+      <BacktestLaunchOverlay
+        isPending={launchMutation.isPending}
+        isSuccess={launchMutation.isSuccess}
+        isError={launchMutation.isError}
+        runId={launchMutation.data?.run_id}
+        errorMsg={errorMsg}
+        walkForwardEnabled={walkForwardEnabled}
+        symbols={symbolList}
+        timeframe={timeframe}
+        trainWindowMonths={toMonths(trainWindow, wfInfo.unit, barsPerDayForTf(timeframe))}
+        testWindowMonths={toMonths(testWindow, wfInfo.unit, barsPerDayForTf(timeframe))}
+      />
 
       <div className="space-y-1 px-1 text-xs text-gray-600">
         <p>Signals fire at bar close; fills execute at next bar open plus slippage.</p>
@@ -664,8 +720,7 @@ export function BacktestLauncher() {
         </p>
         {walkForwardEnabled ? (
           <p>
-            Walk-forward: {trainWindowMonths}m train {'->'} {testWindowMonths}m blind
-            test,
+            Walk-forward: {trainWindow} {wfInfo.label} train {'→'} {testWindow} {wfInfo.label} blind test,
             stitched out-of-sample reporting only.
           </p>
         ) : (

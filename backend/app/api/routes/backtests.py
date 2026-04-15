@@ -8,18 +8,18 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 
-from app.database import get_db
+from app.database import get_db, AsyncSessionLocal
 from app.data.providers.yfinance_provider import TIMEFRAME_MAP
 from app.data.providers.alpaca_provider import TIMEFRAME_MAP as ALPACA_TIMEFRAME_MAP
 from app.models.run import BacktestRun, RunMetrics
 from app.models.validation_evidence import ValidationEvidence
-from app.models.strategy import StrategyVersion
+from app.models.strategy import Strategy, StrategyVersion
 from app.models.trade import Trade
 from app.services.backtest_service import launch_backtest, recommend_data_provider
 
@@ -200,11 +200,27 @@ def _normalize_symbols(symbols: list[str] | None) -> list[str]:
     return normalized
 
 
+async def _run_backtest_background(run_id: str, strategy_version_id: str, strategy_config: dict, run_config: dict) -> None:
+    """Execute a backtest in the background using its own DB session."""
+    async with AsyncSessionLocal() as db:
+        try:
+            await launch_backtest(db, strategy_version_id, strategy_config, run_config, run_id=run_id)
+        except Exception as e:
+            logger.exception(f"Background backtest {run_id} failed: {e}")
+            # Mark the run as failed so the UI shows the error
+            from app.models.run import BacktestRun
+            run = await db.get(BacktestRun, run_id)
+            if run:
+                run.status = "failed"
+                run.error_message = str(e)
+                await db.commit()
+
+
 @router.post("/launch")
-async def launch(body: BacktestLaunchRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+async def launch(body: BacktestLaunchRequest, db: AsyncSession = Depends(get_db)):
     """
-    Launch a backtest. Returns immediately with run_id.
-    The backtest runs synchronously and results are persisted before returning.
+    Launch a backtest. Returns immediately with the run_id; execution happens in the background.
+    Poll GET /backtests/{run_id} to track progress.
     """
     strategy_version_id = body.strategy_version_id
 
@@ -217,7 +233,6 @@ async def launch(body: BacktestLaunchRequest, background_tasks: BackgroundTasks,
     if not sv:
         raise HTTPException(status_code=404, detail=f"StrategyVersion {strategy_version_id} not found")
 
-    # Merge strategy config with run-time overrides
     strategy_config = dict(sv.config)
     symbols = _normalize_symbols(body.symbols if body.symbols is not None else strategy_config.get("symbols", ["SPY"]))
     if not symbols:
@@ -254,18 +269,43 @@ async def launch(body: BacktestLaunchRequest, background_tasks: BackgroundTasks,
         "cpcv": body.cpcv,
     }
 
-    try:
-        run = await launch_backtest(db, strategy_version_id, strategy_config, run_config)
-    except Exception as e:
-        logger.exception(f"Backtest launch failed for strategy_version {strategy_version_id}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Backtest failed to launch. Check server logs for details.",
-        )
+    # Create the run record now so we have an ID to return immediately
+    import uuid as _uuid
+    from datetime import timezone
+    from app.models.run import BacktestRun as _BacktestRun
+    run_id = str(_uuid.uuid4())
+    run = _BacktestRun(
+        id=run_id,
+        strategy_version_id=strategy_version_id,
+        mode="backtest",
+        status="pending",
+        symbols=symbols,
+        timeframe=timeframe,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        initial_capital=body.initial_capital,
+        commission_per_share=body.commission_per_share,
+        slippage_ticks=body.slippage_ticks,
+        parameters={
+            **(body.parameters or {}),
+            "commission_pct_per_trade": body.commission_pct_per_trade,
+            "walk_forward": body.walk_forward if isinstance(body.walk_forward, dict) else (body.walk_forward.model_dump() if body.walk_forward else {}),
+            "cpcv": body.cpcv if isinstance(body.cpcv, dict) else (body.cpcv.model_dump() if body.cpcv else {}),
+        },
+        started_at=datetime.now(timezone.utc),
+    )
+    db.add(run)
+    await db.commit()
+
+    # Kick off in background — asyncio.create_task keeps the async/greenlet context
+    # that SQLAlchemy's async engine requires. BackgroundTasks runs outside that context.
+    asyncio.create_task(
+        _run_backtest_background(run_id, strategy_version_id, strategy_config, run_config)
+    )
 
     return {
-        "run_id": run.id,
-        "status": run.status,
+        "run_id": run_id,
+        "status": "pending",
     }
 
 
@@ -279,7 +319,11 @@ async def list_runs(
     # RunHistory and Dashboard use metrics (return, sharpe, drawdown, trades) from the list.
     q = (
         select(BacktestRun)
-        .options(selectinload(BacktestRun.metrics), selectinload(BacktestRun.validation_evidence))
+        .options(
+            selectinload(BacktestRun.metrics),
+            selectinload(BacktestRun.validation_evidence),
+            selectinload(BacktestRun.strategy_version).selectinload(StrategyVersion.strategy),
+        )
         .order_by(BacktestRun.created_at.desc())
         .limit(limit)
     )
@@ -292,9 +336,14 @@ async def list_runs(
 
 def _fmt_run(r: BacktestRun) -> dict:
     """Serialise a BacktestRun including a compact metrics summary."""
+    sv = getattr(r, 'strategy_version', None)
+    strategy = getattr(sv, 'strategy', None) if sv else None
     base = {
         "id": r.id,
         "strategy_version_id": r.strategy_version_id,
+        "strategy_id": strategy.id if strategy else None,
+        "strategy_name": strategy.name if strategy else None,
+        "strategy_version_number": sv.version if sv else None,
         "mode": r.mode,
         "status": r.status,
         "symbols": r.symbols,
@@ -316,6 +365,7 @@ def _fmt_run(r: BacktestRun) -> dict:
             "sharpe_ratio": m.sharpe_ratio,
             "sortino_ratio": m.sortino_ratio,
             "calmar_ratio": m.calmar_ratio,
+            "sqn": m.sqn,
             "max_drawdown_pct": m.max_drawdown_pct,
             "max_drawdown_duration_days": m.max_drawdown_duration_days,
             "recovery_factor": m.recovery_factor,
@@ -359,7 +409,11 @@ def _fmt_run(r: BacktestRun) -> dict:
 async def get_run(run_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(BacktestRun)
-        .options(selectinload(BacktestRun.metrics), selectinload(BacktestRun.validation_evidence))
+        .options(
+            selectinload(BacktestRun.metrics),
+            selectinload(BacktestRun.validation_evidence),
+            selectinload(BacktestRun.strategy_version).selectinload(StrategyVersion.strategy),
+        )
         .where(BacktestRun.id == run_id)
     )
     run = result.scalar_one_or_none()

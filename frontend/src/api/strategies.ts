@@ -15,6 +15,8 @@ export const strategiesApi = {
     api.get<StrategyVersion>(`/strategies/${strategyId}/versions/${versionId}`).then(r => r.data),
   deleteVersion: (strategyId: string, versionId: string) =>
     api.delete(`/strategies/${strategyId}/versions/${versionId}`).then(r => r.data),
+  patchVersion: (strategyId: string, versionId: string, data: { config?: StrategyConfig; notes?: string }) =>
+    api.patch(`/strategies/${strategyId}/versions/${versionId}`, data).then(r => r.data),
   validate: (config: StrategyConfig) =>
     api.post<{ valid: boolean; errors: string[]; warnings: string[] }>('/strategies/validate', { config }).then(r => r.data),
 }

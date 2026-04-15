@@ -34,24 +34,6 @@ type ImpactFilter = (typeof ALL_IMPACTS)[number]
 
 const ET_TZ = 'America/New_York'
 
-const IMPACT_ROW_CLASS: Record<string, string> = {
-  high: 'border-l-2 border-red-600',
-  medium: 'border-l-2 border-amber-600',
-  low: 'border-l-2 border-gray-700',
-}
-
-const IMPACT_BADGE_UPCOMING: Record<string, string> = {
-  high: 'bg-red-900 text-red-200 ring-1 ring-red-700',
-  medium: 'bg-amber-900 text-amber-200 ring-1 ring-amber-700',
-  low: 'bg-gray-800 text-gray-400',
-}
-
-const IMPACT_BADGE_PAST: Record<string, string> = {
-  high: 'bg-gray-800 text-gray-500',
-  medium: 'bg-gray-800 text-gray-500',
-  low: 'bg-gray-800 text-gray-600',
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function getWeekMonday(from: Date): string {
@@ -155,6 +137,38 @@ function groupByDate(events: MarketEvent[]): [string, MarketEvent[]][] {
   return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]))
 }
 
+// Impact colour tokens — using CSS vars so they swap with theme
+function impactBorderColor(impact: string): string {
+  if (impact === 'high')   return 'var(--color-danger)'
+  if (impact === 'medium') return 'var(--color-warning)'
+  return 'var(--color-border)'
+}
+
+function impactBadgeStyle(impact: string, isPast: boolean): React.CSSProperties {
+  if (isPast) {
+    return {
+      background: 'color-mix(in srgb, var(--color-text-faint) 12%, transparent)',
+      color: 'var(--color-text-faint)',
+    }
+  }
+  if (impact === 'high')
+    return {
+      background: 'color-mix(in srgb, var(--color-danger) 18%, transparent)',
+      color: 'var(--color-danger)',
+      boxShadow: '0 0 0 1px color-mix(in srgb, var(--color-danger) 40%, transparent)',
+    }
+  if (impact === 'medium')
+    return {
+      background: 'color-mix(in srgb, var(--color-warning) 18%, transparent)',
+      color: 'var(--color-warning)',
+      boxShadow: '0 0 0 1px color-mix(in srgb, var(--color-warning) 40%, transparent)',
+    }
+  return {
+    background: 'color-mix(in srgb, var(--color-text-faint) 10%, transparent)',
+    color: 'var(--color-text-muted)',
+  }
+}
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function ImpactPills({
@@ -165,26 +179,33 @@ function ImpactPills({
   onChange: (v: ImpactFilter) => void
 }) {
   return (
-    <div className="flex rounded border border-gray-700 overflow-hidden text-xs">
+    <div
+      className="flex rounded overflow-hidden text-xs"
+      style={{ border: '1px solid var(--color-border)' }}
+    >
       {ALL_IMPACTS.map(imp => {
         const active = value === imp
-        const activeClass =
-          imp === 'high'
-            ? 'bg-red-900 text-red-100'
-            : imp === 'medium'
-            ? 'bg-amber-900 text-amber-100'
-            : imp === 'low'
-            ? 'bg-sky-900 text-sky-100'
-            : 'bg-gray-700 text-gray-100'
+        let activeStyle: React.CSSProperties = {}
+        if (active) {
+          if (imp === 'high')
+            activeStyle = { background: 'color-mix(in srgb, var(--color-danger) 25%, transparent)', color: 'var(--color-danger)' }
+          else if (imp === 'medium')
+            activeStyle = { background: 'color-mix(in srgb, var(--color-warning) 25%, transparent)', color: 'var(--color-warning)' }
+          else if (imp === 'low')
+            activeStyle = { background: 'color-mix(in srgb, var(--color-accent) 20%, transparent)', color: 'var(--color-accent)' }
+          else
+            activeStyle = { background: 'var(--color-bg-hover)', color: 'var(--color-text-primary)' }
+        }
         return (
           <button
             key={imp}
             type="button"
             onClick={() => onChange(imp)}
-            className={clsx(
-              'px-2.5 py-1.5 capitalize transition font-medium',
-              active ? activeClass : 'bg-gray-900 text-gray-400 hover:bg-gray-800',
-            )}
+            className="px-2.5 py-1.5 capitalize transition font-medium"
+            style={active
+              ? activeStyle
+              : { background: 'var(--color-bg-card)', color: 'var(--color-text-faint)' }
+            }
           >
             {imp}
           </button>
@@ -210,12 +231,20 @@ function CategoryPills({
           key={cat}
           type="button"
           onClick={() => onChange(cat)}
-          className={clsx(
-            'px-2.5 py-1 rounded text-xs capitalize transition font-medium border',
+          className="px-2.5 py-1 rounded text-xs capitalize transition font-medium"
+          style={
             value === cat
-              ? 'bg-sky-900 text-sky-200 border-sky-700'
-              : 'bg-gray-900 text-gray-400 border-gray-700 hover:bg-gray-800 hover:text-gray-200',
-          )}
+              ? {
+                  background: 'color-mix(in srgb, var(--color-accent) 20%, transparent)',
+                  color: 'var(--color-accent)',
+                  border: '1px solid color-mix(in srgb, var(--color-accent) 40%, transparent)',
+                }
+              : {
+                  background: 'var(--color-bg-card)',
+                  color: 'var(--color-text-faint)',
+                  border: '1px solid var(--color-border)',
+                }
+          }
         >
           {cat === 'all' ? 'All' : cat}
         </button>
@@ -230,18 +259,28 @@ function CountdownChip({ isoString, now, isPast }: { isoString: string; now: Dat
 
   if (justNow && isPast) {
     return (
-      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-semibold bg-amber-900 text-amber-200 ring-1 ring-amber-700">
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-semibold"
+        style={{
+          background: 'color-mix(in srgb, var(--color-warning) 20%, transparent)',
+          color: 'var(--color-warning)',
+          boxShadow: '0 0 0 1px color-mix(in srgb, var(--color-warning) 40%, transparent)',
+        }}
+      >
         <Zap size={9} />
         Just now
       </span>
     )
   }
   if (isPast) {
-    return <span className="text-xs text-gray-600 font-mono">{label}</span>
+    return <span className="text-xs font-mono" style={{ color: 'var(--color-text-faint)' }}>{label}</span>
   }
   return (
-    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-300">
-      <Clock size={9} className="text-gray-500" />
+    <span
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium"
+      style={{ background: 'var(--color-bg-hover)', color: 'var(--color-text-muted)' }}
+    >
+      <Clock size={9} style={{ color: 'var(--color-text-faint)' }} />
       {label}
     </span>
   )
@@ -249,40 +288,45 @@ function CountdownChip({ isoString, now, isPast }: { isoString: string; now: Dat
 
 function EventRow({ event, now, isPast }: { event: MarketEvent; now: Date; isPast: boolean }) {
   const impact = event.impact?.toLowerCase() ?? 'low'
-  const badgeClass = isPast
-    ? (IMPACT_BADGE_PAST[impact] ?? 'bg-gray-800 text-gray-600')
-    : (IMPACT_BADGE_UPCOMING[impact] ?? 'bg-gray-800 text-gray-400')
 
   return (
     <tr
-      className={clsx(
-        'border-b border-gray-800/40 transition-colors',
-        isPast ? 'opacity-55 hover:opacity-80' : 'hover:bg-gray-800/25',
-        !isPast ? (IMPACT_ROW_CLASS[impact] ?? 'border-l-2 border-transparent') : 'border-l-2 border-transparent',
-      )}
+      className="transition-colors"
+      style={{
+        borderBottom: '1px solid color-mix(in srgb, var(--color-border) 60%, transparent)',
+        borderLeft: `2px solid ${isPast ? 'transparent' : impactBorderColor(impact)}`,
+        opacity: isPast ? 0.55 : 1,
+      }}
+      onMouseEnter={e => { if (!isPast) e.currentTarget.style.background = 'var(--color-bg-hover)' }}
+      onMouseLeave={e => { e.currentTarget.style.background = '' }}
     >
-      <td className={clsx('px-4 py-2 font-medium', isPast ? 'text-gray-500' : 'text-gray-200')}>
+      <td className="px-4 py-2 font-medium" style={{ color: isPast ? 'var(--color-text-faint)' : 'var(--color-text-primary)' }}>
         <div className="flex items-center gap-2">
           {!isPast && impact === 'high' && (
-            <AlertTriangle size={11} className="text-red-500 flex-shrink-0" />
+            <AlertTriangle size={11} className="flex-shrink-0" style={{ color: 'var(--color-danger)' }} />
           )}
-          <span className={clsx(!isPast && impact === 'high' ? 'font-semibold' : '')}>
+          <span style={{ fontWeight: !isPast && impact === 'high' ? 600 : 400 }}>
             {event.name}
           </span>
         </div>
       </td>
-      <td className="px-4 py-2 text-xs capitalize text-gray-500">{event.category}</td>
-      <td className="px-4 py-2 text-xs font-mono text-gray-500">{event.symbol ?? '—'}</td>
-      <td className="px-4 py-2 text-xs whitespace-nowrap text-gray-400 font-mono">
+      <td className="px-4 py-2 text-xs capitalize" style={{ color: 'var(--color-text-faint)' }}>{event.category}</td>
+      <td className="px-4 py-2 text-xs font-mono" style={{ color: 'var(--color-text-faint)' }}>{event.symbol ?? '—'}</td>
+      <td className="px-4 py-2 text-xs whitespace-nowrap font-mono" style={{ color: 'var(--color-text-muted)' }}>
         {formatTimeET(event.event_time)}
       </td>
       <td className="px-4 py-2 whitespace-nowrap">
         <CountdownChip isoString={event.event_time} now={now} isPast={isPast} />
       </td>
       <td className="px-4 py-2">
-        <span className={clsx('badge text-xs capitalize', badgeClass)}>{event.impact}</span>
+        <span
+          className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold capitalize"
+          style={impactBadgeStyle(impact, isPast)}
+        >
+          {event.impact}
+        </span>
       </td>
-      <td className="px-4 py-2 text-xs text-gray-600">{event.source}</td>
+      <td className="px-4 py-2 text-xs" style={{ color: 'var(--color-text-faint)' }}>{event.source}</td>
     </tr>
   )
 }
@@ -305,45 +349,67 @@ function DateSection({
   const highCount = events.filter(e => e.impact?.toLowerCase() === 'high').length
 
   return (
-    <div className={clsx('card p-0 overflow-hidden', isToday && 'ring-1 ring-sky-700/60')}>
+    <div
+      className="rounded-lg overflow-hidden"
+      style={{
+        border: isToday
+          ? '1px solid color-mix(in srgb, var(--color-accent) 40%, transparent)'
+          : '1px solid var(--color-border)',
+        boxShadow: isToday ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 20%, transparent)' : undefined,
+      }}
+    >
       {/* Date header */}
       <div
-        className={clsx(
-          'flex items-center gap-3 px-4 py-2.5 border-b',
-          isToday
-            ? 'bg-sky-950/40 border-sky-800/50'
-            : isPast
-            ? 'bg-gray-900/40 border-gray-800'
-            : 'bg-gray-900/60 border-gray-800',
-        )}
+        className="flex items-center gap-3 px-4 py-2.5"
+        style={{
+          borderBottom: '1px solid var(--color-border)',
+          background: isToday
+            ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)'
+            : 'var(--color-bg-hover)',
+        }}
       >
-        <Calendar size={13} className={isToday ? 'text-sky-400' : 'text-gray-600'} />
+        <Calendar
+          size={13}
+          style={{ color: isToday ? 'var(--color-accent)' : 'var(--color-text-faint)' }}
+        />
         <span
-          className={clsx(
-            'text-xs font-bold uppercase tracking-wide',
-            isToday ? 'text-sky-300' : isPast ? 'text-gray-600' : 'text-gray-300',
-          )}
+          className="text-xs font-bold uppercase tracking-wide"
+          style={{
+            color: isToday ? 'var(--color-accent)' : isPast ? 'var(--color-text-faint)' : 'var(--color-text-primary)',
+          }}
         >
           {label}
         </span>
         {isToday && (
-          <span className="px-1.5 py-0.5 rounded text-xs font-bold bg-sky-700 text-sky-100 tracking-wider">
+          <span
+            className="px-1.5 py-0.5 rounded text-xs font-bold tracking-wider"
+            style={{
+              background: 'color-mix(in srgb, var(--color-accent) 25%, transparent)',
+              color: 'var(--color-accent)',
+            }}
+          >
             TODAY
           </span>
         )}
         {highCount > 0 && (
-          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-semibold bg-red-900/60 text-red-300">
+          <span
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-semibold"
+            style={{
+              background: 'color-mix(in srgb, var(--color-danger) 15%, transparent)',
+              color: 'var(--color-danger)',
+            }}
+          >
             <AlertTriangle size={9} />
             {highCount} high
           </span>
         )}
-        <span className="ml-auto text-xs text-gray-600">
+        <span className="ml-auto text-xs" style={{ color: 'var(--color-text-faint)' }}>
           {events.length} event{events.length !== 1 ? 's' : ''}
         </span>
       </div>
 
       {/* Rows */}
-      <table className="w-full text-sm">
+      <table className="w-full text-sm" style={{ background: 'var(--color-bg-card)' }}>
         <tbody>
           {events
             .slice()
@@ -458,43 +524,63 @@ export function EventCalendar() {
       {/* Page header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-xl font-bold text-gray-100">Event Calendar</h1>
-          <p className="text-xs text-gray-500 mt-0.5">Market events · Economic announcements · Earnings</p>
+          <h1 className="text-xl font-bold" style={{ color: 'var(--color-text-primary)' }}>
+            Event Calendar
+          </h1>
+          <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-faint)' }}>
+            Market events · Economic announcements · Earnings
+          </p>
         </div>
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded bg-gray-900 border border-gray-800 text-xs">
+        <div
+          className="flex items-center gap-2 px-3 py-1.5 rounded text-xs"
+          style={{
+            background: 'var(--color-bg-card)',
+            border: '1px solid var(--color-border)',
+          }}
+        >
           <span
-            className={clsx(
-              'w-2 h-2 rounded-full flex-shrink-0',
-              marketOpen ? 'bg-emerald-400 animate-pulse' : 'bg-gray-600',
-            )}
+            className={clsx('w-2 h-2 rounded-full flex-shrink-0', marketOpen && 'animate-pulse')}
+            style={{ background: marketOpen ? 'var(--color-success)' : 'var(--color-text-faint)' }}
           />
-          <span className={marketOpen ? 'text-emerald-300 font-medium' : 'text-gray-500'}>
+          <span style={{ color: marketOpen ? 'var(--color-success)' : 'var(--color-text-faint)', fontWeight: marketOpen ? 600 : 400 }}>
             {marketOpen ? 'Market Open' : 'Closed'}
           </span>
-          <span className="text-gray-600 font-mono">{formatCurrentTimeET(now)}</span>
+          <span className="font-mono" style={{ color: 'var(--color-text-faint)' }}>
+            {formatCurrentTimeET(now)}
+          </span>
         </div>
       </div>
 
       {/* Next high-impact hero banner */}
       {nextHighImpact && (
-        <div className="card border-red-800/60 bg-red-950/20 p-3">
+        <div
+          className="card p-3"
+          style={{
+            borderColor: 'color-mix(in srgb, var(--color-danger) 40%, transparent)',
+            background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)',
+          }}
+        >
           <div className="flex items-center gap-3">
-            <AlertTriangle size={16} className="text-red-400 flex-shrink-0" />
+            <AlertTriangle size={16} className="flex-shrink-0" style={{ color: 'var(--color-danger)' }} />
             <div className="flex-1 min-w-0">
-              <div className="text-xs text-red-400 uppercase tracking-wide font-semibold mb-0.5">
+              <div className="text-xs uppercase tracking-wide font-semibold mb-0.5" style={{ color: 'var(--color-danger)' }}>
                 Next High-Impact Event
               </div>
-              <div className="text-sm font-semibold text-gray-100 truncate">{nextHighImpact.name}</div>
-              <div className="text-xs text-gray-500 mt-0.5">
+              <div className="text-sm font-semibold truncate" style={{ color: 'var(--color-text-primary)' }}>
+                {nextHighImpact.name}
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
                 {formatDateET(nextHighImpact.event_time)} · {formatTimeET(nextHighImpact.event_time)}
                 {nextHighImpact.symbol && (
-                  <span className="font-mono ml-2 text-gray-600">{nextHighImpact.symbol}</span>
+                  <span className="font-mono ml-2" style={{ color: 'var(--color-text-faint)' }}>
+                    {nextHighImpact.symbol}
+                  </span>
                 )}
               </div>
             </div>
             <div className="text-right flex-shrink-0">
-              <div className="text-xs text-gray-500 mb-0.5">Time remaining</div>
-              <div className="text-lg font-bold font-mono text-red-300 leading-none">
+              <div className="text-xs mb-0.5" style={{ color: 'var(--color-text-faint)' }}>Time remaining</div>
+              <div className="text-lg font-bold font-mono leading-none" style={{ color: 'var(--color-danger)' }}>
                 {formatCountdown(nextHighImpact.event_time, now)}
               </div>
             </div>
@@ -508,7 +594,7 @@ export function EventCalendar() {
           {/* Row 1: search + impact */}
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative flex-1 min-w-[180px]">
-              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: 'var(--color-text-faint)' }} />
               <input
                 className="input w-full pl-7 text-sm py-1.5"
                 placeholder="Search event or symbol…"
@@ -517,21 +603,21 @@ export function EventCalendar() {
               />
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500 whitespace-nowrap">Impact</span>
+              <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-text-faint)' }}>Impact</span>
               <ImpactPills value={impactFilter} onChange={setImpactFilter} />
             </div>
           </div>
 
           {/* Row 2: category pills */}
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-gray-500 whitespace-nowrap">Category</span>
+            <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-text-faint)' }}>Category</span>
             <CategoryPills value={categoryFilter} onChange={setCategoryFilter} categories={availableCategories} />
           </div>
 
           {/* Row 3: date range */}
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1.5">
-              <label className="text-xs text-gray-500 whitespace-nowrap">From</label>
+              <label className="text-xs whitespace-nowrap" style={{ color: 'var(--color-text-faint)' }}>From</label>
               <DatePickerInput
                 className="w-40"
                 value={dateFrom}
@@ -539,9 +625,9 @@ export function EventCalendar() {
                 onChange={setDateFrom}
               />
             </div>
-            <span className="text-gray-600 text-xs">→</span>
+            <span className="text-xs" style={{ color: 'var(--color-text-faint)' }}>→</span>
             <div className="flex items-center gap-1.5">
-              <label className="text-xs text-gray-500 whitespace-nowrap">To</label>
+              <label className="text-xs whitespace-nowrap" style={{ color: 'var(--color-text-faint)' }}>To</label>
               <DatePickerInput
                 className="w-40"
                 value={dateTo}
@@ -552,7 +638,8 @@ export function EventCalendar() {
             {hasNonDefaultFilters && (
               <button
                 type="button"
-                className="flex items-center gap-1 text-xs text-sky-400 hover:text-sky-300 ml-auto"
+                className="flex items-center gap-1 text-xs hover:opacity-80 ml-auto transition-opacity"
+                style={{ color: 'var(--color-accent)' }}
                 onClick={clearFilters}
               >
                 <X size={11} />
@@ -562,10 +649,10 @@ export function EventCalendar() {
           </div>
 
           {/* Count summary */}
-          <div className="text-xs text-gray-600">
+          <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>
             Showing {filteredEvents.length} of {events.length} event{events.length !== 1 ? 's' : ''}
             {filteredEvents.length > 0 && (
-              <span className="ml-2 text-gray-700">
+              <span className="ml-2" style={{ color: 'var(--color-text-faint)', opacity: 0.6 }}>
                 · {upcomingEvents.length} upcoming · {pastEvents.length} past
               </span>
             )}
@@ -576,15 +663,15 @@ export function EventCalendar() {
       {/* States */}
       {isLoading ? (
         <div className="card py-10 text-center space-y-3">
-          <div className="h-3 bg-gray-800 rounded w-1/3 mx-auto animate-pulse" />
-          <div className="h-3 bg-gray-800 rounded w-1/4 mx-auto animate-pulse" />
+          <div className="h-3 rounded w-1/3 mx-auto animate-pulse" style={{ background: 'var(--color-bg-hover)' }} />
+          <div className="h-3 rounded w-1/4 mx-auto animate-pulse" style={{ background: 'var(--color-bg-hover)' }} />
         </div>
       ) : events.length === 0 ? (
         <div className="card py-12 text-center space-y-4">
-          <Calendar size={32} className="text-gray-700 mx-auto" />
+          <Calendar size={32} className="mx-auto" style={{ color: 'var(--color-text-faint)' }} />
           <div>
-            <p className="text-sm text-gray-400 font-medium">No market events yet</p>
-            <p className="text-xs text-gray-600 mt-1">
+            <p className="text-sm font-medium" style={{ color: 'var(--color-text-muted)' }}>No market events yet</p>
+            <p className="text-xs mt-1" style={{ color: 'var(--color-text-faint)' }}>
               Add FOMC, CPI, NFP and earnings events to track upcoming catalysts.
             </p>
           </div>
@@ -599,17 +686,27 @@ export function EventCalendar() {
         </div>
       ) : filteredEvents.length === 0 ? (
         <div className="card py-10 text-center space-y-3">
-          <TrendingUp size={24} className="text-gray-700 mx-auto" />
-          <p className="text-sm text-gray-500">No events match your filters.</p>
-          <button type="button" className="text-xs text-sky-400 hover:text-sky-300" onClick={clearFilters}>
+          <TrendingUp size={24} className="mx-auto" style={{ color: 'var(--color-text-faint)' }} />
+          <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>No events match your filters.</p>
+          <button
+            type="button"
+            className="text-xs hover:opacity-80 transition-opacity"
+            style={{ color: 'var(--color-accent)' }}
+            onClick={clearFilters}
+          >
             Reset filters
           </button>
         </div>
       ) : (
         <div className="space-y-3">
           {/* Column header legend */}
-          <div className="grid px-4 text-xs text-gray-600 uppercase tracking-wide"
-            style={{ gridTemplateColumns: '1fr 90px 70px 110px 110px 80px 80px' }}>
+          <div
+            className="grid px-4 text-xs uppercase tracking-wide"
+            style={{
+              gridTemplateColumns: '1fr 90px 70px 110px 110px 80px 80px',
+              color: 'var(--color-text-faint)',
+            }}
+          >
             {['Event', 'Category', 'Symbol', 'Time (ET)', 'Countdown', 'Impact', 'Source'].map(h => (
               <div key={h} className="py-1 pr-3">{h}</div>
             ))}
@@ -629,7 +726,7 @@ export function EventCalendar() {
               />
             ))
           ) : (
-            <div className="card py-6 text-center text-xs text-gray-600">
+            <div className="card py-6 text-center text-xs" style={{ color: 'var(--color-text-faint)' }}>
               No upcoming events in this date range.
             </div>
           )}
@@ -639,14 +736,18 @@ export function EventCalendar() {
             <div className="space-y-2">
               <button
                 type="button"
-                className="flex items-center gap-2 text-xs text-gray-500 hover:text-gray-300 transition-colors w-full px-1 py-1"
+                className="flex items-center gap-2 text-xs transition-colors w-full px-1 py-1 hover:opacity-80"
+                style={{ color: 'var(--color-text-faint)' }}
                 onClick={() => setPastCollapsed(c => !c)}
               >
-                {pastCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                {pastCollapsed
+                  ? <ChevronRight size={13} />
+                  : <ChevronDown size={13} />
+                }
                 <span className="uppercase tracking-wide font-medium">
                   Past Events ({pastEvents.length})
                 </span>
-                <span className="flex-1 h-px bg-gray-800 ml-2" />
+                <span className="flex-1 h-px ml-2" style={{ background: 'var(--color-border)' }} />
               </button>
 
               {!pastCollapsed && (
@@ -670,9 +771,14 @@ export function EventCalendar() {
       )}
 
       {/* Strategy filter hint */}
-      <div className="card text-xs text-gray-600 space-y-1 bg-gray-900/40">
-        <div className="text-gray-500 font-semibold uppercase tracking-wide text-xs">Event Filter Settings</div>
-        <p>
+      <div
+        className="card text-xs space-y-1"
+        style={{ background: 'color-mix(in srgb, var(--color-bg-hover) 60%, transparent)' }}
+      >
+        <div className="font-semibold uppercase tracking-wide text-xs" style={{ color: 'var(--color-text-muted)' }}>
+          Event Filter Settings
+        </div>
+        <p style={{ color: 'var(--color-text-faint)' }}>
           Configure per-strategy event filters in the Strategy Creator under "Event Filter". Strategies
           can pause entries or close positions automatically before high-impact events.
         </p>

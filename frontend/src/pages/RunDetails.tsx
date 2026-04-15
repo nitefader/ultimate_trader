@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useCallback } from 'react'
-import { useParams, Link, useSearchParams } from 'react-router-dom'
+import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { backtestsApi } from '../api/backtests'
 import { deploymentsApi, accountsApi } from '../api/accounts'
@@ -196,6 +196,7 @@ type Tab = 'overview' | 'equity' | 'trades' | 'monthly' | 'monte_carlo' | 'promo
 
 export function RunDetails() {
   const { runId } = useParams<{ runId: string }>()
+  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const compareRunId = searchParams.get('compare') || ''
   const [tab, setTab] = useState<Tab>('overview')
@@ -210,8 +211,13 @@ export function RunDetails() {
     queryKey: ['run', runId],
     queryFn: () => backtestsApi.get(runId!),
     enabled: !!runId,
-    refetchInterval: (query) => (query.state.data?.status === 'running' ? 5000 : false),
+    refetchInterval: (query) => (['pending', 'running'].includes(query.state.data?.status ?? '') ? 3000 : false),
   })
+
+  // Strategy name + version come directly from the run payload (backend joins them)
+  const strategyName = (run as any)?.strategy_name as string | null | undefined
+  const strategyId = (run as any)?.strategy_id as string | null | undefined
+  const strategyVersionNumber = (run as any)?.strategy_version_number as number | null | undefined
 
   const { data: equityCurveData } = useQuery({
     queryKey: ['equity-curve', runId],
@@ -266,7 +272,15 @@ export function RunDetails() {
   const m = run.metrics
   const ve = run.validation_evidence
   const wf = ve?.walk_forward ?? m?.walk_forward
-  const antiBias = ve?.anti_bias ?? wf?.anti_bias
+  // Only show anti-bias if it contains at least one meaningful boolean field
+  const antiBiasRaw = ve?.anti_bias ?? wf?.anti_bias
+  const antiBiasHasMeaningfulData = antiBiasRaw && (
+    antiBiasRaw.leakage_checks_passed != null ||
+    antiBiasRaw.parameter_locking_passed != null ||
+    antiBiasRaw.causal_indicator_checks_passed != null ||
+    antiBiasRaw.cpcv_primary_guard_passed != null
+  )
+  const antiBias = antiBiasHasMeaningfulData ? antiBiasRaw : null
   const cpcv = ve?.cpcv ?? wf?.cpcv
   const eqCurve = equityCurveData?.equity_curve ?? []
   const compareEqCurve = compareEquityCurveData?.equity_curve ?? []
@@ -278,6 +292,7 @@ export function RunDetails() {
     antiBias?.causal_indicator_checks_passed &&
     (antiBias?.cpcv_primary_guard_passed ?? true),
   )
+  const noTrades = run.status === 'completed' && (m?.total_trades ?? 0) === 0
 
   const handlePromoteToPaper = async () => {
     if (!selectedAccountId || !run.strategy_version_id) return
@@ -327,7 +342,27 @@ export function RunDetails() {
             Backtest Run
           </div>
           <h1 className="text-lg font-bold text-gray-100 mt-0.5">
-            {run.symbols?.join(', ')} — {run.timeframe}
+            {strategyName ? (
+              <>
+                <Link
+                  to={`/strategies/${strategyId}`}
+                  className="hover:underline"
+                  style={{ color: 'var(--color-accent)' }}
+                >
+                  {strategyName}
+                </Link>
+                {strategyVersionNumber != null && (
+                  <span className="text-sm font-normal ml-1.5" style={{ color: 'var(--color-text-faint)' }}>
+                    v{strategyVersionNumber}
+                  </span>
+                )}
+                <span className="text-sm font-normal ml-2" style={{ color: 'var(--color-text-muted)' }}>
+                  · {run.symbols?.join(', ')} — {run.timeframe}
+                </span>
+              </>
+            ) : (
+              <>{run.symbols?.join(', ')} — {run.timeframe}</>
+            )}
           </h1>
           <div className="flex items-center gap-2 mt-1">
             <ModeIndicator mode={run.mode} />
@@ -342,8 +377,14 @@ export function RunDetails() {
             <span className="text-xs text-gray-600">Capital ${run.initial_capital.toLocaleString()}</span>
           </div>
         </div>
-        {run.status === 'running' && (
-          <div className="badge-gray animate-pulse">Running...</div>
+        {(run.status === 'running' || run.status === 'pending') && (
+          <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-full" style={{ backgroundColor: 'var(--color-bg-hover)', color: 'var(--color-accent)', border: '1px solid var(--color-accent)' }}>
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: 'var(--color-accent)' }} />
+              <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: 'var(--color-accent)' }} />
+            </span>
+            {run.status === 'pending' ? 'Queued…' : 'Running…'}
+          </div>
         )}
       </div>
 
@@ -351,14 +392,52 @@ export function RunDetails() {
         <div className="card border-red-800 text-red-400 text-sm">{run.error_message}</div>
       )}
 
-      {run.status === 'completed' && m?.no_trades && (
-        <div className="card border-amber-800 bg-amber-900/20 text-amber-300 text-sm space-y-1">
-          <div className="font-semibold">No trades were generated for this run.</div>
-          <div className="text-xs text-amber-200/90">
-            The backtest completed successfully, but entry conditions did not trigger executable positions over the selected period.
+      {noTrades && (
+        <div className="card space-y-3" style={{ borderColor: 'var(--color-warning)', backgroundColor: 'color-mix(in srgb, var(--color-warning) 8%, transparent)' }}>
+          <div className="flex items-start gap-3">
+            <span className="text-2xl mt-0.5">🔍</span>
+            <div className="space-y-1">
+              <div className="text-sm font-semibold" style={{ color: 'var(--color-warning)' }}>No trades were generated</div>
+              <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                The backtest completed but entry conditions never triggered. Either the signals are too strict for this timeframe/range, or the indicators aren't set up correctly.
+              </div>
+            </div>
           </div>
-          <div className="text-xs text-amber-200/80">
-            Try widening date range, using a more liquid symbol set, or relaxing strategy entry filters.
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs" style={{ borderTop: '1px solid var(--color-border)', paddingTop: '0.75rem' }}>
+            <div className="rounded p-2 space-y-0.5" style={{ backgroundColor: 'var(--color-bg-hover)' }}>
+              <div className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>Relax entry filters</div>
+              <div style={{ color: 'var(--color-text-muted)' }}>Widen threshold values — e.g. RSI &gt; 30 instead of &gt; 20.</div>
+            </div>
+            <div className="rounded p-2 space-y-0.5" style={{ backgroundColor: 'var(--color-bg-hover)' }}>
+              <div className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>Extend the date range</div>
+              <div style={{ color: 'var(--color-text-muted)' }}>More history = more chances for rare conditions to appear.</div>
+            </div>
+            <div className="rounded p-2 space-y-0.5" style={{ backgroundColor: 'var(--color-bg-hover)' }}>
+              <div className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>Check indicator warmup</div>
+              <div style={{ color: 'var(--color-text-muted)' }}>If warmup bars exceed your date range, no signals can fire.</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap" style={{ borderTop: '1px solid var(--color-border)', paddingTop: '0.75rem' }}>
+            <span className="text-xs" style={{ color: 'var(--color-text-faint)' }}>Fix it:</span>
+            {strategyId && (
+              <Link
+                to={`/strategies/${strategyId}`}
+                className="btn-ghost text-xs px-3 py-1.5"
+              >
+                Edit Strategy →
+              </Link>
+            )}
+            <button
+              className="btn-ghost text-xs px-3 py-1.5"
+              onClick={() => {
+                const params = new URLSearchParams()
+                if (strategyId) params.set('strategy_id', strategyId)
+                if (run.strategy_version_id) params.set('version_id', run.strategy_version_id)
+                navigate(`/backtest?${params.toString()}`)
+              }}
+            >
+              Adjust &amp; Rerun →
+            </button>
           </div>
         </div>
       )}
@@ -430,8 +509,8 @@ export function RunDetails() {
       {tab === 'overview' && (
         <div className="space-y-4">
 
-          {/* Walk-forward summary banner — only shown when WF was run */}
-          {wf && (
+          {/* Walk-forward summary banner — only shown when WF was run AND there are trades */}
+          {wf && !noTrades && (
             <div className="card border-sky-900/60 bg-sky-950/20 space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-sky-300">Walk-Forward Results</h3>
@@ -483,47 +562,52 @@ export function RunDetails() {
             </div>
           )}
 
-          {/* Divider note for runs without WF */}
-          {!wf && run.status === 'completed' && (
-            <div className="text-xs text-gray-600 bg-gray-900/60 border border-gray-800 rounded p-2">
+          {/* Divider note for runs without WF — only when trades exist */}
+          {!wf && !noTrades && run.status === 'completed' && (
+            <div className="text-xs rounded p-2" style={{ color: 'var(--color-text-faint)', backgroundColor: 'var(--color-bg-card)', border: '1px solid var(--color-border)' }}>
               Walk-forward not run — metrics below are in-sample only. Enable walk-forward in the backtest launcher for an honest out-of-sample benchmark.
             </div>
           )}
 
-          {wf && (
-            <div className="text-xs text-amber-300 bg-amber-900/20 border border-amber-800 rounded px-3 py-2">
+          {wf && !noTrades && (
+            <div className="text-xs rounded px-3 py-2" style={{ color: 'var(--color-warning)', backgroundColor: 'color-mix(in srgb, var(--color-warning) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-warning) 30%, transparent)' }}>
               <strong>Note:</strong> Full-period metrics below include the in-sample training windows. OOS return above is the unbiased estimate.
             </div>
           )}
 
-          <div>
-            <div className="text-[10px] font-semibold text-gray-600 uppercase tracking-widest mb-2">Full-Period Backtest Metrics</div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Metric label="Total Return" value={fmtPct(m?.total_return_pct)}
-                color={(m?.total_return_pct ?? 0) >= 0 ? 'positive' : 'negative'} />
-              <Metric label="CAGR" value={fmtPct(m?.cagr_pct)}
-                color={(m?.cagr_pct ?? 0) >= 0 ? 'positive' : 'negative'} />
-              <Metric label="Sharpe" value={fmt(m?.sharpe_ratio, 2)}
-                color={(m?.sharpe_ratio ?? 0) >= 1 ? 'positive' : (m?.sharpe_ratio ?? 0) >= 0 ? 'neutral' : 'negative'} />
-              <Metric label="Max Drawdown" value={m?.max_drawdown_pct != null ? `-${fmt(m.max_drawdown_pct)}%` : '—'} color="negative" />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <Metric label="Win Rate" value={`${fmt(m?.win_rate_pct, 0)}%`} />
-            <Metric label="Profit Factor" value={fmt(m?.profit_factor, 2)} />
-            <Metric label="Sortino" value={fmt(m?.sortino_ratio, 2)} />
-            <Metric label="Calmar" value={fmt(m?.calmar_ratio, 2)} />
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            <Metric label="Total Trades" value={m?.total_trades} />
-            <Metric label="Winners" value={m?.winning_trades} color="positive" />
-            <Metric label="Losers" value={m?.losing_trades} color="negative" />
-            <Metric label="Avg Hold" value={m?.avg_hold_days != null ? `${fmt(m.avg_hold_days)}d` : '—'} />
-            <Metric label="Expectancy" value={m?.expectancy != null ? `$${fmt(m.expectancy, 0)}` : '—'} />
-          </div>
+          {!noTrades && (
+            <>
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-widest mb-2" style={{ color: 'var(--color-text-faint)' }}>Full-Period Backtest Metrics</div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <Metric label="Total Return" value={fmtPct(m?.total_return_pct)}
+                    color={(m?.total_return_pct ?? 0) >= 0 ? 'positive' : 'negative'} />
+                  <Metric label="CAGR" value={fmtPct(m?.cagr_pct)}
+                    color={(m?.cagr_pct ?? 0) >= 0 ? 'positive' : 'negative'} />
+                  <Metric label="Sharpe" value={fmt(m?.sharpe_ratio, 2)}
+                    color={(m?.sharpe_ratio ?? 0) >= 1 ? 'positive' : (m?.sharpe_ratio ?? 0) >= 0 ? 'neutral' : 'negative'} />
+                  <Metric label="Max Drawdown" value={m?.max_drawdown_pct != null ? `-${fmt(m.max_drawdown_pct)}%` : '—'} color="negative" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Metric label="Win Rate" value={`${fmt(m?.win_rate_pct, 0)}%`} />
+                <Metric label="Profit Factor" value={fmt(m?.profit_factor, 2)} />
+                <Metric label="Sortino" value={fmt(m?.sortino_ratio, 2)} />
+                <Metric label="Calmar" value={fmt(m?.calmar_ratio, 2)} />
+                <Metric label="SQN" value={fmt((m as any)?.sqn, 2)} />
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <Metric label="Total Trades" value={m?.total_trades} />
+                <Metric label="Winners" value={m?.winning_trades} color="positive" />
+                <Metric label="Losers" value={m?.losing_trades} color="negative" />
+                <Metric label="Avg Hold" value={m?.avg_hold_days != null ? `${fmt(m.avg_hold_days)}d` : '—'} />
+                <Metric label="Expectancy" value={m?.expectancy != null ? `$${m.expectancy >= 0 ? '+' : ''}${fmt(m.expectancy, 0)}` : '—'} />
+              </div>
+            </>
+          )}
 
           {/* Exit reason breakdown */}
-          {m?.exit_reason_breakdown && Object.keys(m.exit_reason_breakdown).length > 0 && (
+          {!noTrades && m?.exit_reason_breakdown && Object.keys(m.exit_reason_breakdown).length > 0 && (
             <div className="card">
               <h3 className="text-sm font-semibold mb-3">Exit Reasons</h3>
               <div className="space-y-1">
@@ -544,7 +628,7 @@ export function RunDetails() {
           )}
 
           {/* Regime breakdown */}
-          {m?.regime_breakdown && Object.keys(m.regime_breakdown).length > 0 && (
+          {!noTrades && m?.regime_breakdown && Object.keys(m.regime_breakdown).length > 0 && (
             <div className="card">
               <h3 className="text-sm font-semibold mb-3">P&L by Regime</h3>
               <div className="space-y-1">

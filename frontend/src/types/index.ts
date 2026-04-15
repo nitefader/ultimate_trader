@@ -87,6 +87,9 @@ export interface EntryConfig {
   directions?: string[]
   logic?: string
   conditions?: Condition[]
+  short_conditions?: Condition[]
+  long_logic?: string
+  short_logic?: string
 }
 
 export interface Condition {
@@ -105,6 +108,7 @@ export interface ValueSpec {
   indicator?: string
   prev_bar?: string
   n_bars_back?: number
+  period?: number
 }
 
 export interface StopConfig {

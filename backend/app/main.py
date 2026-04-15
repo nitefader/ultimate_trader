@@ -52,12 +52,14 @@ logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
 )
 
-# SQLAlchemy engine/pool loggers are extremely noisy at DEBUG level (one line
-# per cursor operation). Suppress them unless SQL_ECHO is explicitly enabled.
+# SQLAlchemy, aiosqlite, and asyncio loggers are extremely noisy at DEBUG level
+# (one line per cursor operation). Suppress them unless SQL_ECHO is explicitly enabled.
 if not settings.SQL_ECHO:
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine.Engine").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────

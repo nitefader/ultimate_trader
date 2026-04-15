@@ -32,7 +32,48 @@ async def test_strategy_validate_rejects_missing_entry_conditions(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["valid"] is False
-    assert "Entry has no conditions" in body["errors"]
+    assert "Entry has no long or short conditions" in body["errors"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_validate_rejects_contradictory_same_operand_bounds(client):
+    resp = await client.post(
+        "/api/v1/strategies/validate",
+        json={
+            "config": {
+                "entry": {
+                    "conditions": [
+                        {"type": "single", "left": {"indicator": "rsi_2", "n_bars_back": 1}, "op": ">", "right": 30},
+                        {"type": "single", "left": {"indicator": "rsi_2", "n_bars_back": 1}, "op": "<", "right": 20},
+                    ],
+                },
+            }
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["valid"] is False
+    assert any("contradictory bounds" in msg for msg in body["errors"])
+
+
+@pytest.mark.asyncio
+async def test_strategy_validate_warns_when_long_and_short_rules_are_identical(client):
+    cond = {"type": "single", "left": {"indicator": "ema_20"}, "op": ">", "right": {"indicator": "ema_50"}}
+    resp = await client.post(
+        "/api/v1/strategies/validate",
+        json={
+            "config": {
+                "entry": {
+                    "directions": ["long", "short"],
+                    "conditions": [cond],
+                    "short_conditions": [cond],
+                },
+            }
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert any("identical" in msg for msg in body["warnings"])
 
 
 @pytest.mark.asyncio

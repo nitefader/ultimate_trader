@@ -625,6 +625,29 @@ def place_bracket_order(
         return {"error": "Unexpected error"}
 
 
+def get_latest_prices(symbols: list[str], api_key: str, secret_key: str) -> dict[str, float]:
+    """Return the latest trade price for each symbol via Alpaca market data API.
+
+    Uses StockHistoricalDataClient (data feed, not trading) so paper accounts
+    without a funded live key still get real-time prices via the free data tier.
+    Returns a dict of {symbol: price}. Missing symbols are omitted.
+    """
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockLatestTradeRequest
+
+    if not symbols or not api_key or not secret_key:
+        return {}
+
+    try:
+        client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
+        req = StockLatestTradeRequest(symbol_or_symbols=symbols)
+        trades = client.get_stock_latest_trade(req)
+        return {sym: float(trade.price) for sym, trade in trades.items() if trade and trade.price}
+    except Exception as exc:
+        logger.warning("get_latest_prices failed for %s: %s", symbols, exc)
+        return {}
+
+
 def _fmt_position(position: Any) -> dict[str, Any]:
     def _float_or_none(value: Any) -> float | None:
         return float(value) if value is not None else None

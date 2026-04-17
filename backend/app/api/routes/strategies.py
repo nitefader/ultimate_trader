@@ -383,6 +383,12 @@ def _validate_strategy_config(config: dict[str, Any], duration_mode: str | None 
 
 # ── Strategy endpoints ────────────────────────────────────────────────────────
 
+@router.get("/indicator-kinds")
+async def list_indicator_kinds():
+    """Return the list of valid indicator kinds for the strategy builder UI."""
+    return sorted(VALID_INDICATOR_KINDS)
+
+
 @router.get("")
 async def list_strategies(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Strategy).order_by(Strategy.created_at.desc()))

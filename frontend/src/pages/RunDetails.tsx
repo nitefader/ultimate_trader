@@ -336,7 +336,7 @@ export function RunDetails() {
       <div className="flex items-start justify-between">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <Link to="/runs" className="text-gray-500 hover:text-gray-300 text-sm">← Runs</Link>
+            <button onClick={() => navigate('/runs')} className="text-gray-500 hover:text-gray-300 text-sm bg-none border-none cursor-pointer p-0">← Runs</button>
           </div>
           <div className="text-xs text-gray-500 uppercase tracking-wide">
             Backtest Run
@@ -467,7 +467,11 @@ export function RunDetails() {
                 ? 'text-sky-400 border-sky-500'
                 : 'text-gray-500 border-transparent hover:text-gray-300'
             )}
-            onClick={() => setTab(t.id)}
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              setTab(t.id)
+            }}
           >
             {t.label}
           </button>
@@ -1041,13 +1045,13 @@ export function RunDetails() {
                 <button
                   className="btn-primary w-full"
                   onClick={handlePromoteToPaper}
-                  disabled={!selectedAccountId || promotingToPaper || !antiBiasPassed}
+                  disabled={!selectedAccountId || promotingToPaper}
                 >
                   {promotingToPaper ? 'Promoting…' : 'Deploy to Paper Trading'}
                 </button>
                 {!antiBiasPassed && (
-                  <div className="text-xs text-amber-300 bg-amber-900/20 border border-amber-800 rounded px-3 py-2">
-                    Anti-bias validation must pass before promotion. Run with walk-forward enabled to generate validation evidence.
+                  <div className="text-xs text-yellow-300 bg-yellow-900/20 border border-yellow-700 rounded px-3 py-2">
+                    ⚠ Anti-bias validation did not pass. Paper trading is still available for testing, but consider running with walk-forward enabled to generate full validation evidence.
                   </div>
                 )}
               </div>

@@ -315,11 +315,18 @@ export function RunHistory() {
                       sharpe >= 1.0 ? 'text-emerald-400' :
                       sharpe >= 0   ? 'text-amber-400' :
                                       'text-red-400'
+                    const handleRowClick = (e: React.MouseEvent<HTMLTableRowElement>) => {
+                      // Don't navigate if clicking on checkbox or buttons within the row
+                      const target = e.target as HTMLElement
+                      if (target.closest('input') || target.closest('button')) return
+                      navigate(`/runs/${run.id}`)
+                    }
                     return (
                       <tr
                         key={run.id}
+                        onClick={handleRowClick}
                         className={clsx(
-                          'border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors',
+                          'border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors cursor-pointer',
                           isFailed && 'bg-red-950/10',
                           isSelected && 'bg-sky-950/20 border-l-2 border-sky-700',
                         )}

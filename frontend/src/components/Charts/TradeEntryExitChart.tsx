@@ -88,6 +88,24 @@ export function TradeEntryExitChart({ trades, symbol }: Props) {
   const entries = useMemo(() => points.filter(p => p.side === 'entry'), [points])
   const exits = useMemo(() => points.filter(p => p.side === 'exit'), [points])
 
+  // Compute tick positions where date label changes to avoid duplicates
+  const ticks = useMemo(() => {
+    if (points.length === 0) return []
+    const result: number[] = [0] // always start with first point
+    for (let i = 1; i < points.length; i++) {
+      if (points[i].dateLabel !== points[i - 1].dateLabel) {
+        result.push(i)
+      }
+    }
+    // If we have many ticks, limit to ~8 max by keeping first, last, and evenly spaced ones
+    if (result.length > 8) {
+      const step = Math.ceil(result.length / 8)
+      const filtered = result.filter((_, idx) => idx % step === 0 || idx === result.length - 1)
+      return filtered.length > 0 ? filtered : [0, Math.max(0, points.length - 1)]
+    }
+    return result
+  }, [points])
+
   if (points.length === 0) {
     return <div className="text-xs text-gray-500">No trade points available for this selection.</div>
   }
@@ -102,11 +120,12 @@ export function TradeEntryExitChart({ trades, symbol }: Props) {
             dataKey="index"
             tick={{ fill: '#9ca3af', fontSize: 11 }}
             tickFormatter={(v) => {
-              const point = points[Math.max(0, Math.min(points.length - 1, Math.round(Number(v))))]
+              const idx = Math.round(Number(v))
+              const point = points[Math.max(0, Math.min(points.length - 1, idx))]
               return point?.dateLabel ?? ''
             }}
             domain={[0, Math.max(points.length - 1, 0)]}
-            tickCount={Math.min(8, points.length)}
+            ticks={ticks}
           />
           <YAxis
             dataKey="price"

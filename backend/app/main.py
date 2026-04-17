@@ -30,6 +30,7 @@ from app.api.routes.backlog import router as backlog_router
 from app.api.routes.services import router as services_router
 from app.api.routes.programs import router as programs_router
 from app.api.routes.watchlists import router as watchlists_router
+from app.api.routes.simulations import router as simulations_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -125,9 +126,9 @@ async def _run_schema_migrations() -> None:
                     text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
                 )
                 logger.info(f"Migration: added {table}.{column}")
-            except Exception:
+            except Exception as exc:
                 # Column already exists — this is expected on subsequent startups
-                pass
+                logger.debug(f"Migration skipped (likely already exists): {table}.{column} - {exc}")
 
 
 async def lifespan(app: FastAPI):
@@ -136,15 +137,11 @@ async def lifespan(app: FastAPI):
     await _run_schema_migrations()
     await seed_default_data()
     await _restore_kill_switch_state()
-    from app.services.paper_broker import start_paper_broker_loop
     from app.services.watchlist_scheduler import start_watchlist_scheduler
-    start_paper_broker_loop()
     start_watchlist_scheduler()
     yield
     # Shutdown (graceful)
-    from app.services.paper_broker import stop_paper_broker_loop
     from app.services.watchlist_scheduler import stop_watchlist_scheduler
-    stop_paper_broker_loop()
     stop_watchlist_scheduler()
 
 
@@ -337,6 +334,12 @@ app.include_router(backlog_router, prefix="/api/v1")
 app.include_router(services_router, prefix="/api/v1")
 app.include_router(programs_router, prefix="/api/v1")
 app.include_router(watchlists_router, prefix="/api/v1")
+app.include_router(simulations_router, prefix="/api/v1")
+
+# Register simulation WebSocket directly on the app to avoid route collision
+# with the /{simulation_id} catch-all pattern on the REST router.
+from app.api.routes.simulations import simulation_websocket
+app.websocket("/ws/simulation/{simulation_id}")(simulation_websocket)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
@@ -396,7 +399,7 @@ async def websocket_endpoint(websocket: WebSocket):
         ws_manager.disconnect(websocket)
 
 
-# ── Global exception handler ──────────────────────────────────────────────────
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):

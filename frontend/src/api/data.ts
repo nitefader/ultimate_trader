@@ -9,6 +9,7 @@ export interface DataItem {
   last_date: string
   bar_count: number
   file_size_kb: number
+  downloaded_at?: string
 }
 
 export interface TickerResult {

@@ -19,4 +19,6 @@ export const strategiesApi = {
     api.patch(`/strategies/${strategyId}/versions/${versionId}`, data).then(r => r.data),
   validate: (config: StrategyConfig) =>
     api.post<{ valid: boolean; errors: string[]; warnings: string[] }>('/strategies/validate', { config }).then(r => r.data),
+  indicatorKinds: () =>
+    api.get<string[]>('/strategies/indicator-kinds').then(r => r.data),
 }

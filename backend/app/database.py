@@ -68,6 +68,7 @@ async def create_all_tables() -> None:
             # when we catch the error). Add new columns here when the model grows.
             _additive_migrations = [
                 "ALTER TABLE run_metrics ADD COLUMN sqn REAL",
+                "ALTER TABLE data_inventory ADD COLUMN downloaded_at DATETIME",
             ]
             for stmt in _additive_migrations:
                 try:

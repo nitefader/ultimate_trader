@@ -305,7 +305,7 @@ async def _process_deployment(
                     )
                     break  # one direction per symbol per bar
 
-        # Update unrealized P&L on open trade (re-fetch after possible new entry)
+        # Update unrealized P&L on open trade using bar close price
         if has_position and open_trade and open_trade.is_open:
             upnl = (price - open_trade.entry_price) * open_trade.quantity
             if open_trade.direction == "short":
@@ -315,6 +315,42 @@ async def _process_deployment(
 
         state.last_bar_ts[symbol] = current_ts
 
+    await db.flush()
+
+    # ── Live price refresh via Alpaca Data API ────────────────────────────────
+    # Re-fetch all still-open trades and overwrite current_price with the
+    # latest Alpaca trade price. This runs every cycle so the UI shows a
+    # real-time price even when no new bar has been processed yet.
+    open_result2 = await db.execute(
+        select(DeploymentTrade).where(
+            DeploymentTrade.deployment_id == dep.id,
+            DeploymentTrade.is_open == True,
+        )
+    )
+    open_now = open_result2.scalars().all()
+    if open_now and dep.account:
+        broker_config = dep.account.broker_config or {}
+        # Prefer paper creds, fall back to live — the data API works with either
+        mode_cfg = broker_config.get("paper") or broker_config.get("live") or {}
+        api_key = mode_cfg.get("api_key", "")
+        secret_key = mode_cfg.get("secret_key", "")
+        if api_key and secret_key:
+            from app.services.alpaca_service import get_latest_prices
+            syms = list({t.symbol for t in open_now})
+            live_prices = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: get_latest_prices(syms, api_key, secret_key)
+            )
+            for trade in open_now:
+                lp = live_prices.get(trade.symbol)
+                if lp and lp > 0:
+                    upnl = (lp - trade.entry_price) * trade.quantity
+                    if trade.direction == "short":
+                        upnl = -upnl
+                    trade.current_price = lp
+                    trade.unrealized_pnl = upnl
+                    logger.debug(
+                        "Paper broker: live price %s=%.2f upnl=%.2f", trade.symbol, lp, upnl
+                    )
     await db.flush()
 
 

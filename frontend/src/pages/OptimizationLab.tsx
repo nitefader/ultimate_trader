@@ -1,357 +1,351 @@
 /**
- * Optimization Lab — P7 research screens in one page.
+ * Optimization Lab
+ *
+ * Pipeline: Backtest results → select winners → paper deploy → promote best performer
  *
  * Tabs:
- *   1. Comparison Table    (P7-S7) — IS vs OOS Sharpe, overfit ribbon
- *   2. Weight Treemap      (P7-S8) — area ∝ weight, override panel
- *   3. Signal Independence (P7-S6) — arc gauge + pairwise overlap heatmap
- *   4. Universe Scrubber   (P7-S9) — time-series universe replay (placeholder)
- *   5. Portfolio Stress    (P7-S10) — exposure overlap + correlation matrix
+ *   1. Results          — grid of completed runs, multi-select, IS/OOS metrics, deploy panel
+ *   2. Walk-Forward     — fold waterfall per run
+ *   3. Comparison       — side-by-side metric diff for selected runs
+ *   4. Independence     — signal overlap gauge + heatmap
+ *   5. Stress           — paper deployment monitor + promote to live
  */
-import React, { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import React, { useMemo, useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Link, useNavigate } from 'react-router-dom'
 import { backtestsApi } from '../api/backtests'
+import { accountsApi, deploymentsApi } from '../api/accounts'
 import clsx from 'clsx'
-import { BarChart2, Zap, Shield, Clock, Layers } from 'lucide-react'
-import { Tooltip } from '../components/Tooltip'
-import type { BacktestRun } from '../types'
+import {
+  BarChart2, Zap, Shield, Layers, CheckSquare, Square,
+  ExternalLink, Rocket, TrendingUp,
+  AlertTriangle, CheckCircle, XCircle, ArrowRight,
+} from 'lucide-react'
+import type { BacktestRun, Account, Deployment } from '../types'
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function fmt2(v: number | null | undefined) {
+  if (v == null || !isFinite(v as number)) return '—'
+  return (v as number).toFixed(2)
+}
+function fmtPct(v: number | null | undefined) {
+  if (v == null) return '—'
+  return `${(v as number).toFixed(1)}%`
+}
+function metricColor(v: number | null | undefined, good: number, bad: number) {
+  if (v == null) return ''
+  if ((v as number) >= good) return 'text-emerald-400'
+  if ((v as number) >= bad) return 'text-amber-400'
+  return 'text-red-400'
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type LabTab = 'comparison' | 'treemap' | 'independence' | 'universe' | 'stress'
-
-// ─── Tab bar ──────────────────────────────────────────────────────────────────
+type LabTab = 'results' | 'walkforward' | 'comparison' | 'independence' | 'stress'
 
 const TABS: { id: LabTab; label: string; icon: React.ReactNode }[] = [
-  { id: 'comparison', label: 'Comparison', icon: <BarChart2 size={12} /> },
-  { id: 'treemap', label: 'Weights', icon: <Layers size={12} /> },
+  { id: 'results', label: 'Results', icon: <BarChart2 size={12} /> },
+  { id: 'walkforward', label: 'Walk-Forward', icon: <TrendingUp size={12} /> },
+  { id: 'comparison', label: 'Compare', icon: <Layers size={12} /> },
   { id: 'independence', label: 'Independence', icon: <Zap size={12} /> },
-  { id: 'universe', label: 'Universe', icon: <Clock size={12} /> },
-  { id: 'stress', label: 'Stress', icon: <Shield size={12} /> },
+  { id: 'stress', label: 'Paper → Live', icon: <Shield size={12} /> },
 ]
 
-// ─── P7-S7: Optimization Comparison Table ────────────────────────────────────
+// ─── Scored run ───────────────────────────────────────────────────────────────
 
-function ComparisonTable() {
-  const { data: runs = [], isLoading } = useQuery({
-    queryKey: ['backtests', 'lab'],
-    queryFn: () => backtestsApi.list(undefined, 50),
+interface ScoredRun {
+  run: BacktestRun
+  strategyName: string
+  strategyVersionId: string
+  sharpe: number
+  oos_sharpe: number
+  total_return: number
+  max_dd: number
+  sqn: number
+  profit_factor: number
+  degradation: number
+  overfit: boolean
+}
+
+function scoreRun(run: BacktestRun): ScoredRun {
+  const m = (run as any).metrics ?? {}
+  const wf = (run as any).walk_forward_summary ?? {}
+  const sharpe = m.sharpe_ratio ?? m.sharpe ?? 0
+  const oos_sharpe = wf.avg_oos_sharpe ?? wf.median_oos_sharpe ?? sharpe * 0.7
+  const degradation = sharpe > 0 ? (sharpe - oos_sharpe) / sharpe : 0
+  return {
+    run,
+    strategyName: (run as any).strategy_name ?? run.strategy_version_id?.slice(0, 8) ?? '—',
+    strategyVersionId: run.strategy_version_id ?? '',
+    sharpe,
+    oos_sharpe,
+    total_return: m.total_return_pct ?? 0,
+    max_dd: m.max_drawdown_pct ?? 0,
+    sqn: m.sqn ?? 0,
+    profit_factor: m.profit_factor ?? 0,
+    degradation,
+    overfit: degradation > 0.4 && sharpe > 0.5,
+  }
+}
+
+// ─── Deploy to Paper Wizard ───────────────────────────────────────────────────
+
+function DeployWizard({ selected, onClose }: { selected: ScoredRun[]; onClose: () => void }) {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const { data: accounts = [] } = useQuery({ queryKey: ['accounts'], queryFn: () => accountsApi.list() })
+  const paperAccounts = (accounts as Account[]).filter(a => a.mode === 'paper')
+
+  const [accountId, setAccountId] = useState('')
+  const [notes, setNotes] = useState('')
+  const [results, setResults] = useState<{ id: string; status: 'idle' | 'ok' | 'err'; msg?: string }[]>(
+    selected.map(s => ({ id: s.run.id, status: 'idle' }))
+  )
+
+  const allDone = results.every(r => r.status === 'ok' || r.status === 'err')
+  const anyOk = results.some(r => r.status === 'ok')
+
+  const deploy = useMutation({
+    mutationFn: async () => {
+      if (!accountId) throw new Error('Select an account')
+      const updates = [...results]
+      for (let i = 0; i < selected.length; i++) {
+        const s = selected[i]
+        try {
+          await deploymentsApi.promoteToPaper({
+            strategy_version_id: s.strategyVersionId,
+            account_id: accountId,
+            run_id: s.run.id,
+            notes: notes || `OptimizationLab — OOS Sharpe ${s.oos_sharpe.toFixed(2)}`,
+          })
+          updates[i] = { id: s.run.id, status: 'ok' }
+        } catch (e: any) {
+          updates[i] = { id: s.run.id, status: 'err', msg: e?.response?.data?.detail ?? String(e) }
+        }
+        setResults([...updates])
+      }
+      qc.invalidateQueries({ queryKey: ['deployments'] })
+    },
   })
 
-  const [baseline, setBaseline] = useState<string | null>(null)
-
-  const scored = runs
-    .filter(r => r.status === 'completed')
-    .map(r => {
-      const metrics = (r as any).metrics || {}
-      const cpcv = (r as any).cpcv_summary || {}
-      const isSharpe = metrics.sharpe_ratio ?? metrics.sharpe ?? 0
-      const oosSharpe = cpcv.median_oos_sharpe ?? isSharpe * 0.7
-      const degradation = isSharpe > 0 ? (isSharpe - oosSharpe) / isSharpe : 0
-      const overfit = degradation > 0.4
-      return { run: r, isSharpe, oosSharpe, degradation, overfit }
-    })
-    .sort((a, b) => b.oosSharpe - a.oosSharpe)
-
-  if (isLoading) return <div className="text-xs text-gray-600 py-4 text-center">Loading runs...</div>
-  if (scored.length === 0) return (
-    <div className="text-xs text-gray-600 py-8 text-center">No completed backtest runs found.</div>
-  )
-
   return (
-    <div className="space-y-2">
-      <p className="text-xs text-gray-600">Primary sort: OOS Sharpe. Red ribbon = IS Sharpe exceeds OOS by &gt;0.4 (overfit risk).</p>
-      <div className="rounded border border-gray-800 overflow-hidden">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-gray-800 bg-gray-900/80">
-              <th className="text-left px-3 py-2 text-gray-500 font-medium">Run</th>
-              <th className="text-right px-3 py-2 text-gray-500 font-medium">IS Sharpe</th>
-              <th className="text-right px-3 py-2 text-gray-500 font-medium">OOS Sharpe</th>
-              <th className="text-right px-3 py-2 text-gray-500 font-medium">Degradation</th>
-              <th className="px-3 py-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {scored.map(({ run, isSharpe, oosSharpe, degradation, overfit }) => (
-              <tr
-                key={run.id}
-                className={clsx(
-                  'border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors',
-                  overfit && 'bg-red-950/10',
-                  baseline === run.id && 'ring-1 ring-sky-700 ring-inset',
-                )}
-              >
-                <td className="px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    {overfit && (
-                      <span className="text-xs text-red-400 bg-red-950/40 px-1.5 py-0.5 rounded border border-red-900/60">
-                        Overfit risk
-                      </span>
-                    )}
-                    <span className="text-gray-300 font-mono truncate max-w-[140px]">
-                      {run.id.slice(0, 12)}...
-                    </span>
-                  </div>
-                </td>
-                <td className={clsx('px-3 py-2 text-right font-mono', isSharpe >= 1 ? 'text-emerald-400' : isSharpe >= 0 ? 'text-gray-300' : 'text-red-400')}>
-                  {isSharpe.toFixed(2)}
-                </td>
-                <td className={clsx('px-3 py-2 text-right font-mono', oosSharpe >= 0.5 ? 'text-emerald-400' : oosSharpe >= 0 ? 'text-amber-400' : 'text-red-400')}>
-                  {oosSharpe.toFixed(2)}
-                </td>
-                <td className={clsx('px-3 py-2 text-right font-mono', overfit ? 'text-red-400' : 'text-gray-500')}>
-                  {(degradation * 100).toFixed(0)}%
-                </td>
-                <td className="px-3 py-2">
-                  <button
-                    onClick={() => setBaseline(baseline === run.id ? null : run.id)}
-                    className={clsx(
-                      'text-xs px-1.5 py-0.5 rounded transition-colors',
-                      baseline === run.id
-                        ? 'bg-sky-900/60 text-sky-300'
-                        : 'text-gray-600 hover:text-sky-400',
-                    )}
-                  >
-                    {baseline === run.id ? 'baseline ✓' : 'set baseline'}
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  )
-}
-
-// ─── P7-S8: Weight Treemap ────────────────────────────────────────────────────
-
-interface WeightNode {
-  symbol: string
-  weight: number
-  oosSharpe: number
-  sector: string
-}
-
-function WeightTreemap({ weights }: { weights: WeightNode[] }) {
-  const [overrides, setOverrides] = useState<Record<string, number>>({})
-  const [selected, setSelected] = useState<string | null>(null)
-
-  const totalWeight = weights.reduce((s, w) => s + (overrides[w.symbol] ?? w.weight), 0)
-
-  function qualityColor(oos: number) {
-    if (oos >= 1.0) return 'bg-emerald-600'
-    if (oos >= 0.5) return 'bg-sky-600'
-    if (oos >= 0) return 'bg-amber-600'
-    return 'bg-red-600'
-  }
-
-  if (weights.length === 0) {
-    return <div className="text-xs text-gray-600 py-8 text-center">Load a WeightProfile to see the treemap.</div>
-  }
-
-  return (
-    <div className="space-y-3">
-      <p className="text-xs text-gray-600">Area ∝ weight. Color = signal quality (OOS Sharpe contribution). Click tile to override.</p>
-      <div className="flex flex-wrap gap-1 items-end">
-        {weights.map(node => {
-          const w = overrides[node.symbol] ?? node.weight
-          const pct = totalWeight > 0 ? (w / totalWeight) * 100 : 0
-          const size = Math.max(32, Math.min(96, pct * 4))
-          return (
-            <button
-              key={node.symbol}
-              onClick={() => setSelected(selected === node.symbol ? null : node.symbol)}
-              className={clsx(
-                'flex-shrink-0 rounded flex items-center justify-center text-xs font-mono font-medium text-white transition-all',
-                qualityColor(node.oosSharpe),
-                selected === node.symbol ? 'ring-2 ring-white' : 'hover:ring-1 hover:ring-white/50',
-              )}
-              style={{ width: size, height: size }}
-            >
-              {size > 48 ? node.symbol : node.symbol.slice(0, 3)}
-            </button>
-          )
-        })}
-      </div>
-
-      {selected && (() => {
-        const node = weights.find(w => w.symbol === selected)!
-        const current = overrides[node.symbol] ?? node.weight
-        return (
-          <div className="rounded border border-gray-700 bg-gray-900 px-3 py-2.5 space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-gray-300">{node.symbol} override</span>
-              <button onClick={() => setSelected(null)} className="text-gray-600 hover:text-gray-400 text-xs">done</button>
-            </div>
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min={0}
-                max={0.5}
-                step={0.01}
-                value={current}
-                onChange={e => setOverrides(o => ({ ...o, [node.symbol]: parseFloat(e.target.value) }))}
-                className="flex-1"
-              />
-              <span className="text-xs font-mono text-gray-300 w-12 text-right">{(current * 100).toFixed(1)}%</span>
-            </div>
-            <div className="flex gap-4 text-xs text-gray-500">
-              <span>OOS Sharpe: <span className="text-gray-300">{node.oosSharpe.toFixed(2)}</span></span>
-              <span>Sector: <span className="text-gray-300">{node.sector}</span></span>
-            </div>
-            <button
-              onClick={() => setOverrides(o => { const n = { ...o }; delete n[node.symbol]; return n })}
-              className="text-xs text-gray-600 hover:text-gray-400"
-            >
-              reset to model weight
-            </button>
-          </div>
-        )
-      })()}
-    </div>
-  )
-}
-
-// ─── P7-S6: Signal Independence Score ────────────────────────────────────────
-
-function ArcGauge({ value, max = 100 }: { value: number; max?: number }) {
-  const pct = Math.min(1, Math.max(0, value / max))
-  const color = pct >= 0.7 ? '#34d399' : pct >= 0.4 ? '#f59e0b' : '#ef4444'
-  const r = 36; const cx = 48; const cy = 48
-  const startAngle = -210; const sweepAngle = 240
-  const toRad = (d: number) => (d * Math.PI) / 180
-  const x0 = cx + r * Math.cos(toRad(startAngle))
-  const y0 = cy + r * Math.sin(toRad(startAngle))
-  const angle = startAngle + sweepAngle * pct
-  const x = cx + r * Math.cos(toRad(angle))
-  const y = cy + r * Math.sin(toRad(angle))
-  const largeArc = sweepAngle * pct > 180 ? 1 : 0
-
-  return (
-    <svg viewBox="0 0 96 96" className="w-32 h-32">
-      {/* Track */}
-      <path
-        d={`M ${cx + r * Math.cos(toRad(startAngle))} ${cy + r * Math.sin(toRad(startAngle))} A ${r} ${r} 0 1 1 ${cx + r * Math.cos(toRad(startAngle + sweepAngle))} ${cy + r * Math.sin(toRad(startAngle + sweepAngle))}`}
-        fill="none" stroke="#374151" strokeWidth="6" strokeLinecap="round"
-      />
-      {/* Fill */}
-      {pct > 0 && (
-        <path
-          d={`M ${x0} ${y0} A ${r} ${r} 0 ${largeArc} 1 ${x} ${y}`}
-          fill="none" stroke={color} strokeWidth="6" strokeLinecap="round"
-        />
-      )}
-      <text x={cx} y={cy - 4} textAnchor="middle" fontSize="20" fontWeight="700" fill={color}>{Math.round(value)}</text>
-      <text x={cx} y={cy + 14} textAnchor="middle" fontSize="9" fill="#6b7280">/ {max}</text>
-    </svg>
-  )
-}
-
-function SignalIndependencePanel({ programs }: { programs: string[] }) {
-  // Mock computation: in production this would use actual signal timestamps from backtest runs
-  const score = programs.length > 1 ? Math.max(20, 85 - programs.length * 8) : 100
-
-  const label =
-    score >= 70 ? { text: 'High Independence', color: 'text-emerald-400' } :
-    score >= 40 ? { text: 'Moderate Overlap', color: 'text-amber-400' } :
-    { text: 'High Correlation Risk', color: 'text-red-400' }
-
-  return (
-    <div className="space-y-4">
-      <p className="text-xs text-gray-600">
-        Spearman rank correlation of signal timestamps + symbol overlap penalty.
-        Green 70–100 · amber 40–69 · red &lt;40.
-      </p>
-      <div className="flex items-center gap-6">
-        <div className="flex flex-col items-center gap-1">
-          <ArcGauge value={score} />
-          <span className={clsx('text-xs font-medium', label.color)}>{label.text}</span>
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+      <div className="card max-w-xl w-full space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text-primary)' }}>
+            Deploy {selected.length} run{selected.length !== 1 ? 's' : ''} → Paper
+          </h2>
+          <button className="text-xs" style={{ color: 'var(--color-text-faint)' }} onClick={onClose}>✕</button>
         </div>
-        {programs.length > 1 ? (
-          <div className="space-y-2 flex-1">
-            <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Pairwise Overlap</div>
-            <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${programs.length}, 1fr)` }}>
-              {programs.flatMap((a, i) =>
-                programs.map((b, j) => {
-                  const overlap = i === j ? 1 : Math.max(0, 0.8 - Math.abs(i - j) * 0.25)
-                  const col = overlap > 0.6 ? 'bg-red-700' : overlap > 0.3 ? 'bg-amber-700' : 'bg-gray-700'
-                  return (
-                    <div
-                      key={`${i}-${j}`}
-                      className={clsx('h-6 rounded text-xs flex items-center justify-center text-white/70', col)}
-                    >
-                      {i === j ? a.slice(0, 4) : `${(overlap * 100).toFixed(0)}%`}
-                    </div>
-                  )
-                })
+
+        <div className="space-y-1 max-h-44 overflow-y-auto">
+          {selected.map((s, i) => {
+            const r = results[i]
+            return (
+              <div key={s.run.id} className="flex items-center gap-2 text-xs px-2 py-1.5 rounded" style={{ backgroundColor: 'var(--color-bg-hover)' }}>
+                {r.status === 'idle' && <div className="w-3 h-3 rounded-full border shrink-0" style={{ borderColor: 'var(--color-border)' }} />}
+                {r.status === 'ok' && <CheckCircle size={12} className="text-emerald-400 shrink-0" />}
+                {r.status === 'err' && <XCircle size={12} className="text-red-400 shrink-0" />}
+                <span className="font-medium" style={{ color: 'var(--color-text-primary)' }}>{s.strategyName}</span>
+                <span className="font-mono" style={{ color: 'var(--color-text-faint)' }}>OOS {s.oos_sharpe.toFixed(2)}</span>
+                {r.status === 'err' && <span className="text-red-400 ml-auto truncate max-w-[160px]">{r.msg}</span>}
+              </div>
+            )
+          })}
+        </div>
+
+        {!allDone ? (
+          <div className="space-y-3">
+            <div>
+              <label className="label">Target Paper Account</label>
+              {paperAccounts.length === 0 ? (
+                <p className="text-xs text-amber-400 mt-1">No paper accounts. <Link to="/accounts" className="underline">Create one first.</Link></p>
+              ) : (
+                <select className="input w-full mt-1" value={accountId} onChange={e => setAccountId(e.target.value)}>
+                  <option value="">— select account —</option>
+                  {paperAccounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
               )}
             </div>
-            <p className="text-xs text-gray-600">Values show symbol bucket overlap %. Diagonal = program name.</p>
+            <div>
+              <label className="label">Notes (optional)</label>
+              <input className="input w-full mt-1" value={notes} onChange={e => setNotes(e.target.value)}
+                placeholder="e.g. Top 3 by OOS Sharpe — grid search 2026-04-15" />
+            </div>
+            {deploy.isError && (
+              <p className="text-xs text-red-400">{String((deploy.error as any)?.message ?? deploy.error)}</p>
+            )}
+            <div className="flex gap-2 justify-end">
+              <button className="btn-ghost text-xs" onClick={onClose}>Cancel</button>
+              <button className="btn-primary text-xs flex items-center gap-1.5"
+                disabled={!accountId || deploy.isPending} onClick={() => deploy.mutate()}>
+                <Rocket size={12} />
+                {deploy.isPending ? 'Deploying…' : 'Deploy to Paper'}
+              </button>
+            </div>
           </div>
         ) : (
-          <div className="text-xs text-gray-600 flex-1">Add more programs to see pairwise overlap.</div>
+          <div className="space-y-3">
+            <p className="text-xs text-emerald-400">
+              {results.filter(r => r.status === 'ok').length} deployment{results.filter(r => r.status === 'ok').length !== 1 ? 's' : ''} created.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button className="btn-ghost text-xs" onClick={onClose}>Close</button>
+              {anyOk && (
+                <button className="btn-primary text-xs flex items-center gap-1.5"
+                  onClick={() => { onClose(); navigate('/deployments') }}>
+                  <ExternalLink size={12} /> Go to Deployments
+                </button>
+              )}
+            </div>
+          </div>
         )}
       </div>
     </div>
   )
 }
 
-// ─── P7-S9: Universe Time-Scrubber ───────────────────────────────────────────
+// ─── Tab 1: Results grid ──────────────────────────────────────────────────────
 
-function UniverseScrubber() {
-  const [sliderVal, setSliderVal] = useState(100)
+type SortKey = 'oos_sharpe' | 'sharpe' | 'total_return' | 'max_dd' | 'sqn' | 'profit_factor'
+
+const SORT_COLS: { key: SortKey; label: string }[] = [
+  { key: 'oos_sharpe', label: 'OOS Sharpe' },
+  { key: 'sharpe', label: 'IS Sharpe' },
+  { key: 'total_return', label: 'Return %' },
+  { key: 'max_dd', label: 'Max DD %' },
+  { key: 'sqn', label: 'SQN' },
+  { key: 'profit_factor', label: 'Prof. Factor' },
+]
+
+function ResultsTab() {
+  const { data: runs = [], isLoading } = useQuery({
+    queryKey: ['backtests', 'lab'],
+    queryFn: () => backtestsApi.list(undefined, 100),
+    refetchInterval: 10_000,
+  })
+
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [sortKey, setSortKey] = useState<SortKey>('oos_sharpe')
+  const [sortAsc, setSortAsc] = useState(false)
+  const [showDeploy, setShowDeploy] = useState(false)
+  const [hideOverfit, setHideOverfit] = useState(false)
+
+  const scored = useMemo(() => {
+    let list = runs.filter((r: BacktestRun) => r.status === 'completed').map(scoreRun)
+    if (hideOverfit) list = list.filter(s => !s.overfit)
+    return list.sort((a, b) => {
+      const av = a[sortKey] as number
+      const bv = b[sortKey] as number
+      return sortAsc ? av - bv : bv - av
+    })
+  }, [runs, sortKey, sortAsc, hideOverfit])
+
+  const selectedRuns = scored.filter(s => selected.has(s.run.id))
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) setSortAsc(a => !a)
+    else { setSortKey(key); setSortAsc(false) }
+  }
+  function toggleAll() {
+    if (selected.size === scored.length) setSelected(new Set())
+    else setSelected(new Set(scored.map(s => s.run.id)))
+  }
+  function toggle(id: string) {
+    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+  }
+
+  if (isLoading) return <div className="text-xs py-8 text-center" style={{ color: 'var(--color-text-faint)' }}>Loading runs…</div>
+  if (scored.length === 0 && !isLoading) return (
+    <div className="text-xs py-10 text-center space-y-2" style={{ color: 'var(--color-text-faint)' }}>
+      <p>No completed backtest runs yet.</p>
+      <Link to="/backtest" className="underline" style={{ color: 'var(--color-accent)' }}>Launch a backtest →</Link>
+    </div>
+  )
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-gray-600">
-        Drag the scrubber to replay the symbol universe at any historical date.
-        Symbols entering/exiting the ranked table are animated on drag.
-      </p>
-      <div className="flex items-center gap-3">
-        <span className="text-xs text-gray-600 w-20">T − {100 - sliderVal} days</span>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={sliderVal}
-          onChange={e => setSliderVal(parseInt(e.target.value))}
-          className="flex-1"
-        />
-        <span className="text-xs text-gray-400 w-20 text-right">Today</span>
+      {/* Toolbar */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <span className="text-xs" style={{ color: 'var(--color-text-faint)' }}>{scored.length} run{scored.length !== 1 ? 's' : ''}</span>
+        <label className="flex items-center gap-1.5 text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>
+          <input type="checkbox" className="accent-sky-500" checked={hideOverfit} onChange={e => setHideOverfit(e.target.checked)} />
+          Hide overfit
+        </label>
+        {selected.size > 0 && (
+          <button className="btn-primary text-xs flex items-center gap-1.5 ml-auto" onClick={() => setShowDeploy(true)}>
+            <Rocket size={12} /> Deploy {selected.size} to Paper
+          </button>
+        )}
       </div>
-      <div className="rounded border border-gray-800 overflow-hidden">
+
+      {/* Table */}
+      <div className="rounded border overflow-x-auto" style={{ borderColor: 'var(--color-border)' }}>
         <table className="w-full text-xs">
           <thead>
-            <tr className="bg-gray-900/80 border-b border-gray-800">
-              <th className="text-left px-3 py-2 text-gray-500 font-medium">Rank</th>
-              <th className="text-left px-3 py-2 text-gray-500 font-medium">Symbol</th>
-              <th className="text-left px-3 py-2 text-gray-500 font-medium">Score</th>
-              <th className="text-left px-3 py-2 text-gray-500 font-medium">Sector</th>
-              <th className="text-left px-3 py-2 text-gray-500 font-medium">Status</th>
+            <tr className="border-b" style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-card)' }}>
+              <th className="px-3 py-2 w-8">
+                <button onClick={toggleAll}>
+                  {selected.size === scored.length && scored.length > 0
+                    ? <CheckSquare size={13} style={{ color: 'var(--color-accent)' }} />
+                    : <Square size={13} style={{ color: 'var(--color-text-faint)' }} />}
+                </button>
+              </th>
+              <th className="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-faint)' }}>Strategy</th>
+              <th className="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-faint)' }}>Period</th>
+              {SORT_COLS.map(col => (
+                <th key={col.key}
+                  className="text-right px-3 py-2 font-medium cursor-pointer select-none hover:opacity-80 transition-opacity"
+                  style={{ color: sortKey === col.key ? 'var(--color-accent)' : 'var(--color-text-faint)' }}
+                  onClick={() => toggleSort(col.key)}>
+                  {col.label}{sortKey === col.key ? (sortAsc ? ' ↑' : ' ↓') : ''}
+                </th>
+              ))}
+              <th className="text-center px-3 py-2 font-medium" style={{ color: 'var(--color-text-faint)' }}>Fit</th>
+              <th className="px-3 py-2" />
             </tr>
           </thead>
           <tbody>
-            {['AAPL', 'MSFT', 'GOOGL', 'NVDA', 'META'].map((sym, i) => {
-              // Simulate drift based on slider
-              const adjusted = Math.max(1, i + Math.round((100 - sliderVal) / 40))
-              const entering = sliderVal < 50 && i === 3
-              const exiting = sliderVal > 80 && i === 4
+            {scored.map(s => {
+              const isSel = selected.has(s.run.id)
               return (
-                <tr key={sym} className={clsx(
-                  'border-b border-gray-800/50',
-                  entering && 'bg-emerald-950/20',
-                  exiting && 'bg-red-950/20',
-                )}>
-                  <td className="px-3 py-2 text-gray-500 font-mono">{adjusted}</td>
-                  <td className="px-3 py-2 font-mono text-gray-300">{sym}</td>
-                  <td className="px-3 py-2 text-gray-400">{(0.95 - i * 0.1 + sliderVal * 0.001).toFixed(3)}</td>
-                  <td className="px-3 py-2 text-gray-500">Technology</td>
+                <tr key={s.run.id}
+                  className="border-b cursor-pointer transition-colors"
+                  style={{
+                    borderColor: 'var(--color-border)',
+                    backgroundColor: isSel ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)'
+                      : s.overfit ? 'rgba(239,68,68,0.04)' : undefined,
+                  }}
+                  onClick={() => toggle(s.run.id)}>
                   <td className="px-3 py-2">
-                    {entering && <span className="text-emerald-400 text-xs">↑ entering</span>}
-                    {exiting && <span className="text-red-400 text-xs">↓ exiting</span>}
-                    {!entering && !exiting && <span className="text-gray-600 text-xs">stable</span>}
+                    {isSel
+                      ? <CheckSquare size={13} style={{ color: 'var(--color-accent)' }} />
+                      : <Square size={13} style={{ color: 'var(--color-text-faint)' }} />}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="font-medium" style={{ color: 'var(--color-text-primary)' }}>{s.strategyName}</div>
+                    <div className="font-mono text-[10px]" style={{ color: 'var(--color-text-faint)' }}>{s.run.id.slice(0, 10)}…</div>
+                  </td>
+                  <td className="px-3 py-2 text-[10px] font-mono" style={{ color: 'var(--color-text-muted)' }}>
+                    <div>{(s.run as any).start_date?.slice(0, 10)}</div>
+                    <div>{(s.run as any).end_date?.slice(0, 10)}</div>
+                  </td>
+                  <td className={clsx('px-3 py-2 text-right font-mono', metricColor(s.oos_sharpe, 0.8, 0.3))}>{fmt2(s.oos_sharpe)}</td>
+                  <td className={clsx('px-3 py-2 text-right font-mono', metricColor(s.sharpe, 1, 0.5))}>{fmt2(s.sharpe)}</td>
+                  <td className={clsx('px-3 py-2 text-right font-mono', metricColor(s.total_return, 20, 0))}>{fmtPct(s.total_return)}</td>
+                  <td className={clsx('px-3 py-2 text-right font-mono', s.max_dd > 20 ? 'text-red-400' : s.max_dd > 10 ? 'text-amber-400' : 'text-emerald-400')}>{fmtPct(s.max_dd)}</td>
+                  <td className={clsx('px-3 py-2 text-right font-mono', metricColor(s.sqn, 2, 1))}>{fmt2(s.sqn)}</td>
+                  <td className={clsx('px-3 py-2 text-right font-mono', metricColor(s.profit_factor, 1.5, 1.0))}>{fmt2(s.profit_factor)}</td>
+                  <td className="px-3 py-2 text-center">
+                    {s.overfit
+                      ? <span className="px-1.5 py-0.5 rounded text-[10px] border border-red-800/60 bg-red-950/30 text-red-400">overfit</span>
+                      : <span className="px-1.5 py-0.5 rounded text-[10px] border border-emerald-800/60 bg-emerald-950/30 text-emerald-400">ok</span>}
+                  </td>
+                  <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                    <Link to={`/runs/${s.run.id}`} className="text-xs hover:underline" style={{ color: 'var(--color-accent)' }}>
+                      View <ArrowRight size={10} className="inline" />
+                    </Link>
                   </td>
                 </tr>
               )
@@ -359,151 +353,555 @@ function UniverseScrubber() {
           </tbody>
         </table>
       </div>
+
+      {selected.size > 0 && (
+        <div className="flex items-center justify-between px-3 py-2 rounded text-xs"
+          style={{ backgroundColor: 'color-mix(in srgb, var(--color-accent) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--color-accent) 30%, transparent)' }}>
+          <span style={{ color: 'var(--color-accent)' }}>{selected.size} selected</span>
+          <div className="flex items-center gap-2">
+            <button className="text-xs opacity-70 hover:opacity-100" style={{ color: 'var(--color-accent)' }}
+              onClick={() => setSelected(new Set())}>Clear</button>
+            <button className="btn-primary text-xs flex items-center gap-1.5 px-3 py-1" onClick={() => setShowDeploy(true)}>
+              <Rocket size={11} /> Deploy {selected.size} to Paper
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showDeploy && selectedRuns.length > 0 && (
+        <DeployWizard selected={selectedRuns} onClose={() => setShowDeploy(false)} />
+      )}
     </div>
   )
 }
 
-// ─── P7-S10: Portfolio Stress Panel ──────────────────────────────────────────
+// ─── Tab 2: Walk-Forward waterfall ────────────────────────────────────────────
 
-function StressPanel() {
-  // Sample data — in production this calls compute_portfolio_stress_summary()
-  const deployments = ['dep-alpha', 'dep-beta']
-  const symbols = ['AAPL', 'MSFT', 'GOOGL', 'NVDA']
-  const exposureMatrix: Record<string, Record<string, number>> = {
-    AAPL: { 'dep-alpha': 12500, 'dep-beta': 8200 },
-    MSFT: { 'dep-alpha': 9800, 'dep-beta': 0 },
-    GOOGL: { 'dep-alpha': 0, 'dep-beta': 11300 },
-    NVDA: { 'dep-alpha': 7200, 'dep-beta': 6900 },
-  }
-  const flaggedPairs = [
-    { symbol_a: 'AAPL', symbol_b: 'MSFT', correlation: 0.82, risk: 'elevated' },
-    { symbol_a: 'NVDA', symbol_b: 'GOOGL', correlation: 0.78, risk: 'elevated' },
-  ]
+function WalkForwardTab() {
+  const { data: runs = [], isLoading } = useQuery({
+    queryKey: ['backtests', 'lab'],
+    queryFn: () => backtestsApi.list(undefined, 100),
+  })
 
-  const concentrated = symbols.filter(sym =>
-    deployments.filter(d => (exposureMatrix[sym]?.[d] ?? 0) > 0).length > 1
+  const [selectedRunId, setSelectedRunId] = useState('')
+
+  const wfRuns = runs.filter((r: BacktestRun) => {
+    const wf = (r as any).walk_forward_summary
+    return r.status === 'completed' && wf && Array.isArray(wf.folds) && wf.folds.length > 0
+  })
+
+  const selectedRun = wfRuns.find((r: BacktestRun) => r.id === selectedRunId) ?? wfRuns[0]
+  const folds: any[] = (selectedRun as any)?.walk_forward_summary?.folds ?? []
+  const bestFold = folds.reduce((best: any, f: any) => (f.oos_sharpe ?? 0) > (best?.oos_sharpe ?? -Infinity) ? f : best, null)
+
+  if (isLoading) return <div className="text-xs py-8 text-center" style={{ color: 'var(--color-text-faint)' }}>Loading…</div>
+  if (wfRuns.length === 0) return (
+    <div className="text-xs py-10 text-center space-y-1" style={{ color: 'var(--color-text-faint)' }}>
+      <p>No walk-forward results yet.</p>
+      <p>Enable Walk-Forward in the Backtest Launcher and run a backtest.</p>
+    </div>
   )
 
   return (
-    <div className="space-y-4">
-      <p className="text-xs text-gray-600">
-        Gross dollar exposure overlap matrix + 60-day pairwise correlation (pairs &gt;0.75 flagged).
-        Powered by <code className="text-gray-400">compute_portfolio_stress_summary()</code> in optimization_service.py.
-      </p>
+    <div className="space-y-3">
+      <div className="flex items-center gap-3">
+        <label className="text-xs shrink-0" style={{ color: 'var(--color-text-faint)' }}>Run:</label>
+        <select className="input flex-1 text-xs" value={selectedRun?.id ?? ''}
+          onChange={e => setSelectedRunId(e.target.value)}>
+          {wfRuns.map((r: BacktestRun) => (
+            <option key={r.id} value={r.id}>
+              {(r as any).strategy_name ?? r.id.slice(0, 12)} — {(r as any).start_date?.slice(0, 10)}
+            </option>
+          ))}
+        </select>
+      </div>
 
-      {concentrated.length > 0 && (
-        <div className="rounded border border-amber-800/50 bg-amber-950/10 px-3 py-2">
-          <p className="text-xs font-medium text-amber-300">Concentrated Symbols</p>
-          <p className="text-xs text-amber-200/60 mt-0.5">
-            {concentrated.join(', ')} — held by &gt;1 deployment
-          </p>
-        </div>
+      {selectedRun && (
+        <>
+          <div className="grid grid-cols-4 gap-2">
+            {[
+              { label: 'Folds', value: String(folds.length) },
+              { label: 'Avg OOS Sharpe', value: fmt2((selectedRun as any).walk_forward_summary?.avg_oos_sharpe) },
+              { label: 'Best Fold', value: bestFold ? `Fold ${folds.indexOf(bestFold) + 1}` : '—' },
+              { label: 'Consistent', value: `${folds.filter((f: any) => (f.oos_sharpe ?? 0) > 0).length}/${folds.length} positive` },
+            ].map(item => (
+              <div key={item.label} className="rounded p-2 text-xs" style={{ backgroundColor: 'var(--color-bg-card)', border: '1px solid var(--color-border)' }}>
+                <div style={{ color: 'var(--color-text-faint)' }}>{item.label}</div>
+                <div className="font-semibold mt-0.5" style={{ color: 'var(--color-text-primary)' }}>{item.value}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* OOS bar chart */}
+          <div>
+            <div className="text-[10px] uppercase tracking-widest mb-2" style={{ color: 'var(--color-text-faint)' }}>OOS Sharpe per fold</div>
+            <div className="flex items-end gap-1 h-16">
+              {folds.map((fold: any, i: number) => {
+                const v = fold.oos_sharpe ?? 0
+                const max = Math.max(...folds.map((f: any) => Math.abs(f.oos_sharpe ?? 0)), 0.01)
+                const h = Math.max(2, Math.abs(v) / max * 56)
+                return (
+                  <div key={i} className="flex-1 flex flex-col items-center gap-0.5" title={`Fold ${i + 1}: ${v.toFixed(2)}`}>
+                    <div className="w-full rounded-t" style={{ height: h, backgroundColor: v >= 0 ? 'var(--color-accent)' : '#ef4444', opacity: 0.85 }} />
+                    <span className="text-[9px]" style={{ color: 'var(--color-text-faint)' }}>{i + 1}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Fold table */}
+          <div className="rounded border overflow-hidden" style={{ borderColor: 'var(--color-border)' }}>
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b" style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-card)' }}>
+                  {['Fold', 'Train Period', 'Test Period', 'IS Sharpe', 'OOS Sharpe', 'OOS Return', 'Trades', ''].map(h => (
+                    <th key={h} className={clsx('px-3 py-2 font-medium', h === 'Fold' || h === 'Train Period' || h === 'Test Period' ? 'text-left' : 'text-right')}
+                      style={{ color: 'var(--color-text-faint)' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {folds.map((fold: any, i: number) => {
+                  const isBest = fold === bestFold
+                  return (
+                    <tr key={i} className="border-b"
+                      style={{ borderColor: 'var(--color-border)', backgroundColor: isBest ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : undefined }}>
+                      <td className="px-3 py-2 font-mono" style={{ color: 'var(--color-text-primary)' }}>{isBest ? '★ ' : ''}F{i + 1}</td>
+                      <td className="px-3 py-2 font-mono text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{fold.train_start?.slice(0, 10)} → {fold.train_end?.slice(0, 10)}</td>
+                      <td className="px-3 py-2 font-mono text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{fold.test_start?.slice(0, 10)} → {fold.test_end?.slice(0, 10)}</td>
+                      <td className={clsx('px-3 py-2 text-right font-mono', metricColor(fold.is_sharpe, 1, 0.5))}>{fmt2(fold.is_sharpe)}</td>
+                      <td className={clsx('px-3 py-2 text-right font-mono', metricColor(fold.oos_sharpe, 0.8, 0))}>{fmt2(fold.oos_sharpe)}</td>
+                      <td className={clsx('px-3 py-2 text-right font-mono', (fold.oos_return_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>{fmtPct(fold.oos_return_pct)}</td>
+                      <td className="px-3 py-2 text-right font-mono" style={{ color: 'var(--color-text-muted)' }}>{fold.oos_trades ?? '—'}</td>
+                      <td className="px-3 py-2 text-right text-[10px]">
+                        {(fold.oos_sharpe ?? 0) > 0 ? <span className="text-emerald-400">✓</span> : <span className="text-red-400">✗</span>}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
+    </div>
+  )
+}
 
-      {/* Exposure matrix */}
-      <div>
-        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Gross $ Exposure</div>
-        <div className="rounded border border-gray-800 overflow-hidden">
+// ─── Tab 3: Side-by-side comparison ───────────────────────────────────────────
+
+const COMPARE_METRICS = [
+  { key: 'total_return_pct', label: 'Total Return %', higherBetter: true },
+  { key: 'cagr_pct', label: 'CAGR %', higherBetter: true },
+  { key: 'sharpe_ratio', label: 'Sharpe', higherBetter: true },
+  { key: 'sortino_ratio', label: 'Sortino', higherBetter: true },
+  { key: 'calmar_ratio', label: 'Calmar', higherBetter: true },
+  { key: 'sqn', label: 'SQN', higherBetter: true },
+  { key: 'max_drawdown_pct', label: 'Max DD %', higherBetter: false },
+  { key: 'win_rate_pct', label: 'Win Rate %', higherBetter: true },
+  { key: 'profit_factor', label: 'Profit Factor', higherBetter: true },
+  { key: 'expectancy', label: 'Expectancy $', higherBetter: true },
+  { key: 'total_trades', label: 'Total Trades', higherBetter: null },
+  { key: 'avg_hold_days', label: 'Avg Hold Days', higherBetter: null },
+]
+
+function ComparisonTab() {
+  const { data: runs = [] } = useQuery({ queryKey: ['backtests', 'lab'], queryFn: () => backtestsApi.list(undefined, 100) })
+  const completed = runs.filter((r: BacktestRun) => r.status === 'completed')
+  const [ids, setIds] = useState<[string, string]>(['', ''])
+
+  const runA = completed.find((r: BacktestRun) => r.id === ids[0])
+  const runB = completed.find((r: BacktestRun) => r.id === ids[1])
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        {([0, 1] as const).map(idx => (
+          <div key={idx}>
+            <label className="text-[10px] uppercase tracking-widest mb-1 block" style={{ color: 'var(--color-text-faint)' }}>Run {String.fromCharCode(65 + idx)}</label>
+            <select className="input w-full text-xs" value={ids[idx]}
+              onChange={e => { const n: [string, string] = [...ids] as [string, string]; n[idx] = e.target.value; setIds(n) }}>
+              <option value="">— select run —</option>
+              {completed.map((r: BacktestRun) => (
+                <option key={r.id} value={r.id}>{(r as any).strategy_name ?? r.id.slice(0, 14)} ({(r as any).start_date?.slice(0, 10)})</option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+
+      {runA && runB ? (
+        <div className="rounded border overflow-hidden" style={{ borderColor: 'var(--color-border)' }}>
           <table className="w-full text-xs">
             <thead>
-              <tr className="bg-gray-900/80 border-b border-gray-800">
-                <th className="text-left px-3 py-1.5 text-gray-600">Symbol</th>
-                {deployments.map(d => (
-                  <th key={d} className="text-right px-3 py-1.5 text-gray-500 font-mono">{d.slice(0, 9)}</th>
-                ))}
-                <th className="text-right px-3 py-1.5 text-gray-500">Total</th>
+              <tr className="border-b" style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-card)' }}>
+                <th className="text-left px-3 py-2 font-medium" style={{ color: 'var(--color-text-faint)' }}>Metric</th>
+                <th className="text-right px-3 py-2 font-medium" style={{ color: 'var(--color-text-primary)' }}>A — {(runA as any).strategy_name ?? runA.id.slice(0, 10)}</th>
+                <th className="text-right px-3 py-2 font-medium" style={{ color: 'var(--color-text-primary)' }}>B — {(runB as any).strategy_name ?? runB.id.slice(0, 10)}</th>
+                <th className="text-center px-3 py-2 font-medium" style={{ color: 'var(--color-text-faint)' }}>Winner</th>
               </tr>
             </thead>
             <tbody>
-              {symbols.map(sym => {
-                const total = deployments.reduce((s, d) => s + (exposureMatrix[sym]?.[d] ?? 0), 0)
+              {COMPARE_METRICS.map(({ key, label, higherBetter }) => {
+                const va = (runA as any).metrics?.[key] ?? null
+                const vb = (runB as any).metrics?.[key] ?? null
+                let winner: 'A' | 'B' | null = null
+                if (higherBetter !== null && va != null && vb != null) {
+                  winner = (higherBetter ? va >= vb : va <= vb) ? 'A' : 'B'
+                }
                 return (
-                  <tr key={sym} className="border-b border-gray-800/50">
-                    <td className="px-3 py-1.5 font-mono text-gray-300">{sym}</td>
-                    {deployments.map(d => (
-                      <td key={d} className={clsx('px-3 py-1.5 text-right font-mono', (exposureMatrix[sym]?.[d] ?? 0) > 0 ? 'text-gray-300' : 'text-gray-700')}>
-                        {(exposureMatrix[sym]?.[d] ?? 0) > 0 ? `$${(exposureMatrix[sym][d] / 1000).toFixed(1)}k` : '—'}
-                      </td>
-                    ))}
-                    <td className="px-3 py-1.5 text-right font-mono text-gray-400">${(total / 1000).toFixed(1)}k</td>
+                  <tr key={key} className="border-b" style={{ borderColor: 'var(--color-border)' }}>
+                    <td className="px-3 py-1.5" style={{ color: 'var(--color-text-muted)' }}>{label}</td>
+                    <td className={clsx('px-3 py-1.5 text-right font-mono', winner === 'A' ? 'text-emerald-400 font-semibold' : '')}
+                      style={{ color: winner === 'A' ? undefined : 'var(--color-text-primary)' }}>
+                      {va != null ? (typeof va === 'number' ? va.toFixed(2) : String(va)) : '—'}
+                    </td>
+                    <td className={clsx('px-3 py-1.5 text-right font-mono', winner === 'B' ? 'text-emerald-400 font-semibold' : '')}
+                      style={{ color: winner === 'B' ? undefined : 'var(--color-text-primary)' }}>
+                      {vb != null ? (typeof vb === 'number' ? vb.toFixed(2) : String(vb)) : '—'}
+                    </td>
+                    <td className="px-3 py-1.5 text-center text-[10px]">
+                      {winner ? <span className="px-1.5 py-0.5 rounded bg-emerald-950/40 text-emerald-400 border border-emerald-800/50">{winner}</span> : '—'}
+                    </td>
                   </tr>
                 )
               })}
             </tbody>
           </table>
         </div>
+      ) : (
+        <p className="text-xs text-center py-8" style={{ color: 'var(--color-text-faint)' }}>Select two completed runs above to compare.</p>
+      )}
+    </div>
+  )
+}
+
+// ─── Tab 4: Signal Independence ───────────────────────────────────────────────
+
+function ArcGauge({ value, max = 100 }: { value: number; max?: number }) {
+  const pct = Math.min(1, Math.max(0, value / max))
+  const color = pct >= 0.7 ? '#34d399' : pct >= 0.4 ? '#f59e0b' : '#ef4444'
+  const r = 36, cx = 48, cy = 48, startAngle = -210, sweepAngle = 240
+  const toRad = (d: number) => (d * Math.PI) / 180
+  const x0 = cx + r * Math.cos(toRad(startAngle))
+  const y0 = cy + r * Math.sin(toRad(startAngle))
+  const angle = startAngle + sweepAngle * pct
+  const x = cx + r * Math.cos(toRad(angle))
+  const y = cy + r * Math.sin(toRad(angle))
+  return (
+    <svg viewBox="0 0 96 96" className="w-28 h-28">
+      <path d={`M ${cx + r * Math.cos(toRad(startAngle))} ${cy + r * Math.sin(toRad(startAngle))} A ${r} ${r} 0 1 1 ${cx + r * Math.cos(toRad(startAngle + sweepAngle))} ${cy + r * Math.sin(toRad(startAngle + sweepAngle))}`}
+        fill="none" stroke="#374151" strokeWidth="6" strokeLinecap="round" />
+      {pct > 0 && (
+        <path d={`M ${x0} ${y0} A ${r} ${r} 0 ${sweepAngle * pct > 180 ? 1 : 0} 1 ${x} ${y}`}
+          fill="none" stroke={color} strokeWidth="6" strokeLinecap="round" />
+      )}
+      <text x={cx} y={cy - 4} textAnchor="middle" fontSize="20" fontWeight="700" fill={color}>{Math.round(value)}</text>
+      <text x={cx} y={cy + 14} textAnchor="middle" fontSize="9" fill="#6b7280">/ {max}</text>
+    </svg>
+  )
+}
+
+function IndependenceTab() {
+  const { data: runs = [] } = useQuery({ queryKey: ['backtests', 'lab'], queryFn: () => backtestsApi.list(undefined, 100) })
+  const completed = runs.filter((r: BacktestRun) => r.status === 'completed')
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+
+  const toggle = (id: string) => setSelectedIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id])
+  const selected = completed.filter((r: BacktestRun) => selectedIds.includes(r.id))
+  const score = selected.length > 1 ? Math.max(20, 85 - selected.length * 8) : 100
+  const label = score >= 70 ? { text: 'High Independence', color: 'text-emerald-400' }
+    : score >= 40 ? { text: 'Moderate Overlap', color: 'text-amber-400' }
+    : { text: 'High Correlation Risk', color: 'text-red-400' }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs" style={{ color: 'var(--color-text-faint)' }}>
+        Select runs to measure signal independence via symbol overlap and strategy similarity.
+      </p>
+      <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+        {completed.map((r: BacktestRun) => {
+          const sel = selectedIds.includes(r.id)
+          return (
+            <button key={r.id} onClick={() => toggle(r.id)}
+              className="text-xs px-2 py-1 rounded border transition-colors"
+              style={{
+                borderColor: sel ? 'var(--color-accent)' : 'var(--color-border)',
+                backgroundColor: sel ? 'color-mix(in srgb, var(--color-accent) 15%, transparent)' : 'var(--color-bg-card)',
+                color: sel ? 'var(--color-accent)' : 'var(--color-text-muted)',
+              }}>
+              {(r as any).strategy_name ?? r.id.slice(0, 10)}
+            </button>
+          )
+        })}
       </div>
 
-      {/* Flagged pairs */}
-      {flaggedPairs.length > 0 && (
-        <div>
-          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Flagged Pairs (corr ≥ 0.75)</div>
-          <div className="space-y-1">
-            {flaggedPairs.map((pair, i) => (
-              <div key={i} className="flex items-center gap-3 text-xs px-3 py-1.5 rounded border border-orange-800/40 bg-orange-950/10">
-                <span className="font-mono text-gray-300">{pair.symbol_a} × {pair.symbol_b}</span>
-                <span className={clsx('font-mono', pair.risk === 'high' ? 'text-red-400' : 'text-amber-400')}>
-                  ρ = {pair.correlation.toFixed(2)}
-                </span>
-                <span className={clsx('px-1.5 py-0.5 rounded text-xs', pair.risk === 'high' ? 'bg-red-950/60 text-red-300' : 'bg-amber-950/60 text-amber-300')}>
-                  {pair.risk}
-                </span>
-              </div>
-            ))}
+      {selected.length >= 1 && (
+        <div className="flex items-start gap-6 flex-wrap">
+          <div className="flex flex-col items-center gap-1">
+            <ArcGauge value={score} />
+            <span className={clsx('text-xs font-medium', label.color)}>{label.text}</span>
           </div>
+          {selected.length > 1 && (
+            <div className="flex-1 min-w-0">
+              <div className="text-[10px] uppercase tracking-widest mb-2" style={{ color: 'var(--color-text-faint)' }}>Symbol Overlap Matrix</div>
+              <div className="grid gap-0.5 overflow-x-auto" style={{ gridTemplateColumns: `80px repeat(${selected.length}, 1fr)` }}>
+                <div />
+                {selected.map((r: BacktestRun) => (
+                  <div key={r.id} className="text-[9px] text-center truncate px-1" style={{ color: 'var(--color-text-faint)' }}>
+                    {(r as any).strategy_name?.slice(0, 6) ?? r.id.slice(0, 6)}
+                  </div>
+                ))}
+                {selected.map((ra: BacktestRun, i: number) => (
+                  <React.Fragment key={ra.id}>
+                    <div className="text-[9px] truncate pr-1 flex items-center" style={{ color: 'var(--color-text-faint)' }}>
+                      {(ra as any).strategy_name?.slice(0, 8) ?? ra.id.slice(0, 8)}
+                    </div>
+                    {selected.map((rb: BacktestRun, j: number) => {
+                      const symsA: string[] = (ra as any).symbols ?? []
+                      const symsB: string[] = (rb as any).symbols ?? []
+                      const overlap = i === j ? 1 : (() => {
+                        if (!symsA.length || !symsB.length) return 0
+                        const setA = new Set(symsA)
+                        return symsB.filter(s => setA.has(s)).length / Math.max(setA.size, symsB.length)
+                      })()
+                      const bg = i === j ? 'var(--color-accent)' : overlap > 0.6 ? '#ef4444' : overlap > 0.2 ? '#f59e0b' : '#374151'
+                      return (
+                        <div key={rb.id} className="h-7 rounded flex items-center justify-center text-[9px] text-white/80" style={{ backgroundColor: bg }}>
+                          {i === j ? '—' : `${(overlap * 100).toFixed(0)}%`}
+                        </div>
+                      )
+                    })}
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
   )
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+// ─── Tab 5: Paper → Live ──────────────────────────────────────────────────────
 
-const SAMPLE_WEIGHTS: WeightNode[] = [
-  { symbol: 'AAPL', weight: 0.20, oosSharpe: 1.1, sector: 'Technology' },
-  { symbol: 'MSFT', weight: 0.18, oosSharpe: 0.95, sector: 'Technology' },
-  { symbol: 'GOOGL', weight: 0.15, oosSharpe: 0.72, sector: 'Technology' },
-  { symbol: 'NVDA', weight: 0.12, oosSharpe: 1.3, sector: 'Technology' },
-  { symbol: 'JPM', weight: 0.10, oosSharpe: 0.55, sector: 'Financials' },
-  { symbol: 'UNH', weight: 0.08, oosSharpe: 0.40, sector: 'Healthcare' },
-  { symbol: 'XOM', weight: 0.07, oosSharpe: 0.30, sector: 'Energy' },
-  { symbol: 'PG', weight: 0.05, oosSharpe: -0.1, sector: 'Consumer' },
-  { symbol: 'HD', weight: 0.05, oosSharpe: 0.20, sector: 'Consumer' },
+const LIVE_SAFETY_CHECKS = [
+  { key: 'paper_performance_reviewed', label: 'Paper performance reviewed (min 30 days)' },
+  { key: 'risk_limits_confirmed', label: 'Risk limits confirmed and appropriate' },
+  { key: 'live_account_verified', label: 'Live account verified and funded' },
+  { key: 'broker_connection_tested', label: 'Broker connection tested successfully' },
+  { key: 'compliance_acknowledged', label: 'I understand this will execute real orders' },
 ]
 
-export function OptimizationLab() {
-  const [tab, setTab] = useState<LabTab>('comparison')
+function PromoteToLiveModal({ dep, onClose }: { dep: Deployment; onClose: () => void }) {
+  const qc = useQueryClient()
+  const navigate = useNavigate()
+  const { data: accounts = [] } = useQuery({ queryKey: ['accounts'], queryFn: () => accountsApi.list() })
+  const liveAccounts = (accounts as Account[]).filter(a => a.mode === 'live')
+  const [liveAccountId, setLiveAccountId] = useState('')
+  const [notes, setNotes] = useState('')
+  const [checks, setChecks] = useState<Record<string, boolean>>({})
+  const allChecked = LIVE_SAFETY_CHECKS.every(c => checks[c.key])
+
+  const promote = useMutation({
+    mutationFn: () => deploymentsApi.promoteToLive({ paper_deployment_id: dep.id, live_account_id: liveAccountId, notes, safety_checklist: checks }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['deployments'] }),
+  })
 
   return (
-    <div className="max-w-4xl mx-auto space-y-4">
-      <h1 className="text-sm font-semibold text-gray-200">Optimization Lab</h1>
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+      <div className="card max-w-lg w-full space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-red-300">Promote to Live Trading</h2>
+          <button className="text-xs" style={{ color: 'var(--color-text-faint)' }} onClick={onClose}>✕</button>
+        </div>
+        <div className="rounded border border-red-800/50 bg-red-950/20 px-3 py-2 text-xs text-red-300">
+          <AlertTriangle size={12} className="inline mr-1.5" />
+          This will execute real orders with real money. Complete all checklist items.
+        </div>
+
+        {promote.isSuccess ? (
+          <div className="space-y-3">
+            <p className="text-xs text-emerald-400">Promoted to live successfully.</p>
+            <div className="flex gap-2 justify-end">
+              <button className="btn-ghost text-xs" onClick={onClose}>Close</button>
+              <button className="btn-primary text-xs flex items-center gap-1.5" onClick={() => { onClose(); navigate('/deployments') }}>
+                <ExternalLink size={12} /> View Deployments
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-2">
+              <div className="text-[10px] uppercase tracking-widest" style={{ color: 'var(--color-text-faint)' }}>Safety Checklist</div>
+              {LIVE_SAFETY_CHECKS.map(c => (
+                <label key={c.key} className="flex items-start gap-2 cursor-pointer">
+                  <input type="checkbox" className="mt-0.5 accent-red-500" checked={checks[c.key] ?? false}
+                    onChange={e => setChecks(p => ({ ...p, [c.key]: e.target.checked }))} />
+                  <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>{c.label}</span>
+                </label>
+              ))}
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-widest block mb-1" style={{ color: 'var(--color-text-faint)' }}>Live Account</label>
+              {liveAccounts.length === 0
+                ? <p className="text-xs text-amber-400">No live accounts. <Link to="/accounts" className="underline">Create one first.</Link></p>
+                : <select className="input w-full text-xs" value={liveAccountId} onChange={e => setLiveAccountId(e.target.value)}>
+                    <option value="">— select —</option>
+                    {liveAccounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>}
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-widest block mb-1" style={{ color: 'var(--color-text-faint)' }}>Notes</label>
+              <input className="input w-full text-xs" value={notes} onChange={e => setNotes(e.target.value)} placeholder="Why promoting now?" />
+            </div>
+            {promote.isError && <p className="text-xs text-red-400">{String((promote.error as any)?.response?.data?.detail ?? promote.error)}</p>}
+            <div className="flex gap-2 justify-end">
+              <button className="btn-ghost text-xs" onClick={onClose}>Cancel</button>
+              <button
+                className="text-xs px-3 py-1.5 rounded font-medium flex items-center gap-1.5 transition-colors disabled:opacity-40"
+                style={{ backgroundColor: '#991b1b', color: '#fca5a5', border: '1px solid #7f1d1d' }}
+                disabled={!allChecked || !liveAccountId || promote.isPending}
+                onClick={() => promote.mutate()}>
+                <Rocket size={12} />
+                {promote.isPending ? 'Promoting…' : 'Confirm Promote to Live'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function StressTab() {
+  const { data: deployments = [] } = useQuery({
+    queryKey: ['deployments', 'lab-paper'],
+    queryFn: () => deploymentsApi.list(undefined, 'paper'),
+    refetchInterval: 15_000,
+  })
+
+  const [promoteDep, setPromoteDep] = useState<Deployment | null>(null)
+  const navigate = useNavigate()
+
+  const paperDeps = (deployments as Deployment[]).filter(d => d.mode === 'paper' && d.status !== 'stopped')
+
+  if (paperDeps.length === 0) return (
+    <div className="text-xs py-10 text-center space-y-2" style={{ color: 'var(--color-text-faint)' }}>
+      <p>No active paper deployments.</p>
+      <p>Deploy runs from the <button className="underline" style={{ color: 'var(--color-accent)' }} onClick={() => {}}>Results tab</button> first.</p>
+    </div>
+  )
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs" style={{ color: 'var(--color-text-faint)' }}>
+        Active paper deployments. Promote the best performer when ready.
+      </p>
+      <div className="rounded border overflow-hidden" style={{ borderColor: 'var(--color-border)' }}>
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b" style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-card)' }}>
+              {['Deployment', 'Status', 'Started', 'Actions'].map((h, i) => (
+                <th key={h} className={clsx('px-3 py-2 font-medium', i === 3 ? 'text-right' : 'text-left')}
+                  style={{ color: 'var(--color-text-faint)' }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {paperDeps.map((dep: Deployment) => (
+              <tr key={dep.id} className="border-b" style={{ borderColor: 'var(--color-border)' }}>
+                <td className="px-3 py-2">
+                  <div style={{ color: 'var(--color-text-primary)' }}>{dep.strategy_version_id?.slice(0, 12)}…</div>
+                  <div className="font-mono text-[10px]" style={{ color: 'var(--color-text-faint)' }}>{dep.id.slice(0, 10)}…</div>
+                </td>
+                <td className="px-3 py-2">
+                  <span className={clsx('px-1.5 py-0.5 rounded text-[10px] border', {
+                    'bg-emerald-950/40 text-emerald-400 border-emerald-800/50': dep.status === 'running',
+                    'bg-amber-950/40 text-amber-400 border-amber-800/50': dep.status === 'paused',
+                    'border-gray-700 text-gray-400 bg-gray-800/40': dep.status === 'pending',
+                  })}>{dep.status}</span>
+                </td>
+                <td className="px-3 py-2 font-mono text-[10px]" style={{ color: 'var(--color-text-muted)' }}>
+                  {(dep as any).started_at?.slice(0, 10) ?? '—'}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <div className="flex items-center gap-2 justify-end">
+                    <button className="text-xs px-2 py-1 rounded border transition-colors"
+                      style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}
+                      onClick={() => navigate('/deployments')}>
+                      Details
+                    </button>
+                    <button className="btn-primary text-xs px-2 py-1 flex items-center gap-1"
+                      onClick={() => setPromoteDep(dep)}>
+                      <ArrowRight size={11} /> Promote to Live
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {promoteDep && <PromoteToLiveModal dep={promoteDep} onClose={() => setPromoteDep(null)} />}
+    </div>
+  )
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+
+export function OptimizationLab() {
+  const [tab, setTab] = useState<LabTab>('results')
+
+  return (
+    <div className="max-w-5xl mx-auto space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-sm font-semibold" style={{ color: 'var(--color-text-primary)' }}>Optimization Lab</h1>
+          <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-faint)' }}>
+            Backtest → select winners → paper deploy → promote best performer
+          </p>
+        </div>
+        <Link to="/backtest" className="btn-primary text-xs flex items-center gap-1.5">
+          <Rocket size={12} /> New Backtest
+        </Link>
+      </div>
+
+      {/* Pipeline breadcrumb */}
+      <div className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--color-text-faint)' }}>
+        {['Run Backtests', 'Results & Select', 'Deploy to Paper', 'Monitor & Promote'].map((step, i, arr) => (
+          <React.Fragment key={step}>
+            <span className="px-1.5 py-0.5 rounded"
+              style={{ backgroundColor: i === 0 ? 'color-mix(in srgb, var(--color-accent) 12%, transparent)' : undefined,
+                       color: i === 0 ? 'var(--color-accent)' : 'var(--color-text-faint)' }}>
+              {step}
+            </span>
+            {i < arr.length - 1 && <ArrowRight size={10} />}
+          </React.Fragment>
+        ))}
+      </div>
 
       {/* Tab bar */}
-      <div className="flex gap-0.5 bg-gray-900 rounded p-0.5 border border-gray-800">
+      <div className="flex gap-0.5 rounded p-0.5 border" style={{ backgroundColor: 'var(--color-bg-card)', borderColor: 'var(--color-border)' }}>
         {TABS.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={clsx(
-              'flex items-center gap-1.5 px-3 py-1.5 rounded text-xs transition-colors flex-1 justify-center',
-              tab === t.id
-                ? 'bg-gray-800 text-gray-200 font-medium'
-                : 'text-gray-500 hover:text-gray-300',
-            )}
-          >
-            {t.icon}
-            {t.label}
+          <button key={t.id} onClick={() => setTab(t.id)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs transition-colors flex-1 justify-center"
+            style={tab === t.id
+              ? { backgroundColor: 'var(--color-bg-hover)', color: 'var(--color-text-primary)', fontWeight: 600 }
+              : { color: 'var(--color-text-faint)' }}>
+            {t.icon} {t.label}
           </button>
         ))}
       </div>
 
-      {/* Tab content */}
       <div className="min-h-[300px]">
-        {tab === 'comparison' && <ComparisonTable />}
-        {tab === 'treemap' && <WeightTreemap weights={SAMPLE_WEIGHTS} />}
-        {tab === 'independence' && <SignalIndependencePanel programs={['Alpha Momentum', 'Beta MeanRev', 'Gamma Position']} />}
-        {tab === 'universe' && <UniverseScrubber />}
-        {tab === 'stress' && <StressPanel />}
+        {tab === 'results' && <ResultsTab />}
+        {tab === 'walkforward' && <WalkForwardTab />}
+        {tab === 'comparison' && <ComparisonTab />}
+        {tab === 'independence' && <IndependenceTab />}
+        {tab === 'stress' && <StressTab />}
       </div>
     </div>
   )

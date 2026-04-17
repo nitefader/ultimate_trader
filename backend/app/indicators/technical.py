@@ -185,12 +185,20 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     return (direction * volume).cumsum()
 
 
+def volume_sma(volume: pd.Series, period: int) -> pd.Series:
+    """Simple moving average for volume series."""
+    return volume.rolling(period).mean()
+
+
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add a standard set of technical indicators to the price DataFrame."""
     if df.empty:
         return df
 
     df = df.copy()
+    volume = df["volume"] if "volume" in df.columns else pd.Series(1, index=df.index)
+    # Precompute a common volume SMA used by strategies
+    df["volume_sma_20"] = volume_sma(volume, 20)
     df["sma_20"] = sma(df["close"], 20)
     df["ema_20"] = ema(df["close"], 20)
     df["bb_upper"] = bollinger_bands(df["close"]).loc[:, "bb_upper"]

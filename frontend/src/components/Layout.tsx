@@ -3,7 +3,8 @@ import { NavLink, Outlet, useOutlet, Link } from 'react-router-dom'
 import {
   BarChart2, Database, Layers,
   Monitor, Shield, TrendingUp, Zap, Calendar,
-  Activity, Key, Radio, Server, Target, FlaskConical, Palette, CandlestickChart,
+  Activity, Key, Radio, Server, Target, FlaskConical, Palette, CandlestickChart, PlayCircle,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { KillSwitch } from './KillSwitch'
@@ -32,6 +33,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/runs', label: 'Run History', icon: BarChart2 },
       { to: '/lab', label: 'Optim. Lab', icon: FlaskConical },
       { to: '/charts', label: 'Chart Lab', icon: CandlestickChart },
+      { to: '/simulation', label: 'Sim Lab', icon: PlayCircle },
       { to: '/watchlists', label: 'Watchlists', icon: Layers },
     ],
   },
@@ -58,6 +60,13 @@ const NAV_GROUPS: NavGroup[] = [
 
 export function Layout() {
   const [showKillSwitchWarning, setShowKillSwitchWarning] = React.useState(false)
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return typeof window !== 'undefined' && localStorage.getItem('ultratrader.sidebar_collapsed') === '1'
+    } catch {
+      return false
+    }
+  })
 
   useEffect(() => {
     const wasKilled = localStorage.getItem('ultratrader.kill_switch_active') === '1'
@@ -65,6 +74,15 @@ export function Layout() {
       setShowKillSwitchWarning(true)
     }
   }, [])
+
+  // Persist collapsed state
+  useEffect(() => {
+    try {
+      localStorage.setItem('ultratrader.sidebar_collapsed', collapsed ? '1' : '0')
+    } catch {
+      // ignore
+    }
+  }, [collapsed])
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ backgroundColor: 'var(--color-bg-page)' }}>
@@ -85,18 +103,38 @@ export function Layout() {
       )}
 
       {/* Sidebar */}
-      <aside className="w-56 flex-shrink-0 flex flex-col" style={{ backgroundColor: 'var(--color-bg-card)', borderRight: '1px solid var(--color-border)' }}>
+      <aside
+        className={clsx(collapsed ? 'w-14' : 'w-56', 'flex-shrink-0 flex flex-col')}
+        style={{ backgroundColor: 'var(--color-bg-card)', borderRight: '1px solid var(--color-border)', transition: 'width 180ms ease' }}
+      >
         {/* Logo */}
-        <div className="px-4 py-5" style={{ borderBottom: '1px solid var(--color-border)' }}>
-          <div className="font-bold text-lg tracking-tight" style={{ color: 'var(--color-accent)' }}>UltraTrader</div>
-          <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>2026 Edition</div>
+        <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--color-border)' }}>
+          <div className="flex items-center gap-2">
+            <div className="font-bold tracking-tight" style={{ color: 'var(--color-accent)', fontSize: collapsed ? 16 : undefined }}>
+              {collapsed ? 'UT' : 'UltraTrader'}
+            </div>
+            {!collapsed && (
+              <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>2026 Edition</div>
+            )}
+          </div>
+          <div>
+            <button
+              onClick={() => setCollapsed(c => !c)}
+              aria-pressed={collapsed}
+              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              className="p-1 rounded hover:bg-gray-800/30"
+              title={collapsed ? 'Expand' : 'Collapse'}
+            >
+              {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+            </button>
+          </div>
         </div>
 
         {/* Nav */}
         <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-4">
           {NAV_GROUPS.map(({ group, items }) => (
             <div key={group}>
-              {group && (
+              {group && !collapsed && (
                 <div className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest select-none" style={{ color: 'var(--color-text-faint)' }}>
                   {group}
                 </div>
@@ -107,12 +145,18 @@ export function Layout() {
                     key={to}
                     to={to}
                     end={end}
+                    title={collapsed ? label : undefined}
+                    aria-label={label}
                     className={({ isActive }) =>
-                      clsx('flex items-center gap-2.5 px-3 py-1.5 rounded text-sm transition-colors', isActive ? 'nav-active' : 'nav-idle')
+                      clsx(
+                        'flex items-center gap-2.5 py-1.5 rounded text-sm transition-colors',
+                        isActive ? 'nav-active' : 'nav-idle',
+                        collapsed ? 'justify-center px-0' : 'px-3'
+                      )
                     }
                   >
-                    <Icon size={15} />
-                    {label}
+                    <Icon size={collapsed ? 18 : 15} />
+                    {!collapsed && label}
                   </NavLink>
                 ))}
               </div>
@@ -121,10 +165,10 @@ export function Layout() {
         </nav>
 
         {/* Theme picker */}
-        <ThemePicker />
+        <ThemePicker collapsed={collapsed} />
 
         <div className="px-3 pb-3 pt-2" style={{ borderTop: '1px solid var(--color-border)' }}>
-          <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>v1.0.0</div>
+          <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>{collapsed ? 'v1' : 'v1.0.0'}</div>
         </div>
       </aside>
 
@@ -228,10 +272,10 @@ const BacktestRunningIndicator = memo(function BacktestRunningIndicator() {
 const StableOutlet = memo(function StableOutlet() {
   const outlet = useOutlet()
 
-  return <main className="flex-1 overflow-y-auto p-4" style={{ backgroundColor: 'var(--color-bg-page)' }}>{outlet}</main>
+  return <main className="flex-1 overflow-y-auto p-4 min-h-0" style={{ backgroundColor: 'var(--color-bg-page)' }}>{outlet}</main>
 })
 
-function ThemePicker() {
+function ThemePicker({ collapsed = false }: { collapsed?: boolean }) {
   const { theme, setTheme } = useTheme()
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -254,8 +298,8 @@ function ThemePicker() {
         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '')}
       >
         <Palette size={13} />
-        <span>Theme</span>
-        <span className="ml-auto capitalize text-[11px]" style={{ color: 'var(--color-text-faint)' }}>{theme}</span>
+        {!collapsed && <span>Theme</span>}
+        {!collapsed && <span className="ml-auto capitalize text-[11px]" style={{ color: 'var(--color-text-faint)' }}>{theme}</span>}
       </button>
 
       {open && (

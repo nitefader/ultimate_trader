@@ -4,6 +4,7 @@ import { Plus, Power, RotateCcw, Activity, TrendingUp, DollarSign, Target, Refre
 import { useNavigate, Link } from 'react-router-dom'
 import { accountsApi, deploymentsApi } from '../api/accounts'
 import { servicesApi } from '../api/services'
+import { strategiesApi } from '../api/strategies'
 import { ModeIndicator } from '../components/ModeIndicator'
 import { ConfirmationModal } from '../components/ConfirmationModal'
 import { CreateAccountModal } from '../components/CreateAccountModal'
@@ -534,16 +535,17 @@ function AccountCard({ account, onHalt, onResume, onEdit, onRefresh, onDelete, o
   )
 }
 
-function DeploymentTab({ deployment, isActive, onClick }: {
+function DeploymentTab({ deployment, isActive, onClick, strategyName }: {
   deployment: Deployment
   isActive: boolean
   onClick: () => void
+  strategyName?: string
 }) {
   return (
     <button
       onClick={onClick}
       className={clsx(
-        'px-4 py-2 text-sm font-medium border-b-2 transition-colors',
+        'px-4 py-2 text-sm font-medium border-b-2 transition-colors whitespace-nowrap',
         isActive
           ? 'border-sky-400 text-sky-400'
           : 'border-transparent text-gray-400 hover:text-gray-300 hover:border-gray-600'
@@ -551,17 +553,18 @@ function DeploymentTab({ deployment, isActive, onClick }: {
     >
       <div className="flex items-center gap-2">
         <ModeIndicator mode={deployment.mode} />
-        <span>{deployment.strategy_id.slice(0, 8)}...</span>
+        <span>{strategyName ?? deployment.strategy_id.slice(0, 8)}</span>
         {deployment.status === 'running' && <Activity size={12} className="text-green-400" />}
       </div>
     </button>
   )
 }
 
-function DeploymentMonitor({ deployment, account, onStop }: {
+function DeploymentMonitor({ deployment, account, onStop, strategyName }: {
   deployment: Deployment
   account?: Account
   onStop: (id: string) => void
+  strategyName?: string
 }) {
   const pausePolling = usePollingGate()
   const { data: positionsData = { positions: [] }, isLoading: positionsLoading, error: positionsError } = useQuery({
@@ -589,7 +592,7 @@ function DeploymentMonitor({ deployment, account, onStop }: {
 
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-semibold font-mono">{deployment.strategy_version_id.slice(0, 8)}...</h2>
+          <h2 className="text-lg font-semibold">{strategyName ?? deployment.strategy_id.slice(0, 8)}</h2>
           <div className="flex items-center gap-2 mt-1">
             <ModeIndicator mode={deployment.mode} />
             <span className="text-sm text-gray-400">Status: {deployment.status}</span>
@@ -861,6 +864,16 @@ export function AccountMonitor() {
       qc.invalidateQueries({ queryKey: ['accounts'] })
     })
   }, [accounts])
+
+  const { data: strategies = [] } = useQuery({
+    queryKey: ['strategies'],
+    queryFn: strategiesApi.list,
+    staleTime: 60_000,
+  })
+
+  const strategyNameMap = React.useMemo(() =>
+    Object.fromEntries(strategies.map(s => [s.id, s.name])),
+  [strategies])
 
   const runningDeployments = deployments.filter(d => d.status === 'running')
   const activeDeploymentAccountIds = new Set(runningDeployments.map(d => d.account_id).filter(Boolean))
@@ -1238,6 +1251,7 @@ export function AccountMonitor() {
                     deployment={deployment}
                     isActive={activeTab === deployment.id}
                     onClick={() => setActiveTab(deployment.id)}
+                    strategyName={strategyNameMap[deployment.strategy_id]}
                   />
                 ))}
               </div>
@@ -1252,6 +1266,7 @@ export function AccountMonitor() {
                   deployment={dep}
                   account={acc}
                   onStop={stopDeploymentMutation.mutate}
+                  strategyName={strategyNameMap[dep.strategy_id]}
                 />
               )
             })()}

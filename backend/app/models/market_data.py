@@ -27,6 +27,8 @@ class DataInventory(Base):
 
     # Freshness
     last_updated: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # When the dataset file was downloaded to local cache (UTC)
+    downloaded_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     is_complete: Mapped[bool] = mapped_column(default=False)
 
     # Storage path (parquet file in CACHE_DIR)

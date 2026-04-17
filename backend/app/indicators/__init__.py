@@ -1,7 +1,7 @@
 from app.indicators.technical import (
     sma, ema, wma, vwma, atr, true_range, bollinger_bands,
     rsi, macd, stochastic, adx, pivot_points, chandelier_exit,
-    swing_highs_lows, keltner_channel, obv,
+    swing_highs_lows, keltner_channel, obv, volume_sma,
 )
 from app.indicators.fvg import detect_fvgs, FairValueGap, update_fvg_state, get_nearest_fvg
 from app.indicators.structure import detect_swing_points, classify_structure, StructureState, SwingPoint
@@ -12,7 +12,7 @@ __all__ = [
     "sma", "ema", "wma", "vwma", "atr", "true_range",
     "bollinger_bands", "rsi", "macd", "stochastic", "adx",
     "pivot_points", "chandelier_exit", "swing_highs_lows",
-    "keltner_channel", "obv",
+    "keltner_channel", "obv", "volume_sma",
     "detect_fvgs", "FairValueGap", "update_fvg_state", "get_nearest_fvg",
     "detect_swing_points", "classify_structure", "StructureState", "SwingPoint",
     "SupportResistanceEngine", "SRZone",

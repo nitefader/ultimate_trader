@@ -94,3 +94,45 @@ def test_unsupported_indicator_reference_raises_clear_error():
 
     with pytest.raises(ValueError, match="unsupported indicator reference"):
         engine.run_backtest({"SPY": df})
+
+
+def test_volume_sma_indicator_generates_trade():
+    df = _make_breakout_df()
+    config = {
+        "entry": {
+            "directions": ["long"],
+            "logic": "all_of",
+            "conditions": [
+                {
+                    "type": "single",
+                    "left": {"field": "close"},
+                    "op": ">",
+                    "right": {"indicator": "high_3"},
+                },
+                {
+                    "type": "single",
+                    "left": {"indicator": "volume"},
+                    "op": ">",
+                    "right": {"indicator": "volume_sma_3", "mult": 1.1},
+                },
+            ],
+        },
+        "stop_loss": {"method": "fixed_pct", "value": 2.0},
+        "targets": [{"method": "r_multiple", "r": 1.0}],
+        "position_sizing": {"method": "fixed_shares", "shares": 10},
+        "tick_size": 0.01,
+    }
+
+    engine = BacktestEngine(
+        config,
+        {
+            "symbols": ["SPY"],
+            "timeframe": "1d",
+            "start_date": str(df.index[0].date()),
+            "end_date": str(df.index[-1].date()),
+            "initial_capital": 100_000,
+        },
+    )
+
+    result = engine.run_backtest({"SPY": df})
+    assert len(result.trades) >= 1

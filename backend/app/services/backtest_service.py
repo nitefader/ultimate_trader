@@ -1021,6 +1021,10 @@ async def launch_backtest(
         await db.flush()
 
     try:
+        # Backtester has NO date clamping — use whatever range the user requested.
+        # If you have the data, you should be able to test it. Only warn on very large requests.
+        from app.services.data_limits import check_bar_count
+
         # Load data
         data = {}
         missing_symbols: list[str] = []
@@ -1061,6 +1065,7 @@ async def launch_backtest(
                 ),
             )
             if df is not None and len(df) > 0:
+                check_bar_count(symbol, len(df), run.timeframe, mode="backtest")
                 data[symbol] = df
             else:
                 logger.warning(f"No data for {symbol}")

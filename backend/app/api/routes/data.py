@@ -14,8 +14,10 @@ from app.database import get_db
 from app.services.market_data_service import (
     cache_path_for,
     fetch_market_data,
-    get_inventory as get_inventory_entry,
-    list_inventory as list_inventory_entries,
+    list_inventory_db as list_inventory_entries,
+    get_inventory_db as get_inventory_entry,
+    upsert_inventory_db as upsert_inventory,
+    delete_inventory_db as delete_inventory_db,
     search_symbols as search_market_symbols,
 )
 from app.services.market_metadata_service import (
@@ -195,6 +197,10 @@ async def get_bars_with_indicators(
                     s = obv(df["close"], df["volume"])
                     computed["obv"] = [round(v, 0) if pd.notna(v) else None for v in s]
 
+                elif base == "volume_sma":
+                    s = df["volume"].rolling(p or 20).mean()
+                    computed[spec] = [round(v, 4) if pd.notna(v) else None for v in s]
+
                 elif base == "sar":
                     sdf = parabolic_sar(df["high"], df["low"])
                     computed["sar"] = [round(v, 4) if pd.notna(v) else None for v in sdf["sar"]]
@@ -219,9 +225,9 @@ async def get_bars_with_indicators(
             except Exception:
                 pass  # Skip indicators that fail (e.g. missing columns for intraday)
 
-        _idx = pd.to_datetime(df.index)
-        if _idx.tz is not None:
-            _idx = _idx.tz_convert("UTC").tz_localize(None)
+        # Ensure a tz-naive UTC index for serialization
+        _idx = pd.to_datetime(df.index, utc=True)
+        _idx = _idx.tz_convert(None)
         idx = _idx
         bars = []
         for ts, row in zip(idx, df.itertuples(index=False)):
@@ -272,9 +278,9 @@ async def get_cached_bars(
             return {"symbol": symbol, "timeframe": timeframe, "provider": provider, "bars": []}
 
         df = df.sort_index().tail(limit)
-        _idx2 = pd.to_datetime(df.index)
-        if _idx2.tz is not None:
-            _idx2 = _idx2.tz_convert("UTC").tz_localize(None)
+        # Ensure a tz-naive UTC index for serialization
+        _idx2 = pd.to_datetime(df.index, utc=True)
+        _idx2 = _idx2.tz_convert(None)
         idx = _idx2
 
         bars = []
@@ -316,14 +322,15 @@ async def list_providers():
 
 
 @router.get("/inventory")
-async def list_inventory():
-    """List all cached data (from all providers)."""
-    return {"items": list_inventory_entries()}
+async def list_inventory(db: AsyncSession = Depends(get_db)):
+    """List all cached data (from all providers) — DB-backed."""
+    items = await list_inventory_entries(db)
+    return {"items": items}
 
 
 @router.get("/inventory/{symbol}/{timeframe}")
-async def get_symbol_inventory(symbol: str, timeframe: str, provider: str = "yfinance"):
-    info = get_inventory_entry(symbol, timeframe, provider)
+async def get_symbol_inventory(symbol: str, timeframe: str, provider: str = "yfinance", db: AsyncSession = Depends(get_db)):
+    info = await get_inventory_entry(db, symbol, timeframe, provider)
     if not info:
         raise HTTPException(
             status_code=404,
@@ -333,7 +340,7 @@ async def get_symbol_inventory(symbol: str, timeframe: str, provider: str = "yfi
 
 
 @router.post("/fetch")
-async def fetch_data(body: dict[str, Any]):
+async def fetch_data(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
     """
     Download and cache OHLCV data for a symbol.
 
@@ -357,6 +364,13 @@ async def fetch_data(body: dict[str, Any]):
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol required")
 
+    # Smart date clamping — same limits as backtest and simulation
+    from app.services.data_limits import clamp_date_range, select_provider, check_bar_count
+    effective_start, effective_end, was_clamped = clamp_date_range(start, end, timeframe, mode="download")
+    has_alpaca = bool(body.get("api_key") and body.get("secret_key"))
+    if provider == "auto":
+        provider = select_provider(timeframe, "auto", has_alpaca)
+
     try:
         api_key = body.get("api_key", "") if provider == "alpaca" else ""
         secret_key = body.get("secret_key", "") if provider == "alpaca" else ""
@@ -365,8 +379,8 @@ async def fetch_data(body: dict[str, Any]):
             lambda: fetch_market_data(
                 symbol=symbol,
                 timeframe=timeframe,
-                start=start,
-                end=end,
+                start=effective_start,
+                end=effective_end,
                 provider=provider,
                 adjusted=True,
                 force_download=force,
@@ -375,6 +389,25 @@ async def fetch_data(body: dict[str, Any]):
             ),
         )
 
+        check_bar_count(symbol, len(df), timeframe, mode="download")
+
+        # Persist inventory record in DB
+        try:
+            cache_file = _cache_file_for(symbol, timeframe, provider)
+            await upsert_inventory(
+                db,
+                symbol=symbol,
+                timeframe=timeframe,
+                provider=provider,
+                file_path=str(cache_file),
+                first_date=str(df.index[0].date()),
+                last_date=str(df.index[-1].date()),
+                bar_count=len(df),
+            )
+        except Exception:
+            # Non-fatal — inventory DB update should not block the API response
+            pass
+
         return {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -382,6 +415,8 @@ async def fetch_data(body: dict[str, Any]):
             "bar_count": len(df),
             "first_date": str(df.index[0].date()),
             "last_date": str(df.index[-1].date()),
+            "date_clamped": was_clamped,
+            "effective_start": effective_start,
         }
     except HTTPException:
         raise
@@ -390,8 +425,10 @@ async def fetch_data(body: dict[str, Any]):
 
 
 @router.post("/fetch-many")
-async def fetch_many(body: dict[str, Any]):
+async def fetch_many(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
     """Download multiple symbols at once."""
+    from app.services.data_limits import clamp_date_range, select_provider, check_bar_count
+
     symbols = [s.upper() for s in body.get("symbols", [])]
     timeframe = body.get("timeframe", "1d")
     start = body.get("start", "2020-01-01")
@@ -399,6 +436,11 @@ async def fetch_many(body: dict[str, Any]):
     provider = body.get("provider", "yfinance")
     api_key = body.get("api_key", "")
     secret_key = body.get("secret_key", "")
+
+    # Smart date clamping
+    effective_start, effective_end, _ = clamp_date_range(start, end, timeframe)
+    if provider == "auto":
+        provider = select_provider(timeframe, "auto", bool(api_key and secret_key))
 
     results = []
     for symbol in symbols:
@@ -408,8 +450,8 @@ async def fetch_many(body: dict[str, Any]):
                 lambda symbol=symbol: fetch_market_data(
                     symbol=symbol,
                     timeframe=timeframe,
-                    start=start,
-                    end=end,
+                    start=effective_start,
+                    end=effective_end,
                     provider=provider,
                     adjusted=True,
                     force_download=False,
@@ -417,6 +459,22 @@ async def fetch_many(body: dict[str, Any]):
                     secret_key=secret_key,
                 ),
             )
+            # Upsert DB inventory for each successful fetch
+            try:
+                cache_file = _cache_file_for(symbol, timeframe, provider)
+                await upsert_inventory(
+                    db,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    provider=provider,
+                    file_path=str(cache_file),
+                    first_date=str(df.index[0].date()),
+                    last_date=str(df.index[-1].date()),
+                    bar_count=len(df),
+                )
+            except Exception:
+                pass
+
             results.append({"symbol": symbol, "status": "ok", "bar_count": len(df)})
         except Exception as e:
             results.append({"symbol": symbol, "status": "error", "error": str(e)})
@@ -425,7 +483,7 @@ async def fetch_many(body: dict[str, Any]):
 
 
 @router.delete("/cache/{symbol}/{timeframe}")
-async def delete_cache(symbol: str, timeframe: str, provider: str = "yfinance"):
+async def delete_cache(symbol: str, timeframe: str, provider: str = "yfinance", db: AsyncSession = Depends(get_db)):
     """Delete a cached dataset."""
     symbol = symbol.upper()
     cache_file = _cache_file_for(symbol, timeframe, provider)
@@ -435,6 +493,10 @@ async def delete_cache(symbol: str, timeframe: str, provider: str = "yfinance"):
             detail=f"No cache file found for {symbol}/{timeframe} (provider={provider})"
         )
     cache_file.unlink()
+    try:
+        await delete_inventory_db(db, symbol, timeframe, provider)
+    except Exception:
+        pass
     return {"deleted": True, "symbol": symbol, "timeframe": timeframe, "provider": provider}
 
 
@@ -595,7 +657,7 @@ async def set_watchlist_membership_state_route(
         membership = await set_watchlist_membership_state(
             db,
             watchlist_id,
-            symbol,
+                    symbol,
             state=requested_state,
             reason=body.get("reason"),
         )

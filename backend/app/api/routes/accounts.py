@@ -101,6 +101,11 @@ async def _refresh_alpaca_balances(accounts: list[Account], db: AsyncSession) ->
 
     if updated:
         await db.commit()
+        # Refresh all updated accounts so their attributes are not expired
+        # when _fmt accesses them after the commit (expired attributes trigger
+        # a synchronous lazy-load which raises MissingGreenlet in async context).
+        for account in refresh_accounts:
+            await db.refresh(account)
 
 
 async def _get_account_activity(account: Account, db: AsyncSession) -> dict[str, Any]:
@@ -160,14 +165,18 @@ async def list_accounts(
     include_activity: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Account).order_by(Account.created_at))
-    accounts = result.scalars().all()
-    if refresh:
-        await _refresh_alpaca_balances(accounts, db)
-    if include_activity:
-        activities = await asyncio.gather(*[_get_account_activity(a, db) for a in accounts])
-        return [_fmt(a, activity=activity) for a, activity in zip(accounts, activities)]
-    return [_fmt(a) for a in accounts]
+    try:
+        result = await db.execute(select(Account).order_by(Account.created_at))
+        accounts = result.scalars().all()
+        if refresh:
+            await _refresh_alpaca_balances(accounts, db)
+        if include_activity:
+            activities = await asyncio.gather(*[_get_account_activity(a, db) for a in accounts])
+            return [_fmt(a, activity=activity) for a, activity in zip(accounts, activities)]
+        return [_fmt(a) for a in accounts]
+    except Exception as exc:
+        logger.exception("Error in list_accounts: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to list accounts") from exc
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -248,10 +257,16 @@ async def create_account(body: dict[str, Any], db: AsyncSession = Depends(get_db
 
 @router.get("/{account_id}")
 async def get_account(account_id: str, db: AsyncSession = Depends(get_db)):
-    a = await db.get(Account, account_id)
-    if not a:
-        raise HTTPException(status_code=404, detail="Account not found")
-    return _fmt(a, activity=await _get_account_activity(a, db))
+    try:
+        a = await db.get(Account, account_id)
+        if not a:
+            raise HTTPException(status_code=404, detail="Account not found")
+        return _fmt(a, activity=await _get_account_activity(a, db))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error in get_account for %s: %s", account_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to retrieve account") from exc
 
 
 @router.put("/{account_id}")
@@ -680,33 +695,37 @@ async def get_account_orders(
 # ── Formatting ────────────────────────────────────────────────────────────────
 
 def _fmt(a: Account, activity: dict[str, Any] | None = None) -> dict:
-    data = {
-        "id": a.id,
-        "name": a.name,
-        "mode": a.mode,
-        "broker": a.broker,
-        "initial_balance": a.initial_balance,
-        "current_balance": a.current_balance,
-        "equity": a.equity,
-        "unrealized_pnl": a.unrealized_pnl,
-        "leverage": a.leverage,
-        "max_position_size_pct": a.max_position_size_pct,
-        "max_daily_loss_pct": a.max_daily_loss_pct,
-        "max_drawdown_lockout_pct": a.max_drawdown_lockout_pct,  # required by AccountMonitor
-        "max_open_positions": a.max_open_positions,
-        "is_connected": a.is_connected,
-        "is_enabled": a.is_enabled,
-        "is_killed": a.is_killed,
-        "kill_reason": a.kill_reason,
-        "allowed_symbols": a.allowed_symbols or [],
-        "blocked_symbols": a.blocked_symbols or [],
-        "data_service_id": a.data_service_id,
-        "created_at": a.created_at.isoformat() if a.created_at else None,
-        "updated_at": a.updated_at.isoformat() if a.updated_at else None,
-    }
-    if activity is not None:
-        data["activity"] = activity
-    return data
+    try:
+        data = {
+            "id": a.id,
+            "name": a.name,
+            "mode": a.mode,
+            "broker": a.broker,
+            "initial_balance": a.initial_balance,
+            "current_balance": a.current_balance,
+            "equity": a.equity,
+            "unrealized_pnl": a.unrealized_pnl,
+            "leverage": a.leverage,
+            "max_position_size_pct": a.max_position_size_pct,
+            "max_daily_loss_pct": a.max_daily_loss_pct,
+            "max_drawdown_lockout_pct": getattr(a, "max_drawdown_lockout_pct", 0.10),
+            "max_open_positions": a.max_open_positions,
+            "is_connected": a.is_connected,
+            "is_enabled": a.is_enabled,
+            "is_killed": a.is_killed,
+            "kill_reason": a.kill_reason,
+            "allowed_symbols": a.allowed_symbols or [],
+            "blocked_symbols": a.blocked_symbols or [],
+            "data_service_id": a.data_service_id,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "updated_at": a.updated_at.isoformat() if a.updated_at else None,
+        }
+        if activity is not None:
+            data["activity"] = activity
+        return data
+    except Exception as exc:
+        logger.exception("Error formatting account %s: %s", getattr(a, "id", "unknown"), exc)
+        raise
 
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────

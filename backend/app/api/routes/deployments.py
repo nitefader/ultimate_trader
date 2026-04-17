@@ -246,17 +246,33 @@ async def get_deployment_trades(
 
 
 def _fmt_trade(t: DeploymentTrade) -> dict:
+    qty = float(t.quantity or 0)
+    entry_price = float(t.entry_price or 0)
+    current_price = float(t.current_price or 0)
+    market_value = qty * current_price if current_price else None
+    unrealized_pl = float(t.unrealized_pnl) if t.unrealized_pnl is not None else None
+    unrealized_plpc = (unrealized_pl / (qty * entry_price)) if (unrealized_pl is not None and qty and entry_price) else None
     return {
         "id": t.id,
         "symbol": t.symbol,
         "direction": t.direction,
+        # Alpaca-compatible field names (used by AccountMonitor positions table)
+        "qty": qty,
+        "side": t.direction,
+        "avg_entry_price": entry_price if entry_price else None,
+        "current_price": current_price if current_price else None,
+        "market_value": market_value,
+        "cost_basis": qty * entry_price if (qty and entry_price) else None,
+        "unrealized_pl": unrealized_pl,
+        "unrealized_plpc": unrealized_plpc,
+        "unrealized_intraday_pl": None,
+        "change_today": None,
+        # Paper-specific fields (used by DeploymentManager trades table)
+        "entry_price": entry_price,
+        "quantity": qty,
         "entry_time": t.entry_time.isoformat() if t.entry_time else None,
-        "entry_price": t.entry_price,
-        "quantity": t.quantity,
         "initial_stop": t.initial_stop,
         "current_stop": t.current_stop,
-        "current_price": t.current_price,
-        "unrealized_pnl": t.unrealized_pnl,
         "exit_time": t.exit_time.isoformat() if t.exit_time else None,
         "exit_price": t.exit_price,
         "exit_reason": t.exit_reason,

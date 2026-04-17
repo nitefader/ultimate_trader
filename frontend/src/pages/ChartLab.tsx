@@ -5,7 +5,7 @@
  * Volume pane: bar chart
  * Oscillator pane: RSI, MACD, Stochastic, ADX, ATR, IBS, Z-score, BT_Snipe, OBV
  */
-import React, { useCallback, useMemo, useState } from 'react'
+import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   ResponsiveContainer,
@@ -18,10 +18,13 @@ import {
   CartesianGrid,
   Tooltip,
   ReferenceLine,
+  ReferenceArea,
   Cell,
+  Customized,
 } from 'recharts'
 import { Activity, ChevronDown, ChevronUp, Settings, X } from 'lucide-react'
 import api from '../api/client'
+import { strategiesApi } from '../api/strategies'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -130,60 +133,108 @@ function fmtDate(iso: string, tf: string): string {
   return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
 
-// ── Candlestick custom bar ────────────────────────────────────────────────────
+// ── Candlestick layer (via Recharts <Customized>) ─────────────────────────────
+// Using Customized gives us direct access to xAxisMap/yAxisMap scales, which
+// is the only reliable way to convert price→pixel in a ComposedChart.
 
-function CandleBar(props: any) {
-  const { x, y, width, payload } = props
-  if (!payload) return null
-  const { open, high, low, close } = payload
-  if (open == null || close == null) return null
+function CandlestickLayer(props: any) {
+  const { xAxisMap, yAxisMap, data } = props
+  if (!data?.length) return null
 
-  const bullish = close >= open
-  const fill = bullish ? 'var(--color-success)' : 'var(--color-danger)'
-  const strokeColor = bullish ? 'var(--color-success)' : 'var(--color-danger)'
+  const xAxis = xAxisMap && Object.values(xAxisMap)[0] as any
+  const yAxis = yAxisMap && Object.values(yAxisMap)[0] as any
+  if (!yAxis?.scale) return null
 
-  // y-axis domain is set by the price range — we need to convert price→pixel
-  // Recharts provides yAxis via the chart context; we get it through the shape props
-  const { yAxis } = props
-  if (!yAxis) return null
-  const { scale } = yAxis
-  if (!scale) return null
+  const yScale = yAxis.scale
+  const xScale = xAxis?.scale
 
-  const yHigh  = scale(high)
-  const yLow   = scale(low)
-  const yOpen  = scale(open)
-  const yClose = scale(close)
+  // Compute a reasonable slot width for each candle. Prefer bandwidth()
+  // when using a band scale; otherwise derive slot width from adjacent
+  // pixel positions produced by the continuous xScale (time → px).
+  let slotWidth: number
+  if (xScale?.bandwidth) {
+    slotWidth = xScale.bandwidth()
+  } else {
+    // Try to compute median difference between consecutive x positions
+    try {
+      const xs: number[] = data.map((d: any) => {
+        const px = xScale ? xScale(d.tms) : NaN
+        return typeof px === 'number' && !isNaN(px) ? px : NaN
+      }).filter((v: number) => !isNaN(v))
+      if (xs.length >= 2) {
+        const diffs = [] as number[]
+        for (let i = 1; i < xs.length; i++) diffs.push(Math.abs(xs[i] - xs[i - 1]))
+        diffs.sort((a, b) => a - b)
+        slotWidth = diffs[Math.floor(diffs.length / 2)]
+      } else {
+        const plotWidth = xAxis?.width ?? 600
+        slotWidth = plotWidth / data.length
+      }
+    } catch (e) {
+      const plotWidth = xAxis?.width ?? 600
+      slotWidth = plotWidth / data.length
+    }
+  }
 
-  const bodyTop    = Math.min(yOpen, yClose)
-  const bodyBottom = Math.max(yOpen, yClose)
-  const bodyH      = Math.max(bodyBottom - bodyTop, 1)
-  const cx         = x + width / 2
+  const bw = Math.max(slotWidth - 2, 1)
+  const xOffset = xAxis?.x ?? 0
 
   return (
     <g>
-      {/* Wick */}
-      <line x1={cx} x2={cx} y1={yHigh} y2={yLow} stroke={strokeColor} strokeWidth={1} />
-      {/* Body */}
-      <rect
-        x={x + 1}
-        y={bodyTop}
-        width={Math.max(width - 2, 1)}
-        height={bodyH}
-        fill={fill}
-        stroke={strokeColor}
-        strokeWidth={0.5}
-        fillOpacity={0.85}
-      />
+      {data.map((d: any, i: number) => {
+        const { open, high, low, close } = d
+        if (open == null || close == null || high == null || low == null) return null
+
+        const bullish = close >= open
+        const color = bullish ? 'var(--color-success)' : 'var(--color-danger)'
+
+        // Compute pixel center for this candle. Prefer mapping the numeric
+        // timestamp through the xScale; fall back to index-based placement.
+        let cx: number | null = null
+        if (xScale?.bandwidth) {
+          // category/band scale (unlikely with numeric axis, but keep safe)
+          cx = xOffset + (xScale(d.t) ?? 0) + xScale.bandwidth() / 2
+        } else if (xScale) {
+          const px = xScale(d.tms)
+          if (typeof px === 'number' && !isNaN(px)) cx = px
+        }
+        if (cx == null) cx = xOffset + (i + 0.5) * slotWidth
+
+        const yH = yScale(high)
+        const yL = yScale(low)
+        const yO = yScale(open)
+        const yC = yScale(close)
+
+        const bodyTop = Math.min(yO, yC)
+        const bodyH = Math.max(Math.abs(yC - yO), 1)
+
+        return (
+          <g key={i}>
+            <line x1={cx} x2={cx} y1={yH} y2={yL} stroke={color} strokeWidth={1} />
+            <rect
+              x={cx - bw / 2}
+              y={bodyTop}
+              width={bw}
+              height={bodyH}
+              fill={color}
+              fillOpacity={0.85}
+              stroke={color}
+              strokeWidth={0.5}
+            />
+          </g>
+        )
+      })}
     </g>
   )
 }
 
 // ── Tooltip ───────────────────────────────────────────────────────────────────
 
-function ChartTooltip({ active, payload, label, activeIndicators }: any) {
+function ChartTooltip({ active, payload, label, activeIndicators, tf }: any) {
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   if (!d) return null
+  const labelStr = typeof label === 'number' ? fmtDate(new Date(label).toISOString(), tf ?? '1d') : label
 
   return (
     <div
@@ -195,7 +246,7 @@ function ChartTooltip({ active, payload, label, activeIndicators }: any) {
         minWidth: 160,
       }}
     >
-      <div className="font-semibold" style={{ color: 'var(--color-text-muted)' }}>{label}</div>
+      <div className="font-semibold" style={{ color: 'var(--color-text-muted)' }}>{labelStr}</div>
       {d.open != null && (
         <div className="grid grid-cols-2 gap-x-3 font-mono">
           <span style={{ color: 'var(--color-text-faint)' }}>O</span><span>{d.open?.toFixed(2)}</span>
@@ -232,6 +283,85 @@ export function ChartLab() {
   const [activeSpecs, setActiveSpecs] = useState<Set<string>>(new Set(['ema_20', 'rsi_14']))
   const [limit, setLimit] = useState(300)
   const [panelOpen, setPanelOpen] = useState(true)
+  const [chartType, setChartType] = useState<'candles' | 'line'>('candles')
+
+  // ── Zoom state ───────────────────────────────────────────────────────────────
+  // zoomWindow = [startIdx, endIdx] into `rows`; null = show all
+  const [zoomWindow, setZoomWindow] = useState<[number, number] | null>(null)
+  const [dragStart, setDragStart] = useState<number | null>(null)   // index where drag began (visible rows)
+  const [dragEnd, setDragEnd]     = useState<number | null>(null)   // index of current drag end (visible rows)
+  const isDragging = dragStart !== null
+
+  // Strategy-driven indicator auto-selection
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null)
+  const { data: strategies } = useQuery({ queryKey: ['strategies'], queryFn: () => strategiesApi.list() })
+  const { data: strategyDetail } = useQuery({
+    queryKey: ['strategy', selectedStrategyId],
+    queryFn: () => selectedStrategyId ? strategiesApi.get(selectedStrategyId) : Promise.resolve(null),
+    enabled: !!selectedStrategyId,
+  })
+
+  // Collect indicator specs from a strategy config recursively
+  function collectIndicators(obj: any, out = new Set<string>()) {
+    if (obj == null) return out
+    if (Array.isArray(obj)) {
+      obj.forEach((v) => collectIndicators(v, out))
+      return out
+    }
+    if (typeof obj === 'object') {
+      for (const [k, v] of Object.entries(obj)) {
+        if (k === 'indicator' && typeof v === 'string') out.add(v)
+        else if (typeof v === 'string') {
+          // match typical indicator tokens like rsi_14, ema_20, volume_sma_20
+          if (/^[a-z_]+_\d+$/.test(v) || /^[a-z_]+$/.test(v)) {
+            // avoid grabbing plain fields like 'timeframe' or 'symbols' by crude heuristic
+            if (!['timeframe', 'duration_mode', 'category'].includes(k)) out.add(v)
+          }
+        } else {
+          collectIndicators(v as any, out)
+        }
+      }
+    }
+    return out
+  }
+
+  // When a strategy is selected, auto-fill activeSpecs with its indicators
+  useEffect(() => {
+    if (!strategyDetail) return
+    const config = (strategyDetail as any).versions?.[0]?.config ?? (strategyDetail as any).config ?? strategyDetail
+    const set = collectIndicators(config)
+    if (set.size > 0) setActiveSpecs(new Set(Array.from(set)))
+  }, [strategyDetail])
+
+  const strategyIndicatorSet = useMemo(() => {
+    if (!strategyDetail) return new Set<string>()
+    const config = (strategyDetail as any).versions?.[0]?.config ?? (strategyDetail as any).config ?? strategyDetail
+    return collectIndicators(config)
+  }, [strategyDetail])
+
+  const visibleIndicatorGroups = useMemo(() => {
+    if (!strategyIndicatorSet || strategyIndicatorSet.size === 0) return INDICATOR_GROUPS
+    return INDICATOR_GROUPS.map(g => ({ group: g.group, items: g.items.filter(i => strategyIndicatorSet.has(i.spec) || (i.produces ?? []).some(p => strategyIndicatorSet.has(p))) })).filter(g => g.items.length > 0)
+  }, [strategyIndicatorSet])
+
+  // Build active indicator defs (include lightweight fallbacks for unknown specs)
+  const activeIndicators = useMemo(() => {
+    const defs: IndicatorDef[] = []
+    for (const spec of Array.from(activeSpecs)) {
+      const found = ALL_INDICATORS.find(i => i.spec === spec)
+      if (found) defs.push(found)
+      else {
+        // create a fallback definition
+        const pane: IndicatorDef['pane'] = /^(rsi|macd|stoch|zscore|ibs|obv|adx|atr|bt_snipe)/.test(spec) ? 'oscillator' : /volume|vwma|volume_sma/.test(spec) ? 'volume' : 'price'
+        const label = spec.replace(/_/g, ' ').toUpperCase()
+        defs.push({ spec, label, pane, color: '#94a3b8' })
+      }
+    }
+    return defs
+  }, [activeSpecs])
+
+  const priceIndicators  = activeIndicators.filter(i => i.pane === 'price')
+  const oscIndicators    = activeIndicators.filter(i => i.pane === 'oscillator')
 
   // Load inventory
   const { data: inventory } = useQuery({
@@ -251,6 +381,9 @@ export function ChartLab() {
   const selectedItem = useMemo(() =>
     (inventory ?? []).find(i => i.symbol === selectedSymbol && i.timeframe === selectedTf),
   [inventory, selectedSymbol, selectedTf])
+
+  // Reset zoom when symbol/timeframe/limit changes
+  React.useEffect(() => { setZoomWindow(null) }, [selectedSymbol, selectedTf, limit])
 
   // Auto-select first symbol/tf when inventory loads
   React.useEffect(() => {
@@ -281,12 +414,6 @@ export function ChartLab() {
     enabled: !!(selectedSymbol && selectedTf),
   })
 
-  const activeIndicators = useMemo(() =>
-    ALL_INDICATORS.filter(ind => activeSpecs.has(ind.spec)),
-  [activeSpecs])
-
-  const priceIndicators  = activeIndicators.filter(i => i.pane === 'price')
-  const oscIndicators    = activeIndicators.filter(i => i.pane === 'oscillator')
 
   // Build chart rows: merge bar data with indicator series
   const rows = useMemo(() => {
@@ -295,7 +422,10 @@ export function ChartLab() {
     const keys = Object.keys(series)
     return bars.map((b, idx) => {
       const row: Record<string, any> = {
+        // formatted label for ticks/tooltips
         t: fmtDate(b.t, selectedTf ?? '1d'),
+        // numeric timestamp (ms) used for the X axis scaling
+        tms: new Date(b.t).getTime(),
         open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume,
         // For candle shape rendering we need a "candle" value at the close price
         candle: b.close,
@@ -316,6 +446,50 @@ export function ChartLab() {
     const pad = (mx - mn) * 0.05
     return [Math.floor((mn - pad) * 100) / 100, Math.ceil((mx + pad) * 100) / 100] as [number, number]
   }, [chartData])
+
+  // Visible slice — either the zoomed window or all rows
+  const visibleRows = useMemo(() => {
+    if (!zoomWindow) return rows
+    return rows.slice(zoomWindow[0], zoomWindow[1] + 1)
+  }, [rows, zoomWindow])
+
+  const visiblePriceDomain = useMemo(() => {
+    if (!visibleRows.length) return priceDomain
+    const prices = visibleRows.flatMap(r => [r.high, r.low])
+    const mn = Math.min(...prices)
+    const mx = Math.max(...prices)
+    const pad = (mx - mn) * 0.05
+    return [Math.floor((mn - pad) * 100) / 100, Math.ceil((mx + pad) * 100) / 100] as [number, number]
+  }, [visibleRows, priceDomain])
+
+  // Commit a drag selection (visible-row indices) to an absolute zoom window
+  const commitZoomIndices = useCallback((visIdx1: number, visIdx2: number) => {
+    if (visIdx1 == null || visIdx2 == null) return
+    const offset = zoomWindow ? zoomWindow[0] : 0
+    const a = offset + visIdx1
+    const b = offset + visIdx2
+    if (a === b) return
+    const lo = Math.min(a, b)
+    const hi = Math.max(a, b)
+    if (hi - lo < 2) return
+    setZoomWindow([lo, hi])
+  }, [zoomWindow])
+
+  // Scroll-wheel zoom: shrink/expand window centered on hovered position
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault()
+    const total = rows.length
+    if (total === 0) return
+    const [lo, hi] = zoomWindow ?? [0, total - 1]
+    const visible = hi - lo
+    const factor = e.deltaY > 0 ? 1.15 : 0.87   // scroll down = zoom out, up = zoom in
+    const newVisible = Math.round(Math.min(Math.max(visible * factor, 10), total))
+    const center = Math.round((lo + hi) / 2)
+    const newLo = Math.max(0, center - Math.floor(newVisible / 2))
+    const newHi = Math.min(total - 1, newLo + newVisible)
+    if (newHi - newLo < 2) return
+    setZoomWindow([newLo, newHi])
+  }, [rows, zoomWindow])
 
   const toggleSpec = useCallback((spec: string) => {
     setActiveSpecs(prev => {
@@ -346,6 +520,16 @@ export function ChartLab() {
       {/* ── Toolbar ── */}
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="text-lg font-bold mr-2" style={{ color: 'var(--color-text-primary)' }}>Chart Lab</h1>
+
+        {/* Strategy picker (auto-populates indicators) */}
+        <select
+          className="input text-sm py-1"
+          value={selectedStrategyId ?? ''}
+          onChange={e => setSelectedStrategyId(e.target.value || null)}
+        >
+          <option value="">(no strategy)</option>
+          {(strategies ?? []).map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
 
         {/* Symbol picker */}
         <select
@@ -383,7 +567,34 @@ export function ChartLab() {
           </span>
         )}
 
+        {/* Chart type toggle */}
+        <div className="flex rounded overflow-hidden" style={{ border: '1px solid var(--color-border)' }}>
+          {(['candles', 'line'] as const).map(type => (
+            <button
+              key={type}
+              type="button"
+              onClick={() => setChartType(type)}
+              className="px-2.5 py-1 text-xs font-medium transition-all"
+              style={{
+                background: chartType === type ? 'var(--color-accent)' : 'transparent',
+                color: chartType === type ? '#fff' : 'var(--color-text-faint)',
+              }}
+            >
+              {type === 'candles' ? 'Candles' : 'Line'}
+            </button>
+          ))}
+        </div>
+
         <div className="ml-auto flex items-center gap-1.5">
+          {zoomWindow && (
+            <button
+              className="btn-ghost text-xs flex items-center gap-1 py-1"
+              onClick={() => { setZoomWindow(null); setDragStart(null); setDragEnd(null) }}
+              style={{ color: 'var(--color-accent)' }}
+            >
+              ↺ Reset Zoom
+            </button>
+          )}
           {activeSpecs.size > 0 && (
             <span className="text-xs px-2 py-0.5 rounded" style={{
               background: 'color-mix(in srgb, var(--color-accent) 15%, transparent)',
@@ -410,7 +621,7 @@ export function ChartLab() {
           style={{ border: '1px solid var(--color-border)', background: 'var(--color-bg-card)' }}
         >
           <div className="flex flex-wrap gap-4">
-            {INDICATOR_GROUPS.map(group => (
+            {visibleIndicatorGroups.map(group => (
               <div key={group.group} className="min-w-[140px]">
                 <div className="text-[10px] uppercase tracking-wide mb-1.5 font-semibold"
                   style={{ color: 'var(--color-text-faint)' }}>
@@ -467,21 +678,34 @@ export function ChartLab() {
         <div className="flex flex-col gap-0 flex-1" style={{ minHeight: 0 }}>
 
           {/* ── Price pane ── */}
-          <div style={{ flex: '0 0 55%', minHeight: 280 }}>
+          <div style={{ flex: '0 0 55%', minHeight: 280 }} onWheel={handleWheel}>
             <div className="text-[10px] uppercase tracking-wide px-1 mb-0.5" style={{ color: 'var(--color-text-faint)' }}>
               {selectedSymbol} · Price{priceIndicators.length > 0 ? ` + ${priceIndicators.map(i => i.label).join(', ')}` : ''}
+              {zoomWindow && <span style={{ color: 'var(--color-accent)', marginLeft: 6 }}>· zoomed {visibleRows.length} bars</span>}
             </div>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={rows} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+              <ComposedChart
+                data={visibleRows}
+                margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
+                onMouseDown={(e: any) => typeof e?.activeTooltipIndex === 'number' && setDragStart(e.activeTooltipIndex)}
+                onMouseMove={(e: any) => isDragging && typeof e?.activeTooltipIndex === 'number' && setDragEnd(e.activeTooltipIndex)}
+                onMouseUp={() => {
+                  if (dragStart !== null && dragEnd !== null) commitZoomIndices(dragStart, dragEnd)
+                  setDragStart(null)
+                  setDragEnd(null)
+                }}
+              >
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
                 <XAxis
-                  dataKey="t"
+                  dataKey="tms"
+                  type="number"
+                  domain={["dataMin", "dataMax"]}
                   tick={{ fontSize: 9, fill: 'var(--color-text-faint)' }}
                   tickLine={false}
-                  interval="preserveStartEnd"
+                  tickFormatter={(v: number) => fmtDate(new Date(v).toISOString(), selectedTf ?? '1d')}
                 />
                 <YAxis
-                  domain={priceDomain}
+                  domain={visiblePriceDomain}
                   tick={{ fontSize: 9, fill: 'var(--color-text-faint)' }}
                   tickLine={false}
                   width={58}
@@ -489,19 +713,28 @@ export function ChartLab() {
                   orientation="right"
                 />
                 <Tooltip
-                  content={<ChartTooltip activeIndicators={priceIndicators} />}
+                  content={<ChartTooltip activeIndicators={priceIndicators} tf={selectedTf} />}
                   cursor={{ stroke: 'var(--color-text-faint)', strokeDasharray: '3 3', strokeWidth: 1 }}
                 />
 
-                {/* Candlestick — rendered as a Bar with custom shape */}
-                <RBar dataKey="candle" shape={<CandleBar />} isAnimationActive={false}>
-                  {rows.map((r, i) => (
-                    <Cell
-                      key={i}
-                      fill={r.close >= r.open ? 'var(--color-success)' : 'var(--color-danger)'}
-                    />
-                  ))}
-                </RBar>
+                {/* Candlestick or line — toggled by chartType */}
+                {chartType === 'candles' ? (
+                  <Customized component={CandlestickLayer} />
+                ) : (
+                  <Line
+                    type="monotone"
+                    dataKey="close"
+                    stroke="var(--color-accent)"
+                    strokeWidth={1.5}
+                    dot={false}
+                    isAnimationActive={false}
+                    connectNulls
+                  />
+                )}
+                {/* Invisible line to anchor the y-axis domain to OHLC range */}
+                {chartType === 'candles' && (
+                  <Line dataKey="close" stroke="transparent" dot={false} isAnimationActive={false} legendType="none" />
+                )}
 
                 {/* Price-overlay indicators */}
                 {priceIndicators.map(ind => {
@@ -521,6 +754,17 @@ export function ChartLab() {
                     />
                   ))
                 })}
+
+                {/* Drag-to-zoom selection highlight */}
+                {isDragging && dragStart !== null && dragEnd !== null && visibleRows[dragStart] && visibleRows[dragEnd] && (
+                  <ReferenceArea
+                    x1={visibleRows[dragStart].tms}
+                    x2={visibleRows[dragEnd].tms}
+                    strokeOpacity={0.3}
+                    fill="var(--color-accent)"
+                    fillOpacity={0.15}
+                  />
+                )}
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -529,14 +773,14 @@ export function ChartLab() {
           <div style={{ flex: '0 0 10%', minHeight: 50 }}>
             <div className="text-[10px] uppercase tracking-wide px-1 mb-0.5" style={{ color: 'var(--color-text-faint)' }}>Volume</div>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={rows} margin={{ top: 0, right: 8, left: 0, bottom: 0 }}>
-                <XAxis dataKey="t" hide />
+              <BarChart data={visibleRows} margin={{ top: 0, right: 8, left: 0, bottom: 0 }}>
+                <XAxis dataKey="tms" hide />
                 <YAxis tick={{ fontSize: 8, fill: 'var(--color-text-faint)' }} tickLine={false} width={58}
                   tickFormatter={(v: number) => v >= 1_000_000 ? `${(v/1_000_000).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(0)}K` : String(v)}
                   orientation="right"
                 />
                 <RBar dataKey="volume" isAnimationActive={false}>
-                  {rows.map((r, i) => (
+                  {visibleRows.map((r, i) => (
                     <Cell
                       key={i}
                       fill={r.close >= r.open ? 'var(--color-success)' : 'var(--color-danger)'}
@@ -555,12 +799,12 @@ export function ChartLab() {
                 {oscIndicators.map(i => i.label).join(' · ')}
               </div>
               <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={rows} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <ComposedChart data={visibleRows} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.4} />
-                  <XAxis dataKey="t" tick={{ fontSize: 9, fill: 'var(--color-text-faint)' }} tickLine={false} interval="preserveStartEnd" />
+                  <XAxis dataKey="tms" type="number" domain={["dataMin", "dataMax"]} tick={{ fontSize: 9, fill: 'var(--color-text-faint)' }} tickLine={false} tickFormatter={(v: number) => fmtDate(new Date(v).toISOString(), selectedTf ?? '1d')} />
                   <YAxis tick={{ fontSize: 9, fill: 'var(--color-text-faint)' }} tickLine={false} width={58} orientation="right" />
                   <Tooltip
-                    content={<ChartTooltip activeIndicators={oscIndicators} />}
+                    content={<ChartTooltip activeIndicators={oscIndicators} tf={selectedTf} />}
                     cursor={{ stroke: 'var(--color-text-faint)', strokeDasharray: '3 3', strokeWidth: 1 }}
                   />
 
@@ -599,7 +843,7 @@ export function ChartLab() {
                   {/* MACD histogram as bars */}
                   {activeSpecs.has('macd') && (
                     <RBar dataKey="macd_hist" isAnimationActive={false} opacity={0.6}>
-                      {rows.map((r, i) => (
+                      {visibleRows.map((r, i) => (
                         <Cell key={i} fill={(r.macd_hist ?? 0) >= 0 ? 'var(--color-success)' : 'var(--color-danger)'} />
                       ))}
                     </RBar>

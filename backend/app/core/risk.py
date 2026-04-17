@@ -17,7 +17,7 @@ class RiskConfig:
     max_drawdown_lockout_pct: float = 0.10   # 10% drawdown lockout
     max_open_positions: int = 10
     max_portfolio_heat: float = 0.06         # 6% total risk across all positions
-    max_correlated_exposure: float = 0.30    # 30% in same sector/direction
+    max_correlated_exposure: float = 1.0     # disabled by default; set < 1.0 to cap same-direction exposure
     max_leverage: float = 4.0
     allowed_symbols: list[str] | None = None   # None = all
     blocked_symbols: list[str] | None = None
@@ -66,10 +66,16 @@ class RiskEngine:
         if portfolio.num_open_positions >= self.config.max_open_positions:
             return False, f"Max open positions reached ({self.config.max_open_positions})"
 
-        # Max position size
-        position_value = quantity * price
-        if position_value / equity > self.config.max_position_size_pct:
-            return False, f"Position size {position_value/equity:.1%} exceeds max {self.config.max_position_size_pct:.1%}"
+        # Max position size — checked against buying power (equity × leverage) so the
+        # limit remains meaningful when leverage > 1.  A 25% limit on 4× leverage means
+        # one position can consume up to 25% of your $400k buying power ($100k on $100k
+        # equity), which is already sensible before the leverage cap below fires.
+        buying_power = equity * self.config.max_leverage
+        if position_value / buying_power > self.config.max_position_size_pct:
+            return False, (
+                f"Position size {position_value/buying_power:.1%} of buying power "
+                f"exceeds max {self.config.max_position_size_pct:.1%}"
+            )
 
         # Max leverage (gross exposure / equity)
         existing_gross_exposure = sum(

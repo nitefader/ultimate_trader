@@ -260,8 +260,8 @@ export function DeploymentManager() {
               {[
                 { label: 'Open', value: tradesData.summary.open_count },
                 { label: 'Closed', value: tradesData.summary.closed_count },
-                { label: 'Realized P&L', value: <span className={tradesData.summary.total_realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>${tradesData.summary.total_realized_pnl.toFixed(2)}</span> },
-                { label: 'Unrealized', value: <span className={tradesData.summary.total_unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>${tradesData.summary.total_unrealized_pnl.toFixed(2)}</span> },
+                { label: 'Realized P&L', value: fmtPnl(tradesData.summary.total_realized_pnl) },
+                { label: 'Unrealized', value: fmtPnl(tradesData.summary.total_unrealized_pnl) },
                 { label: 'Win Rate', value: tradesData.summary.win_rate_pct != null ? `${tradesData.summary.win_rate_pct.toFixed(1)}%` : '—' },
               ].map(({ label, value }) => (
                 <div key={label} className="bg-gray-900 rounded px-2 py-1.5">
@@ -303,8 +303,8 @@ export function DeploymentManager() {
                         <span className={t.direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>{t.direction}</span>
                       </td>
                       <td className="px-2 py-1.5 text-gray-400">{t.entry_time?.slice(0, 10) ?? '—'}</td>
-                      <td className="px-2 py-1.5 text-right font-mono">{t.entry_price.toFixed(2)}</td>
-                      <td className="px-2 py-1.5 text-right font-mono">{t.quantity.toFixed(1)}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{fmt2(t.entry_price)}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{t.quantity != null ? t.quantity.toFixed(1) : '—'}</td>
                       <td className="px-2 py-1.5 text-right font-mono text-amber-400">{t.current_stop != null ? t.current_stop.toFixed(2) : '—'}</td>
                       <td className="px-2 py-1.5 text-right font-mono">{t.current_price != null ? t.current_price.toFixed(2) : '—'}</td>
                       <td className="px-2 py-1.5 text-right">{fmtPnl(t.unrealized_pnl)}</td>

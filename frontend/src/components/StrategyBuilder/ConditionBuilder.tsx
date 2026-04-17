@@ -1,7 +1,9 @@
 import React from 'react'
 import { Plus, Trash2 } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import type { Condition } from '../../types'
 import { SelectMenu } from '../SelectMenu'
+import { strategiesApi } from '../../api/strategies'
 
 interface Props {
   conditions: Condition[]
@@ -9,6 +11,7 @@ interface Props {
   logic: string
   onLogicChange: (logic: string) => void
   label?: string
+  indicatorKinds?: string[]
 }
 
 const OPERATORS = ['>', '>=', '<', '<=', '==', '!=', 'crosses_above', 'crosses_below', 'between', 'in']
@@ -57,6 +60,7 @@ interface SingleConditionEditorProps {
   index: number
   onUpdate: (c: Condition) => void
   onDelete: () => void
+  indicatorKinds: string[]
 }
 
 const LOGIC_OPTIONS = [
@@ -103,10 +107,12 @@ function ValueEditor({
   title,
   spec,
   onChange,
+  indicatorKinds,
 }: {
   title: string
   spec: Condition['left']
   onChange: (s: Condition['left']) => void
+  indicatorKinds: string[]
 }) {
   const type = getValueType(spec)
   const val = spec as Record<string, unknown>
@@ -130,7 +136,7 @@ function ValueEditor({
             { value: 'literal', label: 'Value' },
             { value: 'field', label: 'Price field' },
             { value: 'indicator', label: 'Study output' },
-            { value: 'prev_bar', label: 'Previous bar' },
+            { value: 'prev_bar', label: 'Bar offset' },
           ]}
         />
 
@@ -175,7 +181,7 @@ function ValueEditor({
               placeholder="rsi_2, ema_20, ema_50..."
             />
             <datalist id="indicator-options">
-              {INDICATORS.map((i) => <option key={i} value={i} />)}
+              {indicatorKinds.map((i) => <option key={i} value={i} />)}
             </datalist>
             <div className="grid gap-2 sm:grid-cols-[88px_minmax(0,1fr)]">
               <input
@@ -210,7 +216,7 @@ function ValueEditor({
   )
 }
 
-function SingleConditionEditor({ cond, index, onUpdate, onDelete }: SingleConditionEditorProps) {
+function SingleConditionEditor({ cond, index, onUpdate, onDelete, indicatorKinds }: SingleConditionEditorProps) {
   return (
     <div className="rounded-2xl border border-gray-800 bg-gradient-to-br from-gray-900 via-gray-900 to-slate-950/90 p-3 shadow-[0_10px_30px_rgba(0,0,0,0.18)]">
       <div className="mb-3 flex items-center justify-between gap-3">
@@ -230,7 +236,7 @@ function SingleConditionEditor({ cond, index, onUpdate, onDelete }: SingleCondit
       </div>
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_180px_minmax(0,1fr)]">
-        <ValueEditor title="Left side" spec={cond.left} onChange={(v) => onUpdate({ ...cond, left: v })} />
+        <ValueEditor title="Left side" spec={cond.left} onChange={(v) => onUpdate({ ...cond, left: v })} indicatorKinds={indicatorKinds} />
 
         <div className="rounded-xl border border-sky-900/40 bg-sky-950/20 p-3">
           <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-sky-300">Comparator</div>
@@ -244,13 +250,20 @@ function SingleConditionEditor({ cond, index, onUpdate, onDelete }: SingleCondit
           </div>
         </div>
 
-        <ValueEditor title="Right side" spec={cond.right} onChange={(v) => onUpdate({ ...cond, right: v })} />
+        <ValueEditor title="Right side" spec={cond.right} onChange={(v) => onUpdate({ ...cond, right: v })} indicatorKinds={indicatorKinds} />
       </div>
     </div>
   )
 }
 
-export function ConditionBuilder({ conditions, onChange, logic, onLogicChange, label = 'Conditions' }: Props) {
+export function ConditionBuilder({ conditions, onChange, logic, onLogicChange, label = 'Conditions', indicatorKinds: propKinds }: Props) {
+  const { data: fetchedKinds } = useQuery({
+    queryKey: ['indicator-kinds'],
+    queryFn: strategiesApi.indicatorKinds,
+    staleTime: Infinity,
+  })
+  const indicatorKinds = propKinds ?? fetchedKinds ?? INDICATORS
+
   const addCondition = () => {
     onChange([
       ...conditions,
@@ -306,6 +319,7 @@ export function ConditionBuilder({ conditions, onChange, logic, onLogicChange, l
             cond={cond}
             onUpdate={(c) => updateCondition(i, c)}
             onDelete={() => deleteCondition(i)}
+            indicatorKinds={indicatorKinds}
           />
         ))}
       </div>

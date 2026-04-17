@@ -252,6 +252,12 @@ async def launch(body: BacktestLaunchRequest, db: AsyncSession = Depends(get_db)
     if provider == "alpaca" and timeframe not in ALPACA_TIMEFRAME_MAP:
         raise HTTPException(status_code=422, detail=f"Timeframe '{timeframe}' is not supported by alpaca")
 
+    # Resolve real Alpaca credentials (frontend sends masked keys from Services tab)
+    from app.services.data_limits import resolve_alpaca_credentials
+    resolved_api_key, resolved_secret_key = await resolve_alpaca_credentials(
+        body.alpaca_api_key or "", body.alpaca_secret_key or "",
+    )
+
     run_config = {
         "symbols": symbols,
         "timeframe": timeframe,
@@ -262,8 +268,8 @@ async def launch(body: BacktestLaunchRequest, db: AsyncSession = Depends(get_db)
         "commission_pct_per_trade": body.commission_pct_per_trade,
         "slippage_ticks": body.slippage_ticks,
         "data_provider": provider,
-        "alpaca_api_key": body.alpaca_api_key or "",
-        "alpaca_secret_key": body.alpaca_secret_key or "",
+        "alpaca_api_key": resolved_api_key,
+        "alpaca_secret_key": resolved_secret_key,
         "parameters": body.parameters,
         "walk_forward": body.walk_forward,
         "cpcv": body.cpcv,

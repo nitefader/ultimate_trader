@@ -14,6 +14,45 @@ const STOP_METHODS = ['fixed_pct', 'fixed_dollar', 'atr_multiple', 'prev_bar_low
 const TARGET_METHODS = ['r_multiple', 'fixed_pct', 'atr_multiple', 'sr_resistance', 'swing_high', 'prev_day_high']
 const SIZING_METHODS = ['risk_pct', 'fixed_shares', 'fixed_dollar', 'fixed_pct_equity', 'atr_risk', 'kelly']
 const COOLDOWN_TRIGGERS = ['loss', 'win', 'stop_out', 'target_hit', 'any_exit', 'consecutive_loss']
+
+const STOP_METHOD_LABELS: Record<string, string> = {
+  fixed_pct: 'Fixed % below entry',
+  fixed_dollar: 'Fixed $ amount',
+  atr_multiple: 'ATR multiple',
+  prev_bar_low: 'Previous bar low',
+  n_bars_low: 'N-bar low',
+  swing_low: 'Swing low',
+  fvg_low: 'FVG low',
+  sr_support: 'S/R support level',
+  chandelier: 'Chandelier exit',
+}
+const STOP_METHOD_HINTS: Record<string, string> = {
+  fixed_pct: 'Stop = entry × (1 - stop%)',
+  fixed_dollar: 'Exit when loss exceeds $ value',
+  atr_multiple: 'Stop = entry - ATR(period) × multiplier',
+  prev_bar_low: 'Stop at previous bar low',
+  n_bars_low: 'Stop at lowest low over N bars',
+  swing_low: 'Stop at most recent swing low',
+  fvg_low: 'Stop at bottom of last fair value gap',
+  sr_support: 'Stop just below nearest S/R support',
+  chandelier: 'ATR-based trailing stop anchored to highest high',
+}
+const SIZING_METHOD_LABELS: Record<string, string> = {
+  risk_pct: 'Risk % of equity',
+  fixed_shares: 'Fixed share count',
+  fixed_dollar: 'Fixed dollar amount',
+  fixed_pct_equity: 'Fixed % of equity',
+  atr_risk: 'ATR-normalized risk',
+  kelly: 'Kelly criterion',
+}
+const SIZING_METHOD_HINTS: Record<string, string> = {
+  risk_pct: 'Size = (equity × risk%) / stop_distance',
+  fixed_shares: 'Always trade exactly N shares',
+  fixed_dollar: 'Always trade a fixed dollar notional',
+  fixed_pct_equity: 'Allocate a fixed % of current equity',
+  atr_risk: 'Size via ATR-based dollar risk',
+  kelly: 'Optimal Kelly fraction based on win rate and R',
+}
 const DRAFT_STORAGE_KEY = 'strategy_creator_draft_v1'
 
 // ── Mirror long→short ─────────────────────────────────────────────────────────
@@ -324,15 +363,6 @@ export function StrategyCreator() {
     if (!(typeof maxHeat === 'number' && Number.isFinite(maxHeat) && maxHeat > 0 && maxHeat <= 1)) {
       errors.maxHeat = 'Max Portfolio Heat must be between 0% and 100%.'
     }
-    if (
-      typeof maxPos === 'number' &&
-      Number.isFinite(maxPos) &&
-      typeof maxHeat === 'number' &&
-      Number.isFinite(maxHeat) &&
-      maxPos > maxHeat
-    ) {
-      errors.riskCoherence = 'Max Position Size cannot exceed Max Portfolio Heat.'
-    }
 
     return errors
   }, [config, name])
@@ -433,7 +463,7 @@ export function StrategyCreator() {
       stopLoss: ['stopMethod', 'stopValue', 'stopPeriod', 'stopMult'].filter((k) => Boolean(localErrors[k])).length,
       profitTargets: ['targets'].filter((k) => Boolean(localErrors[k])).length,
       positionSizing: ['sizingMethod', 'riskPct', 'leverage'].filter((k) => Boolean(localErrors[k])).length,
-      riskControls: ['maxPositionSize', 'maxDailyLoss', 'maxOpenPositions', 'maxHeat', 'riskCoherence'].filter((k) => Boolean(localErrors[k])).length,
+      riskControls: ['maxPositionSize', 'maxDailyLoss', 'maxOpenPositions', 'maxHeat'].filter((k) => Boolean(localErrors[k])).length,
       regimeFilter: 0,
       cooldownRules: 0,
     }
@@ -500,6 +530,8 @@ export function StrategyCreator() {
     { id: 'entry-rules', label: 'Studies' },
     { id: 'stop-loss', label: 'Stops' },
     { id: 'profit-targets', label: 'Targets' },
+    { id: 'trailing-stop', label: 'Trailing' },
+    { id: 'exit-conditions', label: 'Exit Rules' },
     { id: 'position-sizing', label: 'Sizing' },
     { id: 'risk-controls', label: 'Risk' },
     { id: 'regime-filter', label: 'Regimes' },
@@ -1021,19 +1053,23 @@ export function StrategyCreator() {
       {/* Stop loss */}
       <Section id="stop-loss" title="Stop Loss" status={sectionStatus.stopLoss}>
         <div className="grid grid-cols-3 gap-3">
-          <Field label="Method">
+          <Field label="Method" hint={STOP_METHOD_HINTS[config.stop_loss?.method ?? 'fixed_pct']}>
             <SelectMenu
               value={config.stop_loss?.method ?? 'fixed_pct'}
               onChange={v => handleStopMethodChange(v)}
-              options={STOP_METHODS.map(m => ({ value: m, label: m }))}
+              options={STOP_METHODS.map(m => ({ value: m, label: STOP_METHOD_LABELS[m] ?? m }))}
             />
           </Field>
-          {(config.stop_loss?.method === 'fixed_pct' || config.stop_loss?.method === 'fixed_dollar') && (
-            <Field label="Value" error={localErrors.stopValue}>
-              <input
-                type="number"
-                className="input w-full"
-                value={config.stop_loss?.value ?? 2}
+          {(config.stop_loss?.method === 'fixed_pct') && (
+            <Field label="Stop %" error={localErrors.stopValue} hint="e.g. 2 = 2% below entry">
+              <input type="number" step="0.1" className="input w-full" value={config.stop_loss?.value ?? 2}
+                onChange={e => setConfigKey('stop_loss', { ...config.stop_loss, value: parseFloat(e.target.value) } as any)}
+              />
+            </Field>
+          )}
+          {(config.stop_loss?.method === 'fixed_dollar') && (
+            <Field label="Stop $ amount" error={localErrors.stopValue} hint="Absolute dollar loss to exit">
+              <input type="number" step="0.5" className="input w-full" value={config.stop_loss?.value ?? 100}
                 onChange={e => setConfigKey('stop_loss', { ...config.stop_loss, value: parseFloat(e.target.value) } as any)}
               />
             </Field>
@@ -1051,6 +1087,34 @@ export function StrategyCreator() {
                 />
               </Field>
             </>
+          )}
+          {config.stop_loss?.method === 'n_bars_low' && (
+            <Field label="Lookback Bars" hint="Stop at lowest low over N bars">
+              <input type="number" className="input w-full" value={(config.stop_loss as any)?.bars ?? 5}
+                onChange={e => setConfigKey('stop_loss', { ...config.stop_loss, bars: parseInt(e.target.value) } as any)}
+              />
+            </Field>
+          )}
+          {config.stop_loss?.method === 'chandelier' && (
+            <>
+              <Field label="ATR Period" hint="Typical: 22">
+                <input type="number" className="input w-full" value={config.stop_loss?.period ?? 22}
+                  onChange={e => setConfigKey('stop_loss', { ...config.stop_loss, period: parseInt(e.target.value) } as any)}
+                />
+              </Field>
+              <Field label="Multiplier" hint="Typical: 3.0">
+                <input type="number" step="0.1" className="input w-full" value={config.stop_loss?.mult ?? 3.0}
+                  onChange={e => setConfigKey('stop_loss', { ...config.stop_loss, mult: parseFloat(e.target.value) } as any)}
+                />
+              </Field>
+            </>
+          )}
+          {config.stop_loss?.method === 'swing_low' && (
+            <Field label="Swing Lookback Bars" hint="Stop at last swing low within N bars">
+              <input type="number" className="input w-full" value={(config.stop_loss as any)?.swing_bars ?? 10}
+                onChange={e => setConfigKey('stop_loss', { ...config.stop_loss, swing_bars: parseInt(e.target.value) } as any)}
+              />
+            </Field>
           )}
         </div>
         {localErrors.stopMethod && <p className="text-xs text-red-400">{localErrors.stopMethod}</p>}
@@ -1098,28 +1162,192 @@ export function StrategyCreator() {
         {localErrors.targets && <p className="text-xs text-red-400">{localErrors.targets}</p>}
       </Section>
 
+      {/* Trailing stop */}
+      <Section id="trailing-stop" title="Trailing Stop" status="neutral">
+        <Field label="Enable Trailing Stop">
+          <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer mt-1">
+            <input
+              type="checkbox" className="accent-sky-500"
+              checked={Boolean((config as any).trailing_stop?.enabled)}
+              onChange={e => setConfigKey('trailing_stop' as any, e.target.checked
+                ? { enabled: true, method: 'atr', period: 14, mult: 2.0 }
+                : { enabled: false }
+              )}
+            />
+            Activate after entry
+          </label>
+        </Field>
+        {(config as any).trailing_stop?.enabled && (
+          <div className="grid grid-cols-3 gap-3 mt-3">
+            <Field label="Method">
+              <SelectMenu
+                value={(config as any).trailing_stop?.method ?? 'atr'}
+                onChange={v => setConfigKey('trailing_stop' as any, { ...(config as any).trailing_stop, method: v })}
+                options={[
+                  { value: 'atr', label: 'ATR multiple' },
+                  { value: 'fixed_pct', label: 'Fixed % trail' },
+                  { value: 'fixed_dollar', label: 'Fixed $ trail' },
+                  { value: 'highest_close', label: 'Trail from highest close' },
+                ]}
+              />
+            </Field>
+            {((config as any).trailing_stop?.method ?? 'atr') === 'atr' && (
+              <>
+                <Field label="ATR Period">
+                  <input type="number" className="input w-full"
+                    value={(config as any).trailing_stop?.period ?? 14}
+                    onChange={e => setConfigKey('trailing_stop' as any, { ...(config as any).trailing_stop, period: parseInt(e.target.value) })}
+                  />
+                </Field>
+                <Field label="Multiplier" hint="Stop trails at highest - ATR × mult">
+                  <input type="number" step="0.1" className="input w-full"
+                    value={(config as any).trailing_stop?.mult ?? 2.0}
+                    onChange={e => setConfigKey('trailing_stop' as any, { ...(config as any).trailing_stop, mult: parseFloat(e.target.value) })}
+                  />
+                </Field>
+              </>
+            )}
+            {(config as any).trailing_stop?.method === 'fixed_pct' && (
+              <Field label="Trail %" hint="e.g. 3 = trail 3% below highest close">
+                <input type="number" step="0.1" className="input w-full"
+                  value={(config as any).trailing_stop?.value ?? 3}
+                  onChange={e => setConfigKey('trailing_stop' as any, { ...(config as any).trailing_stop, value: parseFloat(e.target.value) })}
+                />
+              </Field>
+            )}
+            {(config as any).trailing_stop?.method === 'fixed_dollar' && (
+              <Field label="Trail $" hint="Trail N dollars below highest close">
+                <input type="number" className="input w-full"
+                  value={(config as any).trailing_stop?.value ?? 500}
+                  onChange={e => setConfigKey('trailing_stop' as any, { ...(config as any).trailing_stop, value: parseFloat(e.target.value) })}
+                />
+              </Field>
+            )}
+            <Field label="Activate after N bars" hint="Optional: only activate trailing stop after N bars held (0 = immediate)">
+              <input type="number" min="0" className="input w-full"
+                value={(config as any).trailing_stop?.activate_after_bars ?? 0}
+                onChange={e => setConfigKey('trailing_stop' as any, { ...(config as any).trailing_stop, activate_after_bars: parseInt(e.target.value) || undefined })}
+              />
+            </Field>
+          </div>
+        )}
+      </Section>
+
+      {/* Exit conditions */}
+      <Section id="exit-conditions" title="Exit Conditions" status="neutral">
+        <p className="text-xs text-gray-500">Define signal-based exits that trigger before stop/target. Optional — leave empty to exit only on stop or target hit.</p>
+        <ConditionBuilder
+          conditions={(config as any).exit_conditions?.conditions ?? []}
+          onChange={(conds) => setConfigKey('exit_conditions' as any, {
+            ...(config as any).exit_conditions,
+            conditions: conds,
+          })}
+          logic={(config as any).exit_conditions?.logic ?? 'any_of'}
+          onLogicChange={(logic) => setConfigKey('exit_conditions' as any, {
+            ...(config as any).exit_conditions,
+            logic,
+          })}
+          label="Exit Triggers"
+        />
+        {((config as any).exit?.max_bars === undefined || (config as any).exit?.max_bars === null) ? (
+          <button
+            className="btn-ghost text-xs flex items-center gap-1 mt-2"
+            onClick={() => setConfigKey('exit' as any, { ...(config as any).exit, max_bars: 20 })}
+          >
+            <Plus size={12} /> Add max bars exit
+          </button>
+        ) : (
+          <div className="flex items-center gap-3 mt-3">
+            <Field label="Max Bars Hold" hint="Force-exit after N bars regardless of profit/loss">
+              <input type="number" className="input w-full"
+                value={(config as any).exit?.max_bars ?? 20}
+                onChange={e => setConfigKey('exit' as any, { ...(config as any).exit, max_bars: parseInt(e.target.value) || undefined })}
+              />
+            </Field>
+            <button
+              className="mt-5 text-gray-500 hover:text-red-400"
+              onClick={() => {
+                const ex = { ...(config as any).exit }
+                delete ex.max_bars
+                setConfigKey('exit' as any, ex)
+              }}
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        )}
+      </Section>
+
       {/* Position sizing */}
       <Section id="position-sizing" title="Position Sizing" status={sectionStatus.positionSizing}>
         <div className="grid grid-cols-3 gap-3">
-          <Field label="Method">
+          <Field label="Method" hint={SIZING_METHOD_HINTS[config.position_sizing?.method ?? 'risk_pct']}>
             <SelectMenu
               value={config.position_sizing?.method ?? 'risk_pct'}
-              onChange={v => setConfigKey('position_sizing', { ...config.position_sizing, method: v })}
-              options={SIZING_METHODS.map(m => ({ value: m, label: m }))}
+              onChange={v => setConfigKey('position_sizing', { method: v } as any)}
+              options={SIZING_METHODS.map(m => ({ value: m, label: SIZING_METHOD_LABELS[m] ?? m }))}
             />
           </Field>
           {config.position_sizing?.method === 'risk_pct' && (
-            <Field label="Risk % per trade" error={localErrors.riskPct} hint="Use 1 for 1% risk per trade.">
-              <input
-                type="number" step="0.1" className="input w-full"
+            <Field label="Risk % per trade" error={localErrors.riskPct} hint="e.g. 1 = risk 1% of equity per trade">
+              <input type="number" step="0.1" className="input w-full"
                 value={config.position_sizing?.risk_pct ?? 1.0}
                 onChange={e => setConfigKey('position_sizing', { ...config.position_sizing, risk_pct: parseFloat(e.target.value) } as any)}
               />
             </Field>
           )}
+          {config.position_sizing?.method === 'fixed_shares' && (
+            <Field label="Shares per trade" hint="Number of shares to buy/sell each entry">
+              <input type="number" className="input w-full"
+                value={(config.position_sizing as any)?.shares ?? 100}
+                onChange={e => setConfigKey('position_sizing', { ...config.position_sizing, shares: parseInt(e.target.value) } as any)}
+              />
+            </Field>
+          )}
+          {config.position_sizing?.method === 'fixed_dollar' && (
+            <Field label="Dollar notional" hint="Fixed dollar amount per trade (e.g. 5000)">
+              <input type="number" className="input w-full"
+                value={(config.position_sizing as any)?.amount ?? 5000}
+                onChange={e => setConfigKey('position_sizing', { ...config.position_sizing, amount: parseFloat(e.target.value) } as any)}
+              />
+            </Field>
+          )}
+          {config.position_sizing?.method === 'fixed_pct_equity' && (
+            <Field label="Equity allocation %" hint="e.g. 10 = 10% of portfolio per position">
+              <input type="number" step="0.5" className="input w-full"
+                value={(config.position_sizing as any)?.pct ?? 10}
+                onChange={e => setConfigKey('position_sizing', { ...config.position_sizing, pct: parseFloat(e.target.value) } as any)}
+              />
+            </Field>
+          )}
+          {config.position_sizing?.method === 'atr_risk' && (
+            <>
+              <Field label="ATR Period">
+                <input type="number" className="input w-full"
+                  value={(config.position_sizing as any)?.atr_period ?? 14}
+                  onChange={e => setConfigKey('position_sizing', { ...config.position_sizing, atr_period: parseInt(e.target.value) } as any)}
+                />
+              </Field>
+              <Field label="Risk % of equity per ATR" hint="e.g. 1 = risk 1% of equity per 1-ATR move">
+                <input type="number" step="0.1" className="input w-full"
+                  value={(config.position_sizing as any)?.risk_pct ?? 1.0}
+                  onChange={e => setConfigKey('position_sizing', { ...config.position_sizing, risk_pct: parseFloat(e.target.value) } as any)}
+                />
+              </Field>
+            </>
+          )}
+          {config.position_sizing?.method === 'kelly' && (
+            <Field label="Win rate estimate %" hint="Historical win rate for Kelly calculation">
+              <input type="number" step="1" min="1" max="99" className="input w-full"
+                value={(config.position_sizing as any)?.win_rate != null
+                  ? Math.round((config.position_sizing as any).win_rate * 100)
+                  : 55}
+                onChange={e => setConfigKey('position_sizing', { ...config.position_sizing, win_rate: parseFloat(e.target.value) / 100 } as any)}
+              />
+            </Field>
+          )}
           <Field label="Leverage" error={localErrors.leverage} hint="Minimum is 1.">
-            <input
-              type="number" step="0.1" min="1" className="input w-full"
+            <input type="number" step="0.1" min="1" className="input w-full"
               value={config.leverage ?? 1.0}
               onChange={e => setConfigKey('leverage', parseFloat(e.target.value))}
             />
@@ -1130,7 +1358,7 @@ export function StrategyCreator() {
       {/* Risk controls */}
       <Section id="risk-controls" title="Risk Controls" status={sectionStatus.riskControls}>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          <Field label="Max Position Size %" error={localErrors.maxPositionSize}>
+          <Field label="Max Position Size %" error={localErrors.maxPositionSize} hint="Max single position as % of buying power (equity × leverage). e.g. 25% on 4× leverage = up to 1× equity per trade.">
             <input type="number" step="0.01" className="input w-full"
               value={(config.risk?.max_position_size_pct ?? 0.10) * 100}
               onChange={e => setConfigKey('risk', { ...config.risk, max_position_size_pct: parseFloat(e.target.value) / 100 })}
@@ -1150,7 +1378,7 @@ export function StrategyCreator() {
           </Field>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-3">
-          <Field label="Max Portfolio Heat %" error={localErrors.maxHeat}>
+          <Field label="Max Portfolio Heat %" error={localErrors.maxHeat} hint="Total dollars at risk across all open positions as % of equity. e.g. 6% on $100k = $6k max combined risk. Requires stop prices to enforce.">
             <input
               type="number"
               step="0.01"
@@ -1160,7 +1388,20 @@ export function StrategyCreator() {
             />
           </Field>
         </div>
-        {localErrors.riskCoherence && <p className="text-xs text-red-400 mt-2">{localErrors.riskCoherence}</p>}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mt-3">
+          <Field label="Max Drawdown Lockout %" hint="Halt entries once drawdown exceeds this">
+            <input type="number" step="0.5" className="input w-full"
+              value={(config.risk?.max_drawdown_lockout_pct ?? 0.10) * 100}
+              onChange={e => setConfigKey('risk', { ...config.risk, max_drawdown_lockout_pct: parseFloat(e.target.value) / 100 })}
+            />
+          </Field>
+          <Field label="Max Correlated Exposure %" hint="Cap on same-direction gross exposure. Set to 100 to disable (recommended for focused strategies)">
+            <input type="number" step="5" min="5" max="100" className="input w-full"
+              value={((config.risk as any)?.max_correlated_exposure ?? 1.0) * 100}
+              onChange={e => setConfigKey('risk', { ...config.risk, max_correlated_exposure: parseFloat(e.target.value) / 100 } as any)}
+            />
+          </Field>
+        </div>
         {localErrors.sizingMethod && <p className="text-xs text-red-400 mt-2">{localErrors.sizingMethod}</p>}
       </Section>
 

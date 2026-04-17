@@ -222,7 +222,7 @@ export function Dashboard() {
       )}
 
       {/* KPI row */}
-      {(accountsLoading || deploymentsLoading) ? (
+      {(accountsLoading || deploymentsLoading || runsLoading) ? (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           {[0,1,2,3,4].map(i => (
             <div key={i} className="card animate-pulse" style={{ height: 88 }}>
@@ -408,7 +408,16 @@ export function Dashboard() {
       {/* Recent backtest runs table */}
       <div>
         <SectionHeader title="Recent Backtest Runs" to="/runs" />
-        {recentRuns.length === 0 ? (
+        {runsLoading ? (
+          <div className="card text-center py-8">
+            <div className="flex justify-center items-center gap-2 h-8 mb-3">
+              <div className="w-2 h-2 rounded-full animate-pulse" style={{ background: V('--color-accent'), animationDelay: '0ms' }} />
+              <div className="w-2 h-2 rounded-full animate-pulse" style={{ background: V('--color-accent'), animationDelay: '150ms' }} />
+              <div className="w-2 h-2 rounded-full animate-pulse" style={{ background: V('--color-accent'), animationDelay: '300ms' }} />
+            </div>
+            <p className="text-sm" style={{ color: V('--color-text-muted') }}>Loading runs...</p>
+          </div>
+        ) : recentRuns.length === 0 ? (
           <div className="card text-center py-8">
             <TrendingUp size={28} className="mx-auto mb-2" style={{ color: V('--color-text-faint') }} />
             <p className="text-sm mb-3" style={{ color: V('--color-text-muted') }}>No backtest runs yet</p>

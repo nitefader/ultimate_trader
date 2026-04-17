@@ -341,6 +341,11 @@ class BacktestEngine:
                 out[ref] = volume.rolling(period).mean().shift(1)
                 continue
 
+            if match := re.fullmatch(r"volume_sma_(\d+)", ref):
+                period = int(match.group(1))
+                out[ref] = volume.rolling(period).mean().shift(1)
+                continue
+
             if match := re.fullmatch(r"atr_avg_(\d+)", ref):
                 period = int(match.group(1))
                 out[ref] = out["atr"].rolling(period).mean().shift(1)
@@ -465,12 +470,15 @@ class BacktestEngine:
                 continue
 
             # --- Entry signal confirmed ---
-            # Calculate entry price (next bar open + slippage)
+            # Calculate entry price (next bar open + slippage, or current close if last bar)
             if bar_index + 1 >= len(df):
-                continue
-            next_bar = df.iloc[bar_index + 1]
-            fill_ts = pd.Timestamp(next_bar.name)
-            entry_price = float(next_bar["open"])
+                # Last bar: use current close as fill price (conservative, avoids missing end-of-period reversals)
+                entry_price = float(bar["close"])
+                fill_ts = ts
+            else:
+                next_bar = df.iloc[bar_index + 1]
+                fill_ts = pd.Timestamp(next_bar.name)
+                entry_price = float(next_bar["open"])
 
             # Apply slippage
             tick_size = float(self.strategy.get("tick_size", 0.01))
@@ -794,11 +802,13 @@ class BacktestEngine:
             return
 
         if bar_index + 1 >= len(df):
-            return
-
-        next_bar = df.iloc[bar_index + 1]
-        fill_ts = pd.Timestamp(next_bar.name).to_pydatetime()
-        add_price = float(next_bar["open"])
+            # Last bar: use current close for scale-in fill price
+            add_price = float(bar["close"])
+            fill_ts = pd.Timestamp(ts).to_pydatetime()
+        else:
+            next_bar = df.iloc[bar_index + 1]
+            fill_ts = pd.Timestamp(next_bar.name).to_pydatetime()
+            add_price = float(next_bar["open"])
 
         tick_size = float(self.strategy.get("tick_size", 0.01))
         if pos.direction == "long":

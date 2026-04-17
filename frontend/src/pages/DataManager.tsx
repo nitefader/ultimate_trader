@@ -714,6 +714,7 @@ function InventoryTable({
               <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Data Source</th>
               <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Coverage</th>
               <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Bars</th>
+              <th className="text-left px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Downloaded</th>
               <th className="text-right px-4 py-2.5 text-xs text-gray-500 font-medium uppercase tracking-wide">Size</th>
               <th className="px-4 py-2.5" />
             </tr>
@@ -747,6 +748,9 @@ function InventoryTable({
                   </td>
                   <td className="px-4 py-2.5 text-right font-mono text-gray-300 text-xs">
                     {item.bar_count.toLocaleString()}
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-gray-400">
+                    {item.downloaded_at ? new Date(item.downloaded_at).toLocaleString() : '—'}
                   </td>
                   <td className="px-4 py-2.5 text-right text-xs text-gray-500">
                     {item.file_size_kb} KB
@@ -789,7 +793,7 @@ function InventoryTable({
                 {selected.symbol} {selected.timeframe} chart
               </div>
               <div className="text-xs text-gray-500">
-                Source: {selected.provider === 'alpaca' ? 'Alpaca Markets' : 'Yahoo Finance'} · {selected.first_date} to {selected.last_date}
+                Source: {selected.provider === 'alpaca' ? 'Alpaca Markets' : 'Yahoo Finance'} · {selected.first_date} to {selected.last_date} · Downloaded: {selected.downloaded_at ? new Date(selected.downloaded_at).toLocaleString() : '—'}
               </div>
             </div>
             <button className="text-xs text-gray-500 hover:text-gray-300" onClick={() => setSelected(null)}>Close</button>

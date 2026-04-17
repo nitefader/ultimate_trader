@@ -187,14 +187,17 @@ def compute_full_metrics(
 
     # ── Monthly returns ────────────────────────────────────────────────────────
     monthly_returns: dict[str, float] = {}
-    if "date" in eq_df.columns:
+    if "date" in eq_df.columns and len(trades) > 0:
         try:
             eq_df["date"] = pd.to_datetime(eq_df["date"])
             eq_df = eq_df.set_index("date")
+            # Get the last trading day of each month
             monthly = eq_df["equity"].resample("ME").last()
-            monthly_pct = monthly.pct_change(fill_method=None).dropna() * 100
+            # Compute month-over-month returns
+            monthly_pct = monthly.pct_change() * 100
             for ts, val in monthly_pct.items():
-                monthly_returns[ts.strftime("%Y-%m")] = round(float(val), 2)
+                if pd.notna(val):
+                    monthly_returns[ts.strftime("%Y-%m")] = round(float(val), 2)
         except Exception:
             pass
 

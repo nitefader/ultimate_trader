@@ -5,12 +5,13 @@ import { AlertCircle, Database, Info, Loader, Play } from 'lucide-react'
 import clsx from 'clsx'
 import { backtestsApi } from '../api/backtests'
 import { servicesApi } from '../api/services'
-import { strategiesApi } from '../api/strategies'
+import { programsApi } from '../api/programs'
 import { DatePickerInput } from '../components/DatePickerInput'
 import { SelectMenu } from '../components/SelectMenu'
 import { BacktestLaunchOverlay } from '../components/BacktestLaunchOverlay'
 import { TickerSearch } from '../components/TickerSearch'
 import { useKillSwitchStore } from '../stores/useKillSwitchStore'
+import { PageHelp } from '../components/PageHelp'
 
 const today = new Date().toISOString().slice(0, 10)
 const jan2018 = '2018-01-01'
@@ -76,16 +77,14 @@ function barsPerDayForTf(tf: string): number {
 export function BacktestLauncher() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const prefillStrategyId = searchParams.get('strategy_id') ?? ''
-  const prefillVersionId = searchParams.get('version_id') ?? ''
+  const prefillProgramId = searchParams.get('program_id') ?? ''
 
-  const { data: strategies = [], isLoading: strategiesLoading } = useQuery({
-    queryKey: ['strategies'],
-    queryFn: strategiesApi.list,
+  const [selectedProgramId, setSelectedProgramId] = useState(prefillProgramId)
+
+  const { data: programs = [], isLoading: programsLoading } = useQuery({
+    queryKey: ['programs'],
+    queryFn: () => programsApi.list(),
   })
-
-  const [selectedStrategyId, setSelectedStrategyId] = useState(prefillStrategyId)
-  const [selectedVersionId, setSelectedVersionId] = useState(prefillVersionId)
   const [symbols, setSymbols] = useState('SPY')
   const [timeframe, setTimeframe] = useState('1d')
   const [dataProvider, setDataProvider] = useState<'auto' | 'yfinance' | 'alpaca'>('auto')
@@ -104,12 +103,6 @@ export function BacktestLauncher() {
   const [warmupBars, setWarmupBars] = useState(100)
   const [maxFolds, setMaxFolds] = useState(24)
   const [selectionMetric, setSelectionMetric] = useState<string>('sharpe_ratio')
-
-  const { data: strategyDetail } = useQuery({
-    queryKey: ['strategy', selectedStrategyId],
-    queryFn: () => strategiesApi.get(selectedStrategyId),
-    enabled: !!selectedStrategyId,
-  })
 
   const { data: allServices = [] } = useQuery({
     queryKey: ['services'],
@@ -183,8 +176,7 @@ export function BacktestLauncher() {
 
   const launchMutation = useMutation({
     mutationFn: async () => {
-      const result = await backtestsApi.launch({
-        strategy_version_id: selectedVersionId,
+      const sharedConfig = {
         symbols: symbols.split(',').map((symbol) => symbol.trim()).filter(Boolean),
         timeframe,
         start_date: startDate,
@@ -205,7 +197,8 @@ export function BacktestLauncher() {
           selection_metric: selectionMetric,
           max_parameter_combinations: 64,
         },
-      })
+      }
+      const result = await backtestsApi.launch({ ...sharedConfig, program_id: selectedProgramId })
 
       if (result.status === 'failed') {
         throw new Error(result.error ?? 'Backtest failed to launch')
@@ -218,35 +211,13 @@ export function BacktestLauncher() {
     },
   })
 
-  const versions = strategyDetail?.versions ?? []
-  const latestVersion = versions[0]
-
-  useEffect(() => {
-    // Auto-select latest version only when no version is chosen and no prefill
-    if (!selectedVersionId && latestVersion && !prefillVersionId) {
-      setSelectedVersionId(latestVersion.id)
-    }
-  }, [latestVersion, selectedVersionId, prefillVersionId])
-
-  const strategyOptions = strategies.map((strategy) => ({
-    value: strategy.id,
-    label: `${strategy.name} (${strategy.category})`,
-  }))
-
-  const versionOptions = versions.map((version) => ({
-    value: version.id,
-    label: `v${version.version} - ${version.notes ?? 'no notes'} (${version.promotion_status})`,
-  }))
-
   const serviceOptions = alpacaServices.map((service) => ({
     value: service.id,
     label: `${service.name} (${service.environment})${service.is_default ? ' * default' : ''}`,
   }))
 
   const launchValidationErrors: string[] = []
-  if (!selectedStrategyId) launchValidationErrors.push('Select a strategy.')
-  if (!selectedVersionId) launchValidationErrors.push('Select a strategy version.')
-  if (symbolList.length === 0) launchValidationErrors.push('Provide at least one symbol.')
+  if (!selectedProgramId) launchValidationErrors.push('Select a program.')
   if (symbolList.some((symbol) => !/^[A-Z][A-Z0-9.\-]{0,9}$/.test(symbol))) {
     launchValidationErrors.push('Use valid ticker symbols (uppercase letters/numbers).')
   }
@@ -303,7 +274,7 @@ export function BacktestLauncher() {
   return (
     <div className="max-w-2xl space-y-6">
       <div>
-        <h1 className="text-xl font-bold text-gray-100">Backtest Launcher</h1>
+        <h1 className="text-xl font-bold text-gray-100 flex items-center">Backtest Launcher<PageHelp page="backtest" /></h1>
         <p className="mt-0.5 text-xs text-gray-500">
           Run a strategy against historical market data
         </p>
@@ -320,60 +291,33 @@ export function BacktestLauncher() {
 
       <div className="card space-y-4">
         <h3 className="border-b border-gray-800 pb-2 text-sm font-semibold text-gray-200">
-          Strategy Selection
+          Program Selection
         </h3>
-
-        {strategiesLoading ? (
+        <p className="text-xs text-gray-500">
+          Backtests run against a full Program — strategy signal + Governor + Execution Style + Risk Profile + Watchlists.
+        </p>
+        {programsLoading ? (
           <div className="flex items-center gap-2 text-sm text-gray-500">
-            <Loader size={14} className="animate-spin" /> Loading strategies...
+            <Loader size={14} className="animate-spin" /> Loading programs...
           </div>
-        ) : strategies.length === 0 ? (
+        ) : programs.length === 0 ? (
           <div className="flex items-start gap-2 rounded-lg border border-amber-800/50 bg-amber-900/20 p-3 text-sm text-amber-400">
             <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
-            <span>
-              No strategies found.{' '}
-              <a href="/strategies/new" className="underline hover:text-amber-300">
-                Create one first
-              </a>{' '}
-              before running a backtest.
-            </span>
+            <span>No programs found. <a href="/programs" className="underline hover:text-amber-300">Build one first</a>.</span>
           </div>
         ) : (
           <div>
-            <label className="label">Strategy</label>
-            <SelectMenu
-              className="w-full"
-              value={selectedStrategyId}
-              placeholder="- Select a strategy -"
-              options={strategyOptions}
-              onChange={(value) => {
-                setSelectedStrategyId(value)
-                setSelectedVersionId('')
-              }}
+            <label className="label">Program</label>
+            <SelectMenu className="w-full" value={selectedProgramId} placeholder="- Select a program -"
+              options={programs.map(p => ({ value: p.id, label: p.name }))}
+              onChange={setSelectedProgramId}
             />
           </div>
         )}
-
-        {versions.length > 0 && (
-          <div>
-            <label className="label">Version</label>
-            <SelectMenu
-              className="w-full"
-              value={selectedVersionId}
-              placeholder="- Select version -"
-              options={versionOptions}
-              onChange={setSelectedVersionId}
-            />
-          </div>
-        )}
-
-        {latestVersion && !selectedVersionId && (
-          <div
-            className="cursor-pointer text-xs text-sky-400 hover:text-sky-300"
-            onClick={() => setSelectedVersionId(latestVersion.id)}
-          >
-            Use latest version (v{latestVersion.version})
-          </div>
+        {selectedProgramId && (
+          <p className="text-xs text-gray-500">
+            Timeframe and symbols will be resolved from the program's Governor and Watchlists. Override below if needed.
+          </p>
         )}
       </div>
 
@@ -468,7 +412,7 @@ export function BacktestLauncher() {
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           <div>
             <label className="label">Timeframe</label>
             <SelectMenu
@@ -535,7 +479,7 @@ export function BacktestLauncher() {
             <div className="text-[11px] text-gray-600 bg-gray-900/60 rounded px-3 py-2 border border-gray-800">
               <strong className="text-gray-500">Tip:</strong> {wfInfo.tip} Ensure your date range spans at least (train + test) × 2 for meaningful folds.
             </div>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
               <div>
                 <label className="label">Train Window ({wfInfo.label})</label>
                 <input
@@ -607,7 +551,7 @@ export function BacktestLauncher() {
         <div className="text-[11px] text-gray-600 bg-gray-900/60 rounded px-3 py-2 border border-gray-800">
           <strong className="text-gray-500">Tip:</strong> For realistic results, use Alpaca commission defaults: $0.005/share or 0.1%/trade. Set slippage to 1–2 ticks for liquid ETFs, higher for small-caps.
         </div>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           <div>
             <label className="label">Initial Capital ($)</label>
             <input

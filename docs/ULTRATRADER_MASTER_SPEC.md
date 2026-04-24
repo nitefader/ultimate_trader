@@ -1,4 +1,5 @@
 # UltraTrader 2026 — Master Specification Document
+**Timestamp (ET):** 2026-04-22 11:02:07 AM ET  
 ### Complete PRD · CSS Design System · Site Diagram · API Spec · UX Backlog · Data Sources
 
 > **Purpose:** One authoritative document for recreating or extending UltraTrader 2026 — its look, feel, capabilities, data model, and roadmap. Written for a design + trading expert pair to execute from scratch.
@@ -17,7 +18,6 @@
 8. [Strategy Configuration Schema](#8-strategy-configuration-schema)
 9. [Free Market Data Sources](#9-free-market-data-sources)
 10. [UX Backlog — Trading & UX Expert Recommendations](#10-ux-backlog--trading--ux-expert-recommendations)
-
 ---
 
 ## 1. Product Overview & PRD
@@ -93,7 +93,6 @@ PLATFORM_MODE = backtest | paper | live
 | Multi-leg orders | Backlog |
 | Notifications (email/SMS) | Backlog |
 | Strategy marketplace | Backlog |
-
 ---
 
 ## 2. Site Map & Navigation Diagram
@@ -188,7 +187,6 @@ LIVE MONITORING FLOW
     └── Orders table
   → [Close Position] or [Close All] → confirm dialog
 ```
-
 ---
 
 ## 3. Design System & CSS Specification
@@ -652,7 +650,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
 | Navigate | `ArrowRight` |
 | Refresh | `RotateCcw` |
 | Dollar | `DollarSign` |
-
 ---
 
 ## 4. Page-by-Page Specification
@@ -702,7 +699,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
 ```
 
 **Data:** `useQuery` with `refetchInterval` — accounts 20s, deployments 15s, backtests 30s
-
 ---
 
 ### 4.2 Strategy List (`/strategies`)
@@ -726,7 +722,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   "No strategies defined yet"
   [Create your first strategy] btn-primary
 ```
-
 ---
 
 ### 4.3 Strategy Creator (`/strategies/new`)
@@ -813,7 +808,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   ⚠️  Warning: ... (amber)
   ❌  Error: ... (red)
 ```
-
 ---
 
 ### 4.4 Strategy Details (`/strategies/:strategyId`)
@@ -844,7 +838,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   "This creates v{n+1}" hint
   [Cancel] [Create Version] buttons
 ```
-
 ---
 
 ### 4.5 Backtest Launcher (`/backtest`)
@@ -883,7 +876,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   Spinner shown during request
   On success → navigate to /runs/:runId
 ```
-
 ---
 
 ### 4.6 Run History (`/runs`)
@@ -907,7 +899,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   BarChart2 icon, "No backtest runs yet"
   [Launch First Backtest] btn-primary
 ```
-
 ---
 
 ### 4.7 Run Details (`/runs/:runId`)
@@ -1001,7 +992,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   On success: green confirmation card
     "Deployment created. View in Deployments →"
 ```
-
 ---
 
 ### 4.8 Live Monitor (`/monitor`)
@@ -1038,7 +1028,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   Table: Symbol | Side | Type | Qty | Filled | Limit | Status | Time
   Status: open (sky) | filled (green) | cancelled (gray) | partial (amber)
 ```
-
 ---
 
 ### 4.9 Account Monitor (`/accounts`)
@@ -1072,7 +1061,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   Loading: skeleton rows
   Error: red card "Error loading accounts: {message}"
 ```
-
 ---
 
 ### 4.10 Credential Manager (`/security`)
@@ -1104,7 +1092,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   "No accounts found. Create an account first."
   [Go to Accounts] link
 ```
-
 ---
 
 ### 4.11 Deployment Manager (`/deployments`)
@@ -1149,7 +1136,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
     Disabled until all 6 checked
     Requires confirm dialog
 ```
-
 ---
 
 ### 4.12 Data Manager (`/data`)
@@ -1185,7 +1171,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   Common settings (timeframe, dates, provider)
   [Fetch All] → progress list per symbol
 ```
-
 ---
 
 ### 4.13 Event Calendar (`/events`)
@@ -1213,7 +1198,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   [Seed Sample Events] btn-ghost
     → Creates: FOMC, CPI, NFP samples
 ```
-
 ---
 
 ### 4.14 Logs & Alerts (`/logs`)
@@ -1241,7 +1225,6 @@ All icons sourced from **lucide-react** (tree-shakable, consistent 2px stroke we
   Activity icon
   "No kill switch events recorded"
 ```
-
 ---
 
 ## 5. Component Library
@@ -1372,7 +1355,6 @@ Color scale:
 Grid: rows = months, cols = years
 Cell: min-w-10 h-8, rounded, hover tooltip
 ```
-
 ---
 
 ## 6. API Specification
@@ -1380,7 +1362,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
 **Base URL:** `http://localhost:8000/api/v1`
 **Content-Type:** `application/json`
 **Auth:** None (single-user mode; JWT-ready)
-
 ---
 
 ### 6.1 Strategies
@@ -1429,7 +1410,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
   "warnings": ["No profit targets defined — strategy will hold until stop"]
 }
 ```
-
 ---
 
 ### 6.2 Backtests
@@ -1506,7 +1486,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
   }
 }
 ```
-
 ---
 
 ### 6.3 Accounts
@@ -1562,7 +1541,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
   }
 }
 ```
-
 ---
 
 ### 6.4 Deployments
@@ -1577,7 +1555,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
 | `POST` | `/deployments/{id}/pause` | Pause running |
 | `POST` | `/deployments/{id}/stop` | Stop with reason |
 | `GET` | `/deployments/{id}/positions` | Current positions |
-
 ---
 
 ### 6.5 Monitor
@@ -1590,7 +1567,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
 | `GET` | `/monitor/runs/{id}/orders` | Live orders |
 | `POST` | `/monitor/runs/{id}/close-position` | Close single position |
 | `POST` | `/monitor/runs/{id}/close-all` | Flatten entire account |
-
 ---
 
 ### 6.6 Control / Kill Switch
@@ -1604,7 +1580,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
 | `POST` | `/control/pause-strategy/{id}` | Pause specific strategy |
 | `POST` | `/control/resume-strategy/{id}` | Resume specific strategy |
 | `GET` | `/control/kill-events` | Audit log (`?limit=100`) |
-
 ---
 
 ### 6.7 Data
@@ -1618,7 +1593,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
 | `POST` | `/data/fetch` | Fetch single symbol |
 | `POST` | `/data/fetch-many` | Batch fetch |
 | `DELETE` | `/data/cache/{symbol}/{tf}` | Clear cache |
-
 ---
 
 ### 6.8 ML
@@ -1626,7 +1600,6 @@ Cell: min-w-10 h-8, rounded, hover tooltip
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/ml/promote-advice` | Promotion recommendation |
-
 ---
 
 ### 6.9 WebSocket
@@ -1642,7 +1615,6 @@ Future events to broadcast:
   {"type": "kill_switch_activated", "data": {...}}
   {"type": "position_updated", "data": {...}}
 ```
-
 ---
 
 ## 7. Data Models & Database Schema
@@ -1891,7 +1863,6 @@ CREATE TABLE market_events (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
-
 ---
 
 ## 8. Strategy Configuration Schema
@@ -2036,7 +2007,6 @@ event_filter:
   minutes_after: 30
   disable_entries: bool         # if true, no new entries in window
 ```
-
 ---
 
 ## 9. Free Market Data Sources
@@ -2113,13 +2083,11 @@ class DataProvider(ABC):
         # returns: [{symbol, name, type, exchange}]
         ...
 ```
-
 ---
 
 ## 10. UX Backlog — Trading & UX Expert Recommendations
 
 > Items below are prioritized backlog additions that a UX designer + experienced trader would identify as high-impact gaps. Each item includes the **why** from a trading perspective and **how** from a UX perspective.
-
 ---
 
 ### 10.1 Critical UX Gaps (P0 — Do First)
@@ -2150,7 +2118,6 @@ class DataProvider(ABC):
 #### BL-005: Account Balance Staleness Indicator
 **Problem:** Account balances refresh every 20s but show no age indicator. Trader can't tell if data is fresh.
 **Fix:** Show "Last updated: 12s ago" with color coding: <30s green, <60s amber, >60s red with auto-refresh button.
-
 ---
 
 ### 10.2 High-Impact UX Improvements (P1)
@@ -2225,7 +2192,6 @@ M → Live Monitor
 A → Accounts
 ? → Show shortcuts modal
 ```
-
 ---
 
 ### 10.3 Trading Intelligence Features (P2)
@@ -2287,7 +2253,6 @@ A → Accounts
 - "Historical avg recovery: 32 days"
 - "Worst recovery: 87 days"
 - Derived from the run's actual equity curve drawdown periods
-
 ---
 
 ### 10.4 Infrastructure & DevX (P3)
@@ -2339,7 +2304,6 @@ Persistent progress indicator until all 5 steps done.
 **UX:** In Strategy Details:
 - [Export YAML] → downloads strategy config as `.yaml`
 - In Strategies list: [Import Strategy] → uploads YAML → creates new strategy
-
 ---
 
 ### 10.5 Summary Backlog Table
@@ -2378,7 +2342,6 @@ Persistent progress indicator until all 5 steps done.
 | BL-030 | Strategy YAML import/export | P3 | S | Portability |
 
 **Effort:** S = 1-4 hrs · M = 1-2 days · L = 3-5 days
-
 ---
 
 *Generated: 2026-04-10 · UltraTrader 2026 v1.0.0*

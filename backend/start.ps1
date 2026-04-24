@@ -1,18 +1,32 @@
 # Start the backend using the project venv exclusively.
-# Prepends venv Scripts to PATH so uvicorn's child worker also uses venv Python.
+# Always runs from $PSScriptRoot (the backend/ directory) regardless of where
+# this script is invoked from — prevents the wrong ultratrader.db from loading.
 $root = $PSScriptRoot
-$venvScripts = Join-Path $root ".venv\Scripts"
-$venvPython  = Join-Path $venvScripts "python.exe"
-
-if (-not (Test-Path $venvPython)) {
-    Write-Error "Venv not found at $venvPython — run: python -m venv .venv && pip install -r requirements.txt"
+$venvScripts = Join-Path $root "..\venv\Scripts"
+# Support venv at project root (.venv) or backend-local (venv)
+$venvAtRoot  = Join-Path $root "..\.venv\Scripts\python.exe"
+$venvLocal   = Join-Path $root "venv\Scripts\python.exe"
+if (Test-Path $venvAtRoot)       { $venvPython = $venvAtRoot }
+elseif (Test-Path $venvLocal)    { $venvPython = $venvLocal }
+else {
+    Write-Error "Venv not found — run: python -m venv .venv && pip install -r requirements.txt"
     exit 1
 }
 
-# Put venv Scripts FIRST so uvicorn subprocess finds the right python
-$env:PATH = "$venvScripts;$env:PATH"
-$env:PYTHONPATH = $root
+# Free port 8000 if something is already holding it
+$occupants = (netstat -ano | Select-String ":8000\s.*LISTENING") -replace '.*LISTENING\s+', '' | ForEach-Object { $_.Trim() } | Sort-Object -Unique
+foreach ($p in $occupants) {
+    if ($p -match '^\d+$') {
+        Write-Host "Releasing port 8000 (PID $p)..."
+        taskkill /PID $p /F /T 2>&1 | Out-Null
+    }
+}
+if ($occupants) { Start-Sleep -Seconds 1 }
 
+# Always cd to backend/ so relative paths (logs, data, configs) resolve correctly
 Set-Location $root
-Write-Host "Starting backend with $venvPython"
-& $venvPython -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+$env:PATH = "$(Split-Path $venvPython);$env:PATH"
+
+Write-Host "Starting backend from $root"
+Write-Host "Python: $venvPython"
+& $venvPython -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000

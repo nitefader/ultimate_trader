@@ -11,23 +11,28 @@ import logging
 import threading
 import time
 import uuid
-from dataclasses import dataclass
-from typing import Any, Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal, Callable, Awaitable
+import asyncio
 
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
+from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
     GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
     MarketOrderRequest as _BracketBase,
+    ReplaceOrderRequest,
+    StopOrderRequest,
+    StopLimitOrderRequest,
+    TrailingStopOrderRequest,
 )
 
 logger = logging.getLogger(__name__)
 
 PaperOrLive = Literal["paper", "live"]
-OrderType = Literal["market", "limit"]
+OrderType = Literal["market", "limit", "stop", "stop_limit", "trailing_stop"]
 AssetClass = Literal["us_equity"]
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
@@ -39,8 +44,11 @@ BASE_URL_BY_MODE: dict[PaperOrLive, str] = {
 
 SUPPORTED_ORDER_TIFS: dict[AssetClass, dict[OrderType, set[str]]] = {
     "us_equity": {
-        "market": {"day", "gtc", "opg", "cls", "ioc", "fok"},
-        "limit": {"day", "gtc", "opg", "cls", "ioc", "fok"},
+        "market":        {"day", "gtc", "opg", "cls", "ioc", "fok"},
+        "limit":         {"day", "gtc", "opg", "cls", "ioc", "fok"},
+        "stop":          {"day", "gtc"},
+        "stop_limit":    {"day", "gtc"},
+        "trailing_stop": {"day", "gtc"},
     }
 }
 
@@ -105,7 +113,75 @@ class AlpacaOrderRequest:
     time_in_force: str = "day"
     asset_class: AssetClass = "us_equity"
     limit_price: float | None = None
+    stop_price: float | None = None        # required for stop / stop_limit
+    trail_percent: float | None = None     # required for trailing_stop (percent-based)
+    trail_price: float | None = None       # required for trailing_stop (dollar-based)
     client_order_id: str | None = None
+
+
+_VALID_INTENTS = frozenset({"open", "close", "tp", "sl", "scale"})
+
+
+def build_program_client_order_id(
+    program_name: str | None = None,
+    deployment_id: str | None = None,
+    intent: str = "open",
+) -> str:
+    """
+    Build a traceable client_order_id that encodes program identity and order intent.
+
+    Format: {prog_abbrev}-{deploy8}-{intent}-{rand8}
+    e.g. "MACDSPY-a3f2b1c4-open-d9e7f023"
+
+    Intent must be one of: open, close, tp, sl, scale.
+    Alpaca client_order_id limit is 128 chars; this stays well under (~35 chars max).
+    """
+    import re
+    if intent not in _VALID_INTENTS:
+        intent = "open"
+    parts = []
+    if program_name:
+        abbrev = re.sub(r"[^A-Za-z0-9]", "", program_name.upper())[:10]
+        if abbrev:
+            parts.append(abbrev)
+    if deployment_id:
+        parts.append(deployment_id[:8])
+    parts.append(intent)
+    parts.append(uuid.uuid4().hex[:8])
+    return "-".join(parts)
+
+
+def parse_order_intent(client_order_id: str | None) -> str:
+    """
+    Extract the intent segment from a client_order_id.
+
+    New format (4 dash-separated parts): {prog}-{deploy8}-{intent}-{rand8}
+      → returns intent at index 2 if it is a valid intent value.
+    Legacy format (3 parts) or raw UUID (5 hex groups): → "unknown"
+    None or unparseable: → "unknown"
+    """
+    if not client_order_id:
+        return "unknown"
+    parts = client_order_id.split("-")
+    if len(parts) == 4 and parts[2] in _VALID_INTENTS:
+        return parts[2]
+    return "unknown"
+
+
+def parse_order_deployment_id(client_order_id: str | None) -> str | None:
+    """
+    Extract the 8-char deployment_id prefix from a client_order_id.
+
+    New format: index 1 is the deploy8 segment (first 8 chars of deployment_id).
+    Returns None for legacy format, None input, or unrecognized format.
+    Callers compare: parse_order_deployment_id(coid) == deployment_id[:8]
+    """
+    if not client_order_id:
+        return None
+    parts = client_order_id.split("-")
+    if len(parts) == 4 and parts[2] in _VALID_INTENTS:
+        return parts[1]
+    return None
 
 
 @dataclass(frozen=True)
@@ -186,23 +262,57 @@ def _validate_order_request(order: AlpacaOrderRequest) -> None:
         raise AlpacaOrderValidationError("limit_price is required for limit orders")
 
     if order.order_type == "market" and order.limit_price is not None:
-        raise AlpacaOrderValidationError("limit_price is only valid for limit orders")
+        raise AlpacaOrderValidationError("limit_price is only valid for limit/stop_limit orders")
+
+    if order.order_type == "stop" and order.stop_price is None:
+        raise AlpacaOrderValidationError("stop_price is required for stop orders")
+
+    if order.order_type == "stop_limit" and order.stop_price is None:
+        raise AlpacaOrderValidationError("stop_price is required for stop_limit orders")
+
+    if order.order_type == "stop_limit" and order.limit_price is None:
+        raise AlpacaOrderValidationError("limit_price is required for stop_limit orders")
+
+    if order.order_type == "trailing_stop" and order.trail_percent is None and order.trail_price is None:
+        raise AlpacaOrderValidationError("trailing_stop requires either trail_percent or trail_price")
+
+    if order.order_type == "trailing_stop" and order.trail_percent is not None and order.trail_price is not None:
+        raise AlpacaOrderValidationError("trailing_stop cannot have both trail_percent and trail_price")
 
 
-def _build_order_request(order: AlpacaOrderRequest) -> MarketOrderRequest | LimitOrderRequest:
+def _build_order_request(
+    order: AlpacaOrderRequest,
+) -> MarketOrderRequest | LimitOrderRequest | StopOrderRequest | StopLimitOrderRequest | TrailingStopOrderRequest:
     _validate_order_request(order)
 
     common = {
-        "symbol": order.symbol,
+        "symbol": (order.symbol or "").upper(),
         "qty": order.qty,
         "side": OrderSide.BUY if order.side == "buy" else OrderSide.SELL,
         "time_in_force": TIME_IN_FORCE_BY_NAME[order.time_in_force.strip().lower()],
         "client_order_id": order.client_order_id,
     }
+
     if order.order_type == "market":
         return MarketOrderRequest(**common)
 
-    return LimitOrderRequest(limit_price=order.limit_price, **common)
+    if order.order_type == "limit":
+        return LimitOrderRequest(limit_price=order.limit_price, **common)
+
+    if order.order_type == "stop":
+        return StopOrderRequest(stop_price=order.stop_price, **common)
+
+    if order.order_type == "stop_limit":
+        return StopLimitOrderRequest(
+            stop_price=order.stop_price,
+            limit_price=order.limit_price,
+            **common,
+        )
+
+    # trailing_stop — uses trail_percent OR trail_price (mutually exclusive)
+    if order.trail_percent is not None:
+        return TrailingStopOrderRequest(trail_percent=order.trail_percent, **common)
+    return TrailingStopOrderRequest(trail_price=order.trail_price, **common)
 
 
 def validate_credentials(config: AlpacaClientConfig) -> dict[str, Any]:
@@ -306,6 +416,7 @@ def place_order(config: AlpacaClientConfig, order: AlpacaOrderRequest) -> dict[s
     """
     try:
         # Auto-generate client_order_id when not provided (ALP-020)
+        # Uses build_program_client_order_id() when called from governor/broker with program context.
         if order.client_order_id is None:
             order = AlpacaOrderRequest(
                 symbol=order.symbol,
@@ -315,6 +426,9 @@ def place_order(config: AlpacaClientConfig, order: AlpacaOrderRequest) -> dict[s
                 time_in_force=order.time_in_force,
                 asset_class=order.asset_class,
                 limit_price=order.limit_price,
+                stop_price=order.stop_price,
+                trail_percent=order.trail_percent,
+                trail_price=order.trail_price,
                 client_order_id=str(uuid.uuid4()),
             )
 
@@ -387,7 +501,11 @@ def place_market_order(
     time_in_force: str = "day",
     asset_class: AssetClass = "us_equity",
     client_order_id: str | None = None,
+    program_name: str | None = None,
+    deployment_id: str | None = None,
+    intent: str = "open",
 ) -> dict[str, Any]:
+    oid = client_order_id or build_program_client_order_id(program_name, deployment_id, intent)
     return place_order(
         config,
         AlpacaOrderRequest(
@@ -397,7 +515,7 @@ def place_market_order(
             order_type="market",
             time_in_force=time_in_force,
             asset_class=asset_class,
-            client_order_id=client_order_id,
+            client_order_id=oid,
         ),
     )
 
@@ -411,7 +529,11 @@ def place_limit_order(
     time_in_force: str = "day",
     asset_class: AssetClass = "us_equity",
     client_order_id: str | None = None,
+    program_name: str | None = None,
+    deployment_id: str | None = None,
+    intent: str = "open",
 ) -> dict[str, Any]:
+    oid = client_order_id or build_program_client_order_id(program_name, deployment_id, intent)
     return place_order(
         config,
         AlpacaOrderRequest(
@@ -422,7 +544,104 @@ def place_limit_order(
             limit_price=limit_price,
             time_in_force=time_in_force,
             asset_class=asset_class,
-            client_order_id=client_order_id,
+            client_order_id=oid,
+        ),
+    )
+
+
+def place_stop_order(
+    config: AlpacaClientConfig,
+    symbol: str,
+    qty: float,
+    side: str,
+    stop_price: float,
+    time_in_force: str = "day",
+    asset_class: AssetClass = "us_equity",
+    client_order_id: str | None = None,
+    program_name: str | None = None,
+    deployment_id: str | None = None,
+    intent: str = "open",
+) -> dict[str, Any]:
+    oid = client_order_id or build_program_client_order_id(program_name, deployment_id, intent)
+    return place_order(
+        config,
+        AlpacaOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=side,  # type: ignore[arg-type]
+            order_type="stop",
+            stop_price=stop_price,
+            time_in_force=time_in_force,
+            asset_class=asset_class,
+            client_order_id=oid,
+        ),
+    )
+
+
+def place_stop_limit_order(
+    config: AlpacaClientConfig,
+    symbol: str,
+    qty: float,
+    side: str,
+    stop_price: float,
+    limit_price: float,
+    time_in_force: str = "day",
+    asset_class: AssetClass = "us_equity",
+    client_order_id: str | None = None,
+    program_name: str | None = None,
+    deployment_id: str | None = None,
+    intent: str = "open",
+) -> dict[str, Any]:
+    oid = client_order_id or build_program_client_order_id(program_name, deployment_id, intent)
+    return place_order(
+        config,
+        AlpacaOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=side,  # type: ignore[arg-type]
+            order_type="stop_limit",
+            stop_price=stop_price,
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+            asset_class=asset_class,
+            client_order_id=oid,
+        ),
+    )
+
+
+def place_trailing_stop_order(
+    config: AlpacaClientConfig,
+    symbol: str,
+    qty: float,
+    side: str,
+    *,
+    trail_percent: float | None = None,
+    trail_price: float | None = None,
+    time_in_force: str = "day",
+    asset_class: AssetClass = "us_equity",
+    client_order_id: str | None = None,
+    program_name: str | None = None,
+    deployment_id: str | None = None,
+    intent: str = "sl",
+) -> dict[str, Any]:
+    """Submit a trailing stop order to Alpaca.
+
+    Exactly one of trail_percent (e.g. 2.0 for 2%) or trail_price (dollar amount)
+    must be provided. This is a standalone exit order — place after entry fills.
+    """
+    oid = client_order_id or build_program_client_order_id(program_name, deployment_id, intent)
+    return place_order(
+        config,
+        AlpacaOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=side,  # type: ignore[arg-type]
+            order_type="trailing_stop",
+            trail_percent=trail_percent,
+            trail_price=trail_price,
+            time_in_force=time_in_force,
+            asset_class=asset_class,
+            client_order_id=oid,
         ),
     )
 
@@ -564,16 +783,16 @@ def place_bracket_order(
     side: str,
     *,
     stop_price: float | None = None,
+    stop_limit_price: float | None = None,
     take_profit_price: float | None = None,
+    entry_limit_price: float | None = None,
     time_in_force: str = "day",
     client_order_id: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Submit a bracket order (order_class=bracket) to Alpaca.
+    """Submit a bracket order (order_class=bracket) to Alpaca.
 
-    A bracket order is a market order with attached stop-loss and/or take-profit
-    legs. Reduces execution layer complexity — Alpaca manages the contingent legs.
-
+    Supports market or limit entry (entry_limit_price sets limit entry).
+    Stop leg: market stop by default; set stop_limit_price for a stop-limit stop leg.
     At least one of stop_price or take_profit_price must be provided.
     """
     if not stop_price and not take_profit_price:
@@ -592,8 +811,6 @@ def place_bracket_order(
         tif = TIME_IN_FORCE_BY_NAME.get(time_in_force.lower(), TimeInForce.DAY)
         coid = client_order_id or str(uuid.uuid4())
 
-        # Build the bracket order payload as a raw dict — alpaca-py MarketOrderRequest
-        # supports order_class and take_profit / stop_loss legs via keyword args.
         order_data: dict[str, Any] = {
             "symbol": symbol.upper(),
             "qty": qty,
@@ -605,9 +822,17 @@ def place_bracket_order(
         if take_profit_price:
             order_data["take_profit"] = {"limit_price": take_profit_price}
         if stop_price:
-            order_data["stop_loss"] = {"stop_price": stop_price}
+            stop_leg: dict[str, float] = {"stop_price": stop_price}
+            if stop_limit_price is not None:
+                stop_leg["limit_price"] = stop_limit_price
+            order_data["stop_loss"] = stop_leg
 
-        req = MarketOrderRequest(**{k: v for k, v in order_data.items() if v is not None})
+        # Use LimitOrderRequest when a limit entry price is provided, otherwise market.
+        if entry_limit_price is not None:
+            req = LimitOrderRequest(limit_price=entry_limit_price, **{k: v for k, v in order_data.items() if v is not None})
+        else:
+            req = MarketOrderRequest(**{k: v for k, v in order_data.items() if v is not None})
+
         submitted = client.submit_order(req)
         result = _fmt_order(submitted)
         result["order_class"] = "bracket"
@@ -622,6 +847,111 @@ def place_bracket_order(
         return {"error": str(exc)}
     except Exception as exc:
         logger.error("Unexpected error placing bracket order for %s: %s", symbol, exc)
+        return {"error": "Unexpected error"}
+
+
+def replace_order(
+    config: AlpacaClientConfig,
+    order_id: str,
+    *,
+    qty: float | None = None,
+    stop_price: float | None = None,
+    limit_price: float | None = None,
+) -> dict[str, Any]:
+    """Modify an existing order's qty and/or price via Alpaca's replace endpoint.
+
+    Used for stop leg resizing after a scale-out level fills — avoids cancel+resubmit.
+    At least one of qty, stop_price, or limit_price must be provided.
+    """
+    if qty is None and stop_price is None and limit_price is None:
+        return {"error": "replace_order requires at least one of qty, stop_price, or limit_price"}
+    try:
+        _check_rate_limit(config.api_key)
+        client = TradingClient(
+            api_key=config.api_key,
+            secret_key=config.secret_key,
+            paper=config.mode == "paper",
+            url_override=config.base_url,
+        )
+        req = ReplaceOrderRequest(
+            qty=qty,
+            stop_price=stop_price,
+            limit_price=limit_price,
+        )
+        replaced = client.replace_order_by_id(order_id, req)
+        return _fmt_order(replaced)
+    except APIError as exc:
+        logger.error("Failed to replace Alpaca order %s: %s", order_id, exc)
+        return {"error": str(exc)}
+    except AlpacaRateLimitError as exc:
+        logger.warning("Alpaca rate limit hit: %s", exc)
+        return {"error": str(exc)}
+    except Exception as exc:
+        logger.error("Unexpected error replacing order %s: %s", order_id, exc)
+        return {"error": "Unexpected error"}
+
+
+def place_oco_order(
+    config: AlpacaClientConfig,
+    symbol: str,
+    qty: float,
+    side: str,
+    *,
+    stop_price: float,
+    take_profit_price: float,
+    time_in_force: str = "gtc",
+    client_order_id: str | None = None,
+    program_name: str | None = None,
+    deployment_id: str | None = None,
+) -> dict[str, Any]:
+    """Place an OCO (One-Cancels-Other) exit order after an entry fills.
+
+    OCO = two resting exit orders (stop loss + take profit) where filling one
+    cancels the other. Placed post-fill, not bundled with entry (unlike bracket).
+    Used for scale-out: each scale level gets its own OCO for remaining qty.
+
+    Returns the order dict; the stop leg ID is accessible via result['legs'].
+    """
+    try:
+        _check_rate_limit(config.api_key)
+        client = TradingClient(
+            api_key=config.api_key,
+            secret_key=config.secret_key,
+            paper=config.mode == "paper",
+            url_override=config.base_url,
+        )
+        coid = client_order_id or build_program_client_order_id(program_name, deployment_id, "sl")
+        order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+        tif = TIME_IN_FORCE_BY_NAME.get(time_in_force.lower(), TimeInForce.GTC)
+
+        # OCO: parent is limit order (TP leg) + stop_loss dict (stop leg)
+        req = LimitOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=order_side,
+            time_in_force=tif,
+            limit_price=take_profit_price,
+            order_class=OrderClass.OCO,
+            stop_loss={"stop_price": stop_price},
+            client_order_id=coid,
+        )
+        submitted = client.submit_order(req)
+        result = _fmt_order(submitted)
+        result["order_class"] = "oco"
+        result["stop_price"] = stop_price
+        result["take_profit_price"] = take_profit_price
+        # Include legs so callers can extract the stop leg order ID
+        if hasattr(submitted, "legs") and submitted.legs:
+            result["legs"] = [_fmt_order(leg) for leg in submitted.legs]
+        return result
+    except APIError as exc:
+        logger.error("Failed to place Alpaca OCO order for %s: %s", symbol, exc)
+        return {"error": str(exc)}
+    except AlpacaRateLimitError as exc:
+        logger.warning("Alpaca rate limit hit: %s", exc)
+        return {"error": str(exc)}
+    except Exception as exc:
+        logger.error("Unexpected error placing OCO order for %s: %s", symbol, exc)
         return {"error": "Unexpected error"}
 
 
@@ -648,6 +978,286 @@ def get_latest_prices(symbols: list[str], api_key: str, secret_key: str) -> dict
         return {}
 
 
+# ---- Helper factories to centralize alpaca-py SDK imports for data providers ----
+_DATA_TIMEFRAME_MAP: dict[str, tuple[int, str]] = {
+    "1m":  (1,  "Minute"),
+    "5m":  (5,  "Minute"),
+    "15m": (15, "Minute"),
+    "30m": (30, "Minute"),
+    "1h":  (1,  "Hour"),
+    "4h":  (4,  "Hour"),
+    "1d":  (1,  "Day"),
+    "1wk": (1,  "Week"),
+    "1mo": (1,  "Month"),
+}
+
+
+def build_stock_historical_client(api_key: str, secret_key: str):
+    try:
+        from alpaca.data import StockHistoricalDataClient
+    except ImportError as e:
+        raise RuntimeError("alpaca-py not installed. Run: pip install alpaca-py") from e
+    return StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
+
+
+def build_timeframe(tf_key: str):
+    try:
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    except ImportError as e:
+        raise RuntimeError("alpaca-py not installed. Run: pip install alpaca-py") from e
+    if tf_key not in _DATA_TIMEFRAME_MAP:
+        raise ValueError(f"Unsupported timeframe: {tf_key}")
+    mult, unit_str = _DATA_TIMEFRAME_MAP[tf_key]
+    unit_map = {
+        "Minute": TimeFrameUnit.Minute,
+        "Hour":   TimeFrameUnit.Hour,
+        "Day":    TimeFrameUnit.Day,
+        "Week":   TimeFrameUnit.Week,
+        "Month":  TimeFrameUnit.Month,
+    }
+    return TimeFrame(mult, unit_map[unit_str])
+
+
+def build_stock_bars_request(symbol: str, timeframe_obj, start, end, adjustment: str = "all"):
+    try:
+        from alpaca.data.requests import StockBarsRequest
+    except ImportError as e:
+        raise RuntimeError("alpaca-py not installed. Run: pip install alpaca-py") from e
+    return StockBarsRequest(symbol_or_symbols=symbol, timeframe=timeframe_obj, start=start, end=end, adjustment=adjustment)
+
+
+def build_trading_client(api_key: str, secret_key: str, paper: bool = True, base_url: str | None = None):
+    try:
+        from alpaca.trading.client import TradingClient
+    except ImportError as e:
+        raise RuntimeError("alpaca-py not installed. Run: pip install alpaca-py") from e
+    return TradingClient(api_key=api_key, secret_key=secret_key, paper=paper, url_override=base_url)
+
+
+def search_assets(api_key: str, secret_key: str, query: str, max_results: int = 20) -> list[dict]:
+    """Search Alpaca assets (US equities only) and return a minimal list of dicts.
+
+    This centralises Alpaca SDK usage for symbol lookup.
+    """
+    try:
+        client = build_trading_client(api_key, secret_key, paper=True)
+        from alpaca.trading.requests import GetAssetsRequest
+        from alpaca.trading.enums import AssetClass, AssetStatus
+
+        request = GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
+        assets = client.get_all_assets(request)
+        results = []
+        q = (query or "").upper()
+        for a in assets:
+            if q and q not in a.symbol and (not a.name or q not in a.name.upper()):
+                continue
+            results.append({
+                "symbol": a.symbol,
+                "name": a.name or "",
+                "exchange": a.exchange.value if hasattr(a.exchange, "value") else str(a.exchange),
+                "tradable": bool(getattr(a, "tradable", False)),
+            })
+            if len(results) >= max_results:
+                break
+        return results
+    except Exception as exc:
+        logger.warning("search_assets failed: %s", exc)
+        return []
+
+
+async def create_account_stream_runner(
+    callback: Callable[[dict], Awaitable[None]],
+    api_key: str,
+    secret_key: str,
+    paper: bool,
+    *,
+    stream_factory: Callable[[str, str, bool], object] | None = None,
+) -> None:
+    """
+    Create and run an Alpaca TradingStream and route `trade_updates` events
+    to the provided async `callback`.
+
+    - `callback` is an awaitable callable accepting a single `dict` (raw event).
+    - `stream_factory` is optional and used for testing to supply a fake stream
+      object with `subscribe_trade_updates(cb)` and `run()` methods.
+
+    This runs `stream.run()` in a thread executor so the main event loop is not
+    blocked. Events produced by the stream are scheduled back onto the event
+    loop using `asyncio.run_coroutine_threadsafe`.
+    """
+    if stream_factory is None:
+        from alpaca.trading.stream import TradingStream as _TradingStream
+
+        def _factory(a: str, s: str, p: bool) -> object:
+            return _TradingStream(api_key=a, secret_key=s, paper=p, raw_data=True)
+    else:
+        _factory = stream_factory
+
+    loop = asyncio.get_running_loop()
+    stream = _factory(api_key, secret_key, paper)
+
+    def _sync_handler(data: dict) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(callback(data), loop)
+        except Exception as exc:  # schedule errors must not crash the stream thread
+            logger.warning("create_account_stream_runner: error scheduling callback: %s", exc)
+
+    # Subscribe and run the (blocking) stream in an executor
+    try:
+        subscribe = getattr(stream, "subscribe_trade_updates", None)
+        if not subscribe:
+            raise AttributeError("stream object does not support subscribe_trade_updates()")
+        subscribe(_sync_handler)
+        logger.info("create_account_stream_runner: starting Alpaca TradingStream (paper=%s)", paper)
+        await loop.run_in_executor(None, stream.run)
+    finally:
+        stop = getattr(stream, "stop", None)
+        if stop:
+            try:
+                stop()
+            except Exception:
+                pass
+
+
+@dataclass
+class OrderAuditEntry:
+    order_id: str
+    client_order_id: str | None
+    symbol: str
+    side: str
+    qty: float
+    intent: str
+    reason: str
+    deployment_id: str | None
+
+
+@dataclass
+class CancellationResult:
+    scope: str
+    canceled: list[OrderAuditEntry] = field(default_factory=list)
+    skipped_protective: list[OrderAuditEntry] = field(default_factory=list)
+    skipped_has_position: list[OrderAuditEntry] = field(default_factory=list)
+    skipped_unknown: list[OrderAuditEntry] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    dry_run: bool = False
+
+
+def cancel_resting_open_orders_without_positions(
+    config: AlpacaClientConfig,
+    scope: str,
+    deployment_id: str | None = None,
+    dry_run: bool = False,
+) -> CancellationResult:
+    """
+    Cancel only resting orders that are opening new exposure and have no backing position.
+
+    Uses QueryOrderStatus.OPEN — bracket legs (status="held") are not returned
+    by Alpaca for this query and cannot be canceled by this function. This is intentional:
+    sl/tp legs are contingent and stay alive automatically.
+
+    Steps:
+    1. Fetch open orders via get_orders(config, "open")
+    2. Fetch open positions via get_positions(config)
+    3. For each open order:
+       a. Parse intent from client_order_id
+       b. scope="deployment": skip orders not belonging to target deployment
+       c. intent != "open": skip as protective/reducing
+       d. intent == "open" + position exists in symbol: skip (conservative)
+       e. intent == "open" + no position: cancel via cancel_order(config, order["id"])
+       f. intent == "unknown": skip and flag
+    4. Return CancellationResult with all four buckets populated
+    """
+    result = CancellationResult(scope=scope, dry_run=dry_run)
+
+    orders = get_orders(config, "open")
+    positions = get_positions(config)
+    open_symbols: set[str] = {p["symbol"].upper() for p in positions}
+
+    for order in orders:
+        coid = order.get("client_order_id")
+        symbol = (order.get("symbol") or "").upper()
+        order_id = order.get("id", "")
+        side = order.get("side", "")
+        qty = float(order.get("qty") or 0.0)
+        intent = parse_order_intent(coid)
+        order_deploy8 = parse_order_deployment_id(coid)
+
+        entry = OrderAuditEntry(
+            order_id=order_id,
+            client_order_id=coid,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            intent=intent,
+            reason="",
+            deployment_id=order_deploy8,
+        )
+
+        # Scope filter for deployment-level cancellation
+        if scope == "deployment":
+            if deployment_id is None:
+                entry.reason = "no deployment_id provided for deployment scope"
+                result.skipped_unknown.append(entry)
+                continue
+            if order_deploy8 != deployment_id[:8]:
+                # Not this deployment — skip entirely, don't log
+                continue
+
+        if intent == "unknown":
+            entry.reason = "unattributed client_order_id — kept conservatively"
+            result.skipped_unknown.append(entry)
+            logger.info(
+                "cancel_sweep: skipped_unknown order_id=%s symbol=%s coid=%s",
+                order_id, symbol, coid,
+            )
+            continue
+
+        if intent != "open":
+            entry.reason = f"protective/reducing intent={intent} — kept"
+            result.skipped_protective.append(entry)
+            logger.info(
+                "cancel_sweep: skipped_protective order_id=%s symbol=%s intent=%s",
+                order_id, symbol, intent,
+            )
+            continue
+
+        # intent == "open" from here
+        if symbol in open_symbols:
+            entry.reason = "open-intent but position exists in symbol — kept conservatively"
+            result.skipped_has_position.append(entry)
+            logger.info(
+                "cancel_sweep: skipped_has_position order_id=%s symbol=%s",
+                order_id, symbol,
+            )
+            continue
+
+        # Safe to cancel
+        entry.reason = "resting entry with no backing position"
+        if dry_run:
+            result.canceled.append(entry)
+            logger.info(
+                "cancel_sweep: DRY_RUN would cancel order_id=%s symbol=%s intent=%s",
+                order_id, symbol, intent,
+            )
+        else:
+            cancel_result = cancel_order(config, order_id)
+            if cancel_result.get("cancelled"):
+                result.canceled.append(entry)
+                logger.info(
+                    "cancel_sweep: canceled order_id=%s symbol=%s intent=%s scope=%s",
+                    order_id, symbol, intent, scope,
+                )
+            else:
+                err = cancel_result.get("error", "unknown error")
+                result.errors.append(f"cancel failed for order_id={order_id} symbol={symbol}: {err}")
+                logger.warning(
+                    "cancel_sweep: cancel_failed order_id=%s symbol=%s error=%s",
+                    order_id, symbol, err,
+                )
+
+    return result
+
+
 def _fmt_position(position: Any) -> dict[str, Any]:
     def _float_or_none(value: Any) -> float | None:
         return float(value) if value is not None else None
@@ -657,7 +1267,7 @@ def _fmt_position(position: Any) -> dict[str, Any]:
         return s.split(".")[-1].lower() if "." in s else s.lower()
 
     return {
-        "symbol": str(position.symbol),
+        "symbol": str(position.symbol).upper(),
         "qty": _float_or_none(position.qty),
         "side": _fmt_enum(position.side),
         "avg_entry_price": _float_or_none(position.avg_entry_price),
@@ -682,7 +1292,7 @@ def _fmt_order(order: Any) -> dict[str, Any]:
     return {
         "id": str(order.id),
         "client_order_id": str(order.client_order_id) if order.client_order_id else None,
-        "symbol": str(order.symbol),
+        "symbol": str(order.symbol).upper(),
         "qty": _float_or_none(order.qty),
         "filled_qty": _float_or_none(order.filled_qty) or 0.0,
         "side": _fmt_enum(order.side),

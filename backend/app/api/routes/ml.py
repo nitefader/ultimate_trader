@@ -79,7 +79,7 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # ── Returns ────────────────────────────────────────────────────────────────
     for n in (1, 3, 5, 10):
-        df[f"return_{n}d"] = close.pct_change(n)
+        df[f"return_{n}d"] = close.pct_change(n, fill_method=None)
         df[f"log_return_{n}d"] = np.log(close / close.shift(n))
 
     # ── Rolling volatility (std of log returns) ────────────────────────────────
@@ -756,7 +756,7 @@ async def promote_advice(body: dict[str, Any], db: AsyncSession = Depends(get_db
     - ensures the deployment exists and is a paper deployment
     - reports whether it is running and how many days it has been running
     - looks for any recorded live-approval on the deployment
-    - returns `recommend: true` if a live approval exists or the paper run has >=30 days
+    - returns `recommend: true` if the checklist is complete and the deployment has run
     """
     paper_deployment_id: str | None = body.get("paper_deployment_id")
     if not paper_deployment_id:
@@ -797,6 +797,7 @@ async def promote_advice(body: dict[str, Any], db: AsyncSession = Depends(get_db
     checks["approval_count"] = len(all_approvals)
 
     live_checklist = dict(getattr(live_approval, "safety_checklist", {}) or {})
+    # Keys must match those sent by the frontend promotion flow.
     required_live_checks = [
         "paper_performance_reviewed",
         "risk_limits_confirmed",
@@ -834,20 +835,16 @@ async def promote_advice(body: dict[str, Any], db: AsyncSession = Depends(get_db
 
     if days_running is None:
         reasons.append("Paper deployment has not been started yet")
-    elif days_running >= 30:
-        reasons.append("Paper deployment has at least 30 days of runtime")
     else:
-        reasons.append("Paper deployment has less than 30 days of runtime")
+        reasons.append(f"Paper deployment has been running for {days_running} day(s)")
 
     recommend = bool(
-        checks["is_running"]
-        and days_running is not None
-        and days_running >= 30
+        (checks["is_running"] or checks["is_paused"])
         and checks["live_checklist_ready"]
     )
 
     if checks["has_live_approval"]:
-        recommend = recommend or (checks["is_running"] and checks["live_checklist_ready"])
+        recommend = recommend or checks["live_checklist_ready"]
 
     return {
         "deployment_id": dep.id,

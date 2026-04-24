@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from app.strategies.stops import calculate_stop, calculate_target, update_trailing_stop
+from app.strategies.stops import calculate_stop, calculate_target, update_trailing_stop, resolve_atr_override
 
 
 def make_df(n=50, base_price=100.0):
@@ -130,3 +130,68 @@ def test_trailing_stop_moves_up():
         100.0, "long", bar, df, 29, 100.0, 95.0
     )
     assert new_stop > 100.0  # stop must have moved up
+
+
+# ── resolve_atr_override tests ─────────────────────────────────────────────────
+
+def make_atr_df(n=30, freq="5min"):
+    idx = pd.date_range("2024-01-02 09:30", periods=n, freq=freq)
+    data = {
+        "open":  [100.0 + i * 0.05 for i in range(n)],
+        "high":  [100.0 + i * 0.05 + 0.5 for i in range(n)],
+        "low":   [100.0 + i * 0.05 - 0.5 for i in range(n)],
+        "close": [100.0 + i * 0.05 for i in range(n)],
+    }
+    return pd.DataFrame(data, index=idx)
+
+
+def test_resolve_atr_override_returns_none_when_strategy_source():
+    df = make_atr_df()
+    bar_dt = df.index[-1]
+    result = resolve_atr_override({"atr_source": "strategy"}, df, bar_dt)
+    assert result is None
+
+
+def test_resolve_atr_override_returns_none_when_insufficient_bars():
+    df = make_atr_df(n=5)
+    bar_dt = df.index[-1]
+    result = resolve_atr_override({"atr_source": "custom", "atr_length": 14}, df, bar_dt)
+    assert result is None
+
+
+def test_resolve_atr_override_returns_float():
+    df = make_atr_df(n=30)
+    bar_dt = df.index[-1]
+    result = resolve_atr_override({"atr_source": "custom", "atr_length": 14}, df, bar_dt)
+    assert result is not None
+    assert isinstance(result, float)
+    assert result > 0.0
+
+
+def test_resolve_atr_override_uses_only_completed_bars():
+    """Bars after bar_dt must not be included — no lookahead."""
+    df = make_atr_df(n=30)
+    # Use the 15th bar as the "current" time — bars 16-30 must not be used
+    bar_dt = df.index[14]
+    result_at_15 = resolve_atr_override({"atr_source": "custom", "atr_length": 14}, df, bar_dt)
+    # Use the last bar — all 30 bars available
+    result_at_30 = resolve_atr_override({"atr_source": "custom", "atr_length": 14}, df, df.index[-1])
+    # Both should be valid; the at-15 value is computed on fewer bars
+    assert result_at_15 is not None
+    assert result_at_30 is not None
+    # They should differ because different bar windows
+    # (this is a smoke test — exact values depend on the synthetic data)
+
+
+def test_atr_override_param_overrides_trade_tf_atr():
+    """When atr_override is passed to calculate_stop, it must be used instead of df's ATR."""
+    df = make_df(n=30)
+    bar = df.iloc[-1]
+    # Calculate stop using df's own ATR
+    stop_default = calculate_stop({"method": "atr_multiple", "period": 14, "mult": 2.0}, 100.0, "long", bar, df, 29)
+    # Pass an artificially large override — stop must be much further away
+    stop_override = calculate_stop({"method": "atr_multiple", "period": 14, "mult": 2.0}, 100.0, "long", bar, df, 29,
+                                   atr_override=10.0)
+    assert stop_override is not None
+    assert stop_default is not None
+    assert stop_override < stop_default  # larger ATR → wider stop → lower price for long

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Search, RefreshCw, CheckCircle2, X } from 'lucide-react'
 import clsx from 'clsx'
 import { dataApi, type TickerResult } from '../api/data'
+import { normalizeSymbol, eqSym } from '../lib/symbol'
 
 interface TickerSearchProps {
   /** Currently selected symbols */
@@ -46,12 +47,12 @@ export function TickerSearch({
   const results: TickerResult[] = searchData?.results ?? []
 
   const toggle = (sym: string) => {
+    const ns = normalizeSymbol(sym)
     if (multi) {
-      onChange(
-        selected.includes(sym) ? selected.filter(s => s !== sym) : [...selected, sym],
-      )
+      const has = selected.some(s => eqSym(s, ns))
+      onChange(has ? selected.filter(s => !eqSym(s, ns)) : [...selected, ns])
     } else {
-      onChange([sym])
+      onChange([ns])
     }
   }
 
@@ -105,7 +106,7 @@ export function TickerSearch({
                 onMouseDown={() => { toggle(r.symbol); setQuery(''); setShowDropdown(false) }}
                 className={clsx(
                   'w-full text-left px-4 py-2.5 hover:bg-gray-800 flex items-center justify-between transition-colors',
-                  selected.includes(r.symbol) && 'bg-sky-950/40',
+                  selected.some(s => eqSym(s, r.symbol)) && 'bg-sky-950/40',
                 )}
               >
                 <div>
@@ -114,7 +115,7 @@ export function TickerSearch({
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   <span className="text-xs text-gray-600">{r.exchange}</span>
-                  {selected.includes(r.symbol) && <CheckCircle2 size={12} className="text-sky-400" />}
+                  {selected.some(s => eqSym(s, r.symbol)) && <CheckCircle2 size={12} className="text-sky-400" />}
                 </div>
               </button>
             ))}

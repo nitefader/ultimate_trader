@@ -21,6 +21,7 @@ import {
   YAxis,
 } from 'recharts'
 import { Tooltip } from '../components/Tooltip'
+import { normalizeSymbol, eqSym, includesSym } from '../lib/symbol'
 
 // ── Wizard step definitions ───────────────────────────────────────────────────
 
@@ -665,7 +666,7 @@ function InventoryTable({
   const [filter, setFilter] = useState('')
   const [selected, setSelected] = useState<DataItem | null>(null)
   const filtered = items.filter(
-    i => i.symbol.toLowerCase().includes(filter.toLowerCase())
+    i => includesSym(i.symbol, filter)
   )
 
   const { data: chartData, isLoading: chartLoading, isError: chartIsError, error: chartErrorRaw } = useQuery({
@@ -723,7 +724,7 @@ function InventoryTable({
             {filtered.map((item, i) => {
               const key = `${item.symbol}_${item.timeframe}_${item.provider}`
               const isDeleting = deletingKey === key
-              const isSelected = selected?.symbol === item.symbol && selected?.timeframe === item.timeframe && selected?.provider === item.provider
+              const isSelected = eqSym(selected?.symbol, item.symbol) && selected?.timeframe === item.timeframe && selected?.provider === item.provider
               return (
                 <tr
                   key={i}

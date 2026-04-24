@@ -28,6 +28,7 @@ Thumbs.db
 htmlcov/
 
 .idea/
+.vs/
 .vscode/
 .claude/
 .codex/

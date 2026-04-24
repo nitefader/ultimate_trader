@@ -12,7 +12,8 @@ TradingProgram is a frozen, versioned deployment template.
         └─ execution_policy         → JSON (order type, fill model, slippage assumptions)
 
 Any change to logic, universe, or optimizer → new TradingProgram version.
-The frozen program is deployed to accounts via AccountAllocation.
+The saved program is deployed to accounts via AccountAllocation and becomes
+locked while any active allocation exists.
 
 AccountAllocation
 -----------------
@@ -38,10 +39,13 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.models.strategy_governor import StrategyControls
+from app.models.execution_style import ExecutionStyle
+from app.models.risk_profile import RiskProfile
 
 
 class TradingProgram(Base):
@@ -57,6 +61,7 @@ class TradingProgram(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     version: Mapped[int] = mapped_column(default=1)
     description: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
 
     # Lineage — all component refs captured at freeze time
     strategy_version_id: Mapped[str | None] = mapped_column(
@@ -81,6 +86,20 @@ class TradingProgram(Base):
     # Duration mode snapshot from StrategyVersion at freeze time (denormalized for fast reads)
     duration_mode: Mapped[str] = mapped_column(String(16), default="swing")
 
+    # Universe mode
+    universe_mode: Mapped[str] = mapped_column(String(16), default="snapshot")
+    # snapshot = frozen SymbolUniverseSnapshot; live_feed = polled from watchlists
+
+    watchlist_subscriptions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    watchlist_combination_rule: Mapped[str] = mapped_column(String(32), default="union")
+    # union | intersection | primary_only
+
+    live_universe_deny_list: Mapped[list[str]] = mapped_column(JSON, default=list)
+    live_universe_top_n: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    live_universe_resolved_symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
+    live_universe_resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    universe_poll_override_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Lifecycle
     # draft:      editable, not yet deployable
     # frozen:     locked — all component refs finalized, deployable
@@ -90,6 +109,17 @@ class TradingProgram(Base):
     frozen_at: Mapped[datetime | None] = mapped_column(DateTime)
     frozen_by: Mapped[str | None] = mapped_column(String(128))
     deprecation_reason: Mapped[str | None] = mapped_column(String(500))
+
+    # Five-component architecture FKs
+    strategy_governor_id: Mapped[str | None] = mapped_column(
+        ForeignKey("strategy_controls.id"), index=True
+    )
+    execution_style_id: Mapped[str | None] = mapped_column(
+        ForeignKey("execution_styles.id"), index=True
+    )
+    risk_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("risk_profiles.id"), index=True
+    )
 
     # Promotion lineage — which program this was cloned/promoted from
     parent_program_id: Mapped[str | None] = mapped_column(
@@ -101,6 +131,10 @@ class TradingProgram(Base):
     created_by: Mapped[str] = mapped_column(String(128), default="system")
 
     # Relationships
+    strategy_controls: Mapped["StrategyControls | None"] = relationship("StrategyControls")
+    execution_style: Mapped["ExecutionStyle | None"] = relationship("ExecutionStyle")
+    risk_profile: Mapped["RiskProfile | None"] = relationship("RiskProfile")
+
     allocations: Mapped[list["AccountAllocation"]] = relationship(
         "AccountAllocation",
         back_populates="trading_program",

@@ -58,9 +58,35 @@ async def test_create_market_metadata_snapshot_persists(db, monkeypatch) -> None
 
     payload = serialize_snapshot(snapshot)
     assert payload["metadata_version_id"].startswith("md_20240331_")
+    assert payload["provider_requested"] == "yfinance"
+    assert payload["provider_used"] == "yfinance"
+    assert payload["fetch_start_date"] == "2023-12-02"
+    assert payload["fetch_end_date"] == "2024-03-31"
     assert payload["symbol_count"] == 2
     assert payload["symbols"][0]["symbol"] == "QQQ" or payload["symbols"][0]["symbol"] == "SPY"
     assert any(item["sector_tag"] == "broad_market" for item in payload["symbols"])
     assert all(item["adv_usd_30d"] is not None for item in payload["symbols"])
     assert all(item["spread_proxy_bps_30d"] is not None for item in payload["symbols"])
     assert all(item["regime_tag"] in {"bull", "bear", "sideways", "unknown"} for item in payload["symbols"])
+
+
+@pytest.mark.asyncio
+async def test_create_market_metadata_snapshot_persists_auto_provider_resolution(db, monkeypatch) -> None:
+    await create_all_tables()
+    monkeypatch.setattr(
+        "app.services.market_metadata_service.fetch_market_data",
+        lambda **kwargs: _sample_price_frame(150.0),
+    )
+
+    snapshot = await create_market_metadata_snapshot(
+        db,
+        symbols=["SPY"],
+        as_of_date="2024-03-31",
+        provider="auto",
+    )
+    await db.commit()
+    await db.refresh(snapshot, attribute_names=["symbols"])
+
+    payload = serialize_snapshot(snapshot)
+    assert payload["provider_requested"] == "auto"
+    assert payload["provider_used"] == "yfinance"

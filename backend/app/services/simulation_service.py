@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.stepper import BacktestStepper, BarSnapshot
 from app.database import AsyncSessionLocal
+from app.features.preview import build_feature_plan_preview
+from app.features.source_contracts import resolve_requested_provider
 from app.models.strategy import StrategyVersion
 
 logger = logging.getLogger(__name__)
@@ -81,6 +84,7 @@ async def create_simulation(
     timeframe: str,
     start_date: str,
     end_date: str,
+    strategy_config_override: dict[str, Any] | None = None,
     initial_capital: float = 100_000.0,
     commission_per_share: float = 0.005,
     slippage_ticks: int = 1,
@@ -119,20 +123,28 @@ async def create_simulation(
             symbol_count=len(symbols),
             has_alpaca_credentials=has_alpaca,
         )
-        effective_provider = recommendation["provider"]
+        effective_provider = resolve_requested_provider(
+            requested_provider=recommendation["provider"],
+            runtime_mode="simulation",
+            alpaca_credentials_configured=has_alpaca,
+        )
         if recommendation.get("warnings"):
             for w in recommendation["warnings"]:
                 logger.warning("Simulation provider: %s", w)
         logger.info("Simulation: auto-selected %s (%s)", effective_provider, recommendation.get("reason", ""))
     else:
-        effective_provider = data_provider
+        effective_provider = resolve_requested_provider(
+            requested_provider=data_provider,
+            runtime_mode="simulation",
+            alpaca_credentials_configured=has_alpaca,
+        )
 
     # ── Load strategy version and parent strategy name ────────────────────────
     async with AsyncSessionLocal() as db:
         sv = await db.get(StrategyVersion, strategy_version_id)
         if not sv:
             raise ValueError(f"StrategyVersion {strategy_version_id} not found")
-        strategy_config = sv.config
+        strategy_config = deepcopy(strategy_config_override or sv.config)
         if not strategy_config.get("name"):
             from app.models.strategy import Strategy
             strat = await db.get(Strategy, sv.strategy_id)
@@ -145,6 +157,7 @@ async def create_simulation(
 
     data: dict[str, pd.DataFrame] = {}
     skipped: list[str] = []
+    symbol_providers: dict[str, dict[str, Any]] = {}
     loop = asyncio.get_running_loop()
 
     for symbol in symbols:
@@ -177,6 +190,13 @@ async def create_simulation(
                 if df is not None and not df.empty:
                     check_bar_count(sym_upper, len(df), timeframe, mode="simulation")
                     data[sym_upper] = df
+                    symbol_providers[sym_upper] = {
+                        "requested_provider": data_provider,
+                        "resolved_provider": effective_provider,
+                        "actual_provider": prov,
+                        "fallback_used": prov != effective_provider,
+                        "fallback_reason": "provider_fetch_failed" if prov != effective_provider else None,
+                    }
                     if prov != effective_provider:
                         logger.info("Simulation: %s loaded via fallback provider %s (%d bars)", sym_upper, prov, len(df))
                     else:
@@ -217,6 +237,7 @@ async def create_simulation(
     # Enrich metadata with data quality info
     total_bars = sum(len(df) for df in data.values())
     metadata["provider"] = effective_provider
+    metadata["provider_requested"] = data_provider
     metadata["date_clamped"] = clamped
     metadata["original_start_date"] = start_date if clamped else None
     metadata["effective_start_date"] = effective_start
@@ -224,6 +245,13 @@ async def create_simulation(
     metadata["skipped_symbols"] = skipped
     metadata["total_bars_loaded"] = total_bars
     metadata["bars_per_symbol"] = {sym: len(df) for sym, df in data.items()}
+    metadata["symbol_providers"] = symbol_providers
+    metadata["feature_plan_preview"] = build_feature_plan_preview(
+        strategy_config,
+        duration_mode=getattr(sv, "duration_mode", strategy_config.get("duration_mode")),
+        symbols=list(data.keys()),
+        timeframe=timeframe,
+    )
 
     simulation_id = str(uuid.uuid4())
     metadata["simulation_id"] = simulation_id

@@ -5,6 +5,7 @@ import { backtestsApi } from '../api/backtests'
 import { ModeIndicator } from '../components/ModeIndicator'
 import { usePollingGate } from '../hooks/usePollingGate'
 import { TrendingUp, AlertCircle, ChevronUp, ChevronDown, Trash2, Search, GitCompareArrows, X } from 'lucide-react'
+import { PageHelp } from '../components/PageHelp'
 import { SelectMenu } from '../components/SelectMenu'
 import { Tooltip } from '../components/Tooltip'
 import clsx from 'clsx'
@@ -168,7 +169,7 @@ export function RunHistory() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-gray-100">Run History</h1>
+          <h1 className="text-xl font-bold text-gray-100 flex items-center">Run History<PageHelp page="runhistory" /></h1>
           <p className="text-xs text-gray-500 mt-0.5">
             {runs.length} backtest run{runs.length !== 1 ? 's' : ''}
             {!isLoading && isFetching && (

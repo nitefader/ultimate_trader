@@ -33,6 +33,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trading_program import AccountAllocation, TradingProgram
+from app.services.trading_program_service import sync_program_lock_state
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +108,12 @@ async def prepare_promotion_review(
     program = await db.get(TradingProgram, allocation.trading_program_id)
     if program is None:
         blocking.append("TradingProgram not found")
-    elif program.status != "frozen":
-        blocking.append(f"TradingProgram must be frozen before promotion (current: {program.status})")
+    else:
+        await sync_program_lock_state(db, program, actor="allocation")
+        if program.status != "frozen":
+            blocking.append(
+                f"TradingProgram must be deployment-locked before promotion (current: {program.status})"
+            )
 
     # Safety checklist — required keys
     required_checklist_keys = [
@@ -283,13 +288,19 @@ def serialize_trading_program(program: TradingProgram) -> dict[str, Any]:
         "name": program.name,
         "version": program.version,
         "description": program.description,
+        "notes": getattr(program, "notes", None),
         "status": program.status,
         "duration_mode": program.duration_mode,
         "strategy_version_id": program.strategy_version_id,
+        "strategy_governor_id": getattr(program, "strategy_governor_id", None),
+        "execution_style_id": getattr(program, "execution_style_id", None),
+        "risk_profile_id": getattr(program, "risk_profile_id", None),
         "optimization_profile_id": program.optimization_profile_id,
         "weight_profile_id": program.weight_profile_id,
         "symbol_universe_snapshot_id": program.symbol_universe_snapshot_id,
         "execution_policy": program.execution_policy,
+        "watchlist_subscriptions": getattr(program, "watchlist_subscriptions", []) or [],
+        "watchlist_combination_rule": getattr(program, "watchlist_combination_rule", "union"),
         "parent_program_id": program.parent_program_id,
         "frozen_at": program.frozen_at.isoformat() if program.frozen_at else None,
         "frozen_by": program.frozen_by,

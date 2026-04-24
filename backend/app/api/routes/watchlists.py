@@ -162,6 +162,63 @@ async def rename_watchlist(
     return serialize_watchlist(wl)
 
 
+@router.delete("/{watchlist_id}", status_code=204, response_model=None)
+async def delete_watchlist(
+    watchlist_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete a watchlist. Blocked if golden or in use by programs."""
+    from app.models.trading_program import TradingProgram
+    from sqlalchemy import text as sa_text
+    wl = await db.get(Watchlist, watchlist_id)
+    if wl is None:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    if getattr(wl, "is_golden", False):
+        raise HTTPException(status_code=403, detail="Golden templates are read-only. Duplicate to customize.")
+    result = await db.execute(
+        select(TradingProgram.name).where(
+            sa_text(f"JSON_EXTRACT(watchlist_subscriptions, '$') LIKE '%{watchlist_id}%'")
+        ).limit(5)
+    )
+    in_use = [r[0] for r in result.fetchall()]
+    if in_use:
+        names = ", ".join(in_use)
+        raise HTTPException(status_code=409, detail=f"Watchlist is used by programs: {names}. Remove from those programs first.")
+    await db.delete(wl)
+    await db.commit()
+
+
+@router.post("/{watchlist_id}/duplicate")
+async def duplicate_watchlist(
+    watchlist_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Duplicate a watchlist (including golden ones). Result is always non-golden."""
+    wl = await get_watchlist(db, watchlist_id)
+    if wl is None:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    new_wl = Watchlist(
+        name=f"Copy of {wl.name}",
+        watchlist_type=wl.watchlist_type,
+        refresh_cron=wl.refresh_cron,
+        min_refresh_interval_minutes=wl.min_refresh_interval_minutes,
+        config=dict(wl.config),
+        is_golden=False,
+        tags=list(getattr(wl, "tags", []) or []),
+    )
+    db.add(new_wl)
+    await db.flush()
+    for m in wl.memberships:
+        db.add(WatchlistMembership(
+            watchlist_id=new_wl.id,
+            symbol=m.symbol,
+            state=m.state,
+        ))
+    await db.commit()
+    await db.refresh(new_wl, attribute_names=["memberships"])
+    return serialize_watchlist(new_wl)
+
+
 @router.delete("/{watchlist_id}/members/{symbol}", status_code=204, response_model=None)
 async def remove_member(
     watchlist_id: str,

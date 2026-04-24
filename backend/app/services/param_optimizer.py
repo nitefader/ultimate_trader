@@ -47,6 +47,9 @@ from typing import Any
 
 import pandas as pd
 
+from app.features.source_contracts import resolve_requested_provider
+from app.services.backtest_service import recommend_data_provider
+
 logger = logging.getLogger(__name__)
 
 MAX_WORKERS = 4
@@ -210,9 +213,22 @@ async def run_param_optimization(
     timeframe: str = run_config.get("timeframe", "1d")
     start_date: str = run_config.get("start_date", "2020-01-01")
     end_date: str = run_config.get("end_date", "2023-12-31")
-    data_provider: str = str(run_config.get("data_provider", "yfinance")).lower()
+    data_provider: str = str(run_config.get("data_provider", "auto")).lower()
     alpaca_api_key: str = str(run_config.get("alpaca_api_key", "") or "")
     alpaca_secret_key: str = str(run_config.get("alpaca_secret_key", "") or "")
+    has_alpaca_credentials = bool(alpaca_api_key and alpaca_secret_key)
+    provider_decision = recommend_data_provider(
+        timeframe=timeframe,
+        start_date=start_date,
+        end_date=end_date,
+        symbol_count=len(symbols),
+        has_alpaca_credentials=has_alpaca_credentials,
+    )
+    selected_provider = resolve_requested_provider(
+        requested_provider=provider_decision["provider"] if data_provider == "auto" else data_provider,
+        runtime_mode="research",
+        alpaca_credentials_configured=has_alpaca_credentials,
+    )
 
     from app.services.market_data_service import fetch_market_data
 
@@ -224,11 +240,11 @@ async def run_param_optimization(
                 lambda s=symbol: fetch_market_data(
                     symbol=s,
                     timeframe=timeframe,
-                    start_date=start_date,
-                    end_date=end_date,
-                    provider=data_provider,
-                    alpaca_api_key=alpaca_api_key,
-                    alpaca_secret_key=alpaca_secret_key,
+                    start=start_date,
+                    end=end_date,
+                    provider=selected_provider,
+                    api_key=alpaca_api_key,
+                    secret_key=alpaca_secret_key,
                 ),
             )
             if df is not None and not df.empty:

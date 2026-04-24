@@ -208,13 +208,22 @@ export function ProgramSwimlane({ accountId, accountEquity = 100_000 }: ProgramS
 
   // We need allocations per program — but programsApi.list() doesn't include allocations
   // For now build the swimlane from programs that have known allocation data via ProgramDetail queries
-  // In this phase we show active programs (status=frozen) as candidate lanes
-  const activePrograms = programs.filter(p => p.status === 'frozen')
+  // Show saved, fully-composed programs as candidate lanes.
+  const activePrograms = programs.filter(
+    (p) =>
+      p.status !== 'deprecated'
+      && !!p.strategy_version_id
+      && !!p.strategy_governor_id
+      && !!p.risk_profile_id
+      && !!p.execution_style_id
+      && Array.isArray(p.watchlist_subscriptions)
+      && p.watchlist_subscriptions.length > 0,
+  )
 
   if (activePrograms.length === 0) {
     return (
       <div className="rounded border border-gray-800 bg-gray-900/40 px-4 py-6 text-center">
-        <p className="text-xs text-gray-600">No frozen programs found for this account.</p>
+        <p className="text-xs text-gray-600">No deployable programs found for this account.</p>
         <Link to="/programs" className="text-xs text-sky-400 hover:text-sky-300 mt-1 block">
           Go to Trading Programs →
         </Link>

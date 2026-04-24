@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, String, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config import get_settings
@@ -38,6 +38,15 @@ class Account(Base):
     max_drawdown_lockout_pct: Mapped[float] = mapped_column(Float, default=0.10)
     max_open_positions: Mapped[int] = mapped_column(default=10)
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
+
+    risk_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("risk_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    risk_profile: Mapped["RiskProfile | None"] = relationship(
+        "RiskProfile", back_populates="accounts"
+    )
 
     # Account mode — controls PDT rules, short selling, leverage availability
     # CASH: no shorts, no leverage, T+1 settlement, PDT inapplicable

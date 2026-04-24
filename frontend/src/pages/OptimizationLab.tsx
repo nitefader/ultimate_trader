@@ -10,7 +10,7 @@
  *   4. Independence     — signal overlap gauge + heatmap
  *   5. Stress           — paper deployment monitor + promote to live
  */
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import { backtestsApi } from '../api/backtests'
@@ -19,9 +19,14 @@ import clsx from 'clsx'
 import {
   BarChart2, Zap, Shield, Layers, CheckSquare, Square,
   ExternalLink, Rocket, TrendingUp,
-  AlertTriangle, CheckCircle, XCircle, ArrowRight,
+  AlertTriangle, CheckCircle, XCircle, ArrowRight, SlidersHorizontal, Plus, Trash2,
 } from 'lucide-react'
+import { strategiesApi } from '../api/strategies'
+import { SelectMenu } from '../components/SelectMenu'
+import { DatePickerInput } from '../components/DatePickerInput'
+import { TickerSearch } from '../components/TickerSearch'
 import type { BacktestRun, Account, Deployment } from '../types'
+import { PageHelp } from '../components/PageHelp'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -42,14 +47,15 @@ function metricColor(v: number | null | undefined, good: number, bad: number) {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type LabTab = 'results' | 'walkforward' | 'comparison' | 'independence' | 'stress'
+type LabTab = 'results' | 'walkforward' | 'comparison' | 'independence' | 'stress' | 'param_search'
 
 const TABS: { id: LabTab; label: string; icon: React.ReactNode }[] = [
   { id: 'results', label: 'Results', icon: <BarChart2 size={12} /> },
-  { id: 'walkforward', label: 'Walk-Forward', icon: <TrendingUp size={12} /> },
+  { id: 'walkforward', label: 'Walk-Forward Analysis', icon: <TrendingUp size={12} /> },
   { id: 'comparison', label: 'Compare', icon: <Layers size={12} /> },
   { id: 'independence', label: 'Independence', icon: <Zap size={12} /> },
   { id: 'stress', label: 'Paper → Live', icon: <Shield size={12} /> },
+  { id: 'param_search', label: 'Param Search', icon: <SlidersHorizontal size={12} /> },
 ]
 
 // ─── Scored run ───────────────────────────────────────────────────────────────
@@ -396,9 +402,10 @@ function WalkForwardTab() {
 
   if (isLoading) return <div className="text-xs py-8 text-center" style={{ color: 'var(--color-text-faint)' }}>Loading…</div>
   if (wfRuns.length === 0) return (
-    <div className="text-xs py-10 text-center space-y-1" style={{ color: 'var(--color-text-faint)' }}>
-      <p>No walk-forward results yet.</p>
-      <p>Enable Walk-Forward in the Backtest Launcher and run a backtest.</p>
+    <div className="text-xs py-10 text-center space-y-2" style={{ color: 'var(--color-text-faint)' }}>
+      <p className="font-medium" style={{ color: 'var(--color-text-secondary)' }}>No walk-forward results yet.</p>
+      <p>Walk-forward results appear here automatically for any backtest run with Walk-Forward enabled.</p>
+      <p className="text-sky-500/70">To enable: Backtest Launcher → Advanced Settings → Enable Walk-Forward Analysis.</p>
     </div>
   )
 
@@ -850,16 +857,383 @@ function StressTab() {
   )
 }
 
+// ─── Param Search Tab ────────────────────────────────────────────────────────
+
+const OBJECTIVE_OPTIONS = [
+  { value: 'sharpe_ratio', label: 'Sharpe Ratio' },
+  { value: 'total_return_pct', label: 'Total Return %' },
+  { value: 'profit_factor', label: 'Profit Factor' },
+  { value: 'sqn', label: 'SQN' },
+  { value: 'calmar_ratio', label: 'Calmar Ratio' },
+  { value: 'win_rate_pct', label: 'Win Rate %' },
+  { value: 'max_drawdown_pct', label: 'Min Drawdown %' },
+]
+
+const today = new Date().toISOString().slice(0, 10)
+
+interface ParamRow { path: string; values: string }
+
+// ── Param Sensitivity Heatmap ─────────────────────────────────────────────────
+
+function heatColor(normalized: number): string {
+  // 0 = red, 0.5 = amber, 1 = green — using HSL interpolation
+  const hue = Math.round(normalized * 120) // 0 = red (0°), 120 = green
+  return `hsl(${hue}, 70%, 35%)`
+}
+
+function ParamHeatmap({ results, objectiveLabel }: { results: any[]; objectiveLabel: string }) {
+  const [xAxis, setXAxis] = useState('')
+  const [yAxis, setYAxis] = useState('')
+
+  // Collect all param keys from results
+  const allKeys = useMemo(() => {
+    const keys = new Set<string>()
+    for (const r of results) {
+      for (const k of Object.keys(r.params ?? {})) keys.add(k)
+    }
+    return Array.from(keys).sort()
+  }, [results])
+
+  // Auto-select first two axes
+  const defaultX = allKeys[0] ?? ''
+  const defaultY = allKeys[1] ?? ''
+  const ax = xAxis || defaultX
+  const ay = yAxis || defaultY
+
+  if (allKeys.length < 2) {
+    return (
+      <div className="text-xs text-gray-500 pt-2">
+        Heatmap requires 2+ parameter axes. Add a second parameter row above.
+      </div>
+    )
+  }
+
+  // Build unique sorted values for each axis
+  const xVals = useMemo(() => {
+    const vs = new Set(results.map(r => String(r.params?.[ax] ?? '')))
+    return Array.from(vs).sort((a, b) => Number(a) - Number(b))
+  }, [results, ax])
+
+  const yVals = useMemo(() => {
+    const vs = new Set(results.map(r => String(r.params?.[ay] ?? '')))
+    return Array.from(vs).sort((a, b) => Number(a) - Number(b))
+  }, [results, ay])
+
+  // Build lookup: "xVal|yVal" → best score for that cell
+  const cellMap = useMemo(() => {
+    const map: Record<string, number> = {}
+    for (const r of results) {
+      const key = `${r.params?.[ax]}|${r.params?.[ay]}`
+      const score = r.score ?? r.objective_value ?? 0
+      if (!(key in map) || score > map[key]) map[key] = score
+    }
+    return map
+  }, [results, ax, ay])
+
+  const scores = Object.values(cellMap)
+  const minScore = Math.min(...scores)
+  const maxScore = Math.max(...scores)
+  const scoreRange = maxScore - minScore || 1
+
+  const CELL_W = 56
+  const CELL_H = 32
+
+  return (
+    <div className="space-y-2 pt-2 border-t border-gray-800">
+      <div className="flex items-center gap-3 flex-wrap">
+        <span className="text-xs font-semibold text-gray-400">Sensitivity Heatmap</span>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-500">X:</span>
+          <select
+            className="bg-gray-900 border border-gray-700 rounded px-2 py-0.5 text-xs text-gray-300 focus:outline-none"
+            value={ax}
+            onChange={e => setXAxis(e.target.value)}
+          >
+            {allKeys.map(k => <option key={k} value={k}>{k}</option>)}
+          </select>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-500">Y:</span>
+          <select
+            className="bg-gray-900 border border-gray-700 rounded px-2 py-0.5 text-xs text-gray-300 focus:outline-none"
+            value={ay}
+            onChange={e => setYAxis(e.target.value)}
+          >
+            {allKeys.filter(k => k !== ax).map(k => <option key={k} value={k}>{k}</option>)}
+          </select>
+        </div>
+        <span className="text-xs text-gray-600">Color = {objectiveLabel} (green = best)</span>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="text-xs border-collapse">
+          <thead>
+            <tr>
+              <th className="text-gray-600 font-normal pr-2 pb-1 text-right w-16">{ay} ↓ / {ax} →</th>
+              {xVals.map(xv => (
+                <th key={xv} className="text-gray-400 font-mono font-normal pb-1 text-center" style={{ width: CELL_W }}>
+                  {xv}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {yVals.map(yv => (
+              <tr key={yv}>
+                <td className="text-gray-400 font-mono pr-2 text-right" style={{ height: CELL_H }}>{yv}</td>
+                {xVals.map(xv => {
+                  const key = `${xv}|${yv}`
+                  const score = cellMap[key]
+                  if (score == null) {
+                    return <td key={xv} className="text-center" style={{ width: CELL_W, height: CELL_H, background: '#111' }} />
+                  }
+                  const norm = (score - minScore) / scoreRange
+                  return (
+                    <td
+                      key={xv}
+                      title={`${ax}=${xv}, ${ay}=${yv}: ${score.toFixed(3)}`}
+                      className="text-center font-mono cursor-default transition-opacity hover:opacity-80"
+                      style={{
+                        width: CELL_W,
+                        height: CELL_H,
+                        background: heatColor(norm),
+                        color: norm > 0.5 ? '#d1fae5' : '#fecaca',
+                        fontSize: '10px',
+                      }}
+                    >
+                      {score.toFixed(2)}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function ParamSearchTab() {
+  const [strategyId, setStrategyId] = useState('')
+  const [versionId, setVersionId] = useState('')
+  const [symbols, setSymbols] = useState<string[]>([])
+  const [timeframe, setTimeframe] = useState('1d')
+  const [startDate, setStartDate] = useState('2020-01-01')
+  const [endDate, setEndDate] = useState(today)
+  const [objective, setObjective] = useState('sharpe_ratio')
+  const [maxCombos, setMaxCombos] = useState(50)
+  const [paramRows, setParamRows] = useState<ParamRow[]>([{ path: '', values: '' }])
+  const [results, setResults] = useState<any[] | null>(null)
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState('')
+
+  const { data: strategies = [] } = useQuery({ queryKey: ['strategies'], queryFn: () => strategiesApi.list() })
+  const { data: strategyDetail } = useQuery({
+    queryKey: ['strategy', strategyId],
+    queryFn: () => strategiesApi.get(strategyId),
+    enabled: !!strategyId,
+  })
+  const versions = (strategyDetail as any)?.versions ?? []
+
+  const addRow = () => setParamRows(r => [...r, { path: '', values: '' }])
+  const removeRow = (i: number) => setParamRows(r => r.filter((_, idx) => idx !== i))
+  const updateRow = (i: number, field: keyof ParamRow, val: string) =>
+    setParamRows(r => r.map((row, idx) => idx === i ? { ...row, [field]: val } : row))
+
+  const handleRun = async () => {
+    if (!versionId) { setError('Select a strategy version'); return }
+    if (!symbols.length) { setError('Add at least one symbol'); return }
+    const validRows = paramRows.filter(r => r.path.trim() && r.values.trim())
+    if (!validRows.length) { setError('Add at least one parameter row'); return }
+
+    const param_grid: Record<string, unknown[]> = {}
+    for (const row of validRows) {
+      try {
+        param_grid[row.path.trim()] = row.values.split(',').map(v => {
+          const n = Number(v.trim())
+          return isNaN(n) ? v.trim() : n
+        })
+      } catch {
+        setError(`Invalid values for ${row.path}`); return
+      }
+    }
+
+    setError(''); setRunning(true); setResults(null)
+    try {
+      const result = await backtestsApi.paramOptimize({
+        strategy_version_id: versionId,
+        symbols, timeframe, start_date: startDate, end_date: endDate,
+        param_grid, objective_metric: objective, max_combinations: maxCombos,
+      })
+      setResults((result as any).results ?? [])
+    } catch (e: any) {
+      setError(e?.response?.data?.detail ?? e.message ?? 'Optimization failed')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="card space-y-4">
+        <div className="text-xs text-gray-500">
+          Grid-search strategy parameters (ATR multipliers, RSI periods, etc.) across all combinations. Ranked by objective metric.
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="label">Strategy</label>
+            <SelectMenu
+              value={strategyId}
+              onChange={v => { setStrategyId(v); setVersionId('') }}
+              options={(strategies as any[]).map(s => ({ value: s.id, label: s.name }))}
+              placeholder="Select strategy..."
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="label">Version</label>
+            <SelectMenu
+              value={versionId}
+              onChange={setVersionId}
+              options={versions.map((v: any) => ({ value: v.id, label: `v${v.version}${v.notes ? ' — ' + v.notes.slice(0, 25) : ''}` }))}
+              placeholder={strategyId ? 'Select version...' : 'Pick a strategy first'}
+            />
+          </div>
+          <div className="space-y-1 md:col-span-2">
+            <label className="label">Symbols</label>
+            <TickerSearch selected={symbols} onChange={setSymbols} />
+          </div>
+          <div className="space-y-1">
+            <label className="label">Timeframe</label>
+            <SelectMenu value={timeframe} onChange={setTimeframe} options={['1m','5m','15m','30m','1h','1d'].map(t => ({ value: t, label: t }))} />
+          </div>
+          <div className="space-y-1">
+            <label className="label">Objective Metric</label>
+            <SelectMenu value={objective} onChange={setObjective} options={OBJECTIVE_OPTIONS} />
+          </div>
+          <div className="space-y-1">
+            <label className="label">Start Date</label>
+            <DatePickerInput value={startDate} onChange={setStartDate} />
+          </div>
+          <div className="space-y-1">
+            <label className="label">End Date</label>
+            <DatePickerInput value={endDate} onChange={setEndDate} />
+          </div>
+          <div className="space-y-1">
+            <label className="label">Max Combinations</label>
+            <input type="number" className="input w-full" value={maxCombos} min={1} max={500} onChange={e => setMaxCombos(Number(e.target.value))} />
+          </div>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <label className="label mb-0">Parameter Grid</label>
+            <button onClick={addRow} className="btn-ghost text-xs flex items-center gap-1"><Plus size={11} /> Add Row</button>
+          </div>
+          <div className="space-y-2">
+            {paramRows.map((row, i) => (
+              <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px] gap-2 items-center">
+                <input
+                  className="input w-full font-mono text-xs"
+                  placeholder="e.g. stop_loss.mult"
+                  value={row.path}
+                  onChange={e => updateRow(i, 'path', e.target.value)}
+                />
+                <input
+                  className="input w-full text-xs"
+                  placeholder="e.g. 1.5, 2.0, 2.5"
+                  value={row.values}
+                  onChange={e => updateRow(i, 'values', e.target.value)}
+                />
+                <button onClick={() => removeRow(i)} className="text-gray-600 hover:text-red-400 p-1">
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="mt-1 text-xs text-gray-600">Path uses dot notation: <code className="text-sky-400/80">stop_loss.mult</code>, <code className="text-sky-400/80">targets[0].r</code>. Values are comma-separated.</div>
+        </div>
+
+        {error && <div className="text-xs text-red-400">{error}</div>}
+
+        <button
+          onClick={handleRun}
+          disabled={running}
+          className="btn-primary flex items-center gap-1.5"
+        >
+          <SlidersHorizontal size={13} />
+          {running ? 'Running...' : 'Run Param Search'}
+        </button>
+      </div>
+
+      {results !== null && (
+        <div className="card space-y-3">
+          <h3 className="text-sm font-semibold text-gray-200">{results.length} Combinations Ranked</h3>
+          {results.length === 0 ? (
+            <p className="text-xs text-gray-500">No results returned.</p>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-gray-800 text-gray-500 text-left">
+                      <th className="pb-2 pr-3 font-medium">#</th>
+                      <th className="pb-2 pr-3 font-medium">Parameters</th>
+                      <th className="pb-2 pr-3 font-medium text-right">Score</th>
+                      <th className="pb-2 pr-3 font-medium text-right">Return</th>
+                      <th className="pb-2 pr-3 font-medium text-right">Sharpe</th>
+                      <th className="pb-2 font-medium text-right">Drawdown</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/50">
+                    {results.slice(0, 20).map((r: any, i: number) => (
+                      <tr key={i} className={i === 0 ? 'bg-emerald-950/20' : ''}>
+                        <td className="py-1.5 pr-3 text-gray-500">{i + 1}</td>
+                        <td className="py-1.5 pr-3 text-gray-300 font-mono">
+                          {Object.entries(r.params ?? {}).map(([k, v]) => `${k}=${v}`).join(', ')}
+                        </td>
+                        <td className="py-1.5 pr-3 text-right text-emerald-400 font-medium">{fmt2(r.score ?? r.objective_value)}</td>
+                        <td className="py-1.5 pr-3 text-right text-gray-300">{fmtPct(r.metrics?.total_return_pct)}</td>
+                        <td className="py-1.5 pr-3 text-right text-gray-300">{fmt2(r.metrics?.sharpe_ratio)}</td>
+                        <td className="py-1.5 text-right text-red-400">{r.metrics?.max_drawdown_pct != null ? `-${r.metrics.max_drawdown_pct.toFixed(1)}%` : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ParamHeatmap results={results} objectiveLabel={objective} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function OptimizationLab() {
   const [tab, setTab] = useState<LabTab>('results')
+  const [bannerDismissed, setBannerDismissed] = useState(false)
 
   return (
     <div className="max-w-5xl mx-auto space-y-4">
+      {!bannerDismissed && (
+        <div className="flex items-start gap-3 rounded border border-sky-800/50 bg-sky-950/30 px-4 py-3 text-xs text-sky-300/80">
+          <span className="flex-1">
+            <span className="font-semibold text-sky-300">Results:</span> curate and compare completed backtest runs.{' '}
+            <span className="font-semibold text-sky-300">Walk-Forward Analysis:</span> review out-of-sample consistency per fold.{' '}
+            <span className="font-semibold text-sky-300">Compare:</span> head-to-head metric diff.{' '}
+            <span className="font-semibold text-sky-300">Paper → Live:</span> promote winners to live trading.{' '}
+            To tune strategy parameters (ATR multiplier, RSI period), use the Backtest Launcher → Param Optimize.
+          </span>
+          <button onClick={() => setBannerDismissed(true)} className="text-sky-600 hover:text-sky-400 flex-shrink-0 mt-0.5">✕</button>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-sm font-semibold" style={{ color: 'var(--color-text-primary)' }}>Optimization Lab</h1>
+          <h1 className="text-sm font-semibold flex items-center" style={{ color: 'var(--color-text-primary)' }}>Optimization Lab<PageHelp page="optimlab" /></h1>
           <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-faint)' }}>
             Backtest → select winners → paper deploy → promote best performer
           </p>
@@ -902,6 +1276,7 @@ export function OptimizationLab() {
         {tab === 'comparison' && <ComparisonTab />}
         {tab === 'independence' && <IndependenceTab />}
         {tab === 'stress' && <StressTab />}
+        {tab === 'param_search' && <ParamSearchTab />}
       </div>
     </div>
   )

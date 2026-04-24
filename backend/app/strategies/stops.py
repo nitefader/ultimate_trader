@@ -11,6 +11,27 @@ import pandas as pd
 from app.indicators.technical import atr as calc_atr
 
 
+def resolve_atr_override(
+    execution_style: dict,
+    atr_df: pd.DataFrame,
+    bar_dt: pd.Timestamp,
+) -> float | None:
+    """Return ATR from a custom-timeframe DataFrame using only completed bars at bar_dt.
+
+    Uses the latest bar whose timestamp is <= bar_dt so a partially-forming higher-TF
+    bar is never included (no lookahead).
+    """
+    if execution_style.get("atr_source") != "custom":
+        return None
+    length = int(execution_style.get("atr_length") or 14)
+    completed = atr_df[atr_df.index <= bar_dt]
+    if len(completed) < length:
+        return None
+    atr_series = calc_atr(completed["high"], completed["low"], completed["close"], length)
+    val = float(atr_series.iloc[-1])
+    return val if not np.isnan(val) else None
+
+
 def calculate_stop(
     config: dict,
     entry_price: float,
@@ -22,6 +43,7 @@ def calculate_stop(
     sr_zones: list | None = None,
     swing_lows: list | None = None,
     swing_highs: list | None = None,
+    atr_override: float | None = None,
 ) -> float | None:
     """
     Unified stop price calculation.
@@ -40,6 +62,10 @@ def calculate_stop(
       {"method": "chandelier", "period": 22, "mult": 3.0}
       {"method": "combined", "stops": [...], "rule": "farthest"}  # farthest/nearest
     """
+    # Per-direction config: {"long": {...}, "short": {...}}
+    if "long" in config and "short" in config:
+        config = config.get(direction, config.get("long", {}))
+
     method = config.get("method", "fixed_pct")
 
     if method == "fixed_pct":
@@ -59,9 +85,12 @@ def calculate_stop(
     if method == "atr_multiple":
         period = int(config.get("period", 14))
         mult = float(config.get("mult", 2.0))
-        if bar_index < period:
-            return None
-        atr_val = float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
+        if atr_override is not None:
+            atr_val = atr_override
+        else:
+            if bar_index < period:
+                return None
+            atr_val = float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
         if np.isnan(atr_val):
             return None
         if direction == "long":
@@ -150,7 +179,10 @@ def calculate_stop(
         if bar_index < period:
             return None
         window = df.iloc[bar_index - period:bar_index + 1]
-        atr_val = float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
+        if atr_override is not None:
+            atr_val = atr_override
+        else:
+            atr_val = float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
         if direction == "long":
             return float(window["high"].max()) - mult * atr_val
         else:
@@ -186,6 +218,7 @@ def calculate_target(
     sr_zones: list | None = None,
     swing_highs: list | None = None,
     swing_lows: list | None = None,
+    atr_override: float | None = None,
 ) -> float | None:
     """
     Unified target price calculation.
@@ -198,6 +231,10 @@ def calculate_target(
       {"method": "sr_resistance"}
       {"method": "swing_high"}
     """
+    # Per-direction config: {"long": {...}, "short": {...}}
+    if "long" in config and "short" in config:
+        config = config.get(direction, config.get("long", {}))
+
     method = config.get("method", "r_multiple")
 
     if method == "r_multiple":
@@ -227,9 +264,14 @@ def calculate_target(
     if method == "atr_multiple":
         period = int(config.get("period", 14))
         mult = float(config.get("mult", 3.0))
-        if bar_index < period:
+        if atr_override is not None:
+            atr_val = atr_override
+        else:
+            if bar_index < period:
+                return None
+            atr_val = float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
+        if np.isnan(atr_val):
             return None
-        atr_val = float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
         if direction == "long":
             return entry_price + mult * atr_val
         else:
@@ -279,6 +321,7 @@ def update_trailing_stop(
     bar_index: int,
     entry_price: float,
     initial_stop: float,
+    atr_override: float | None = None,
 ) -> float:
     """
     Update a trailing stop. Returns the new stop (never worse than current).
@@ -296,7 +339,13 @@ def update_trailing_stop(
     if method == "atr_trail":
         period = int(config.get("period", 14))
         mult = float(config.get("mult", 2.0))
-        if bar_index >= period:
+        if atr_override is not None:
+            atr_val = atr_override
+            if direction == "long":
+                new_stop = bar["high"] - mult * atr_val
+            else:
+                new_stop = bar["low"] + mult * atr_val
+        elif bar_index >= period:
             atr_val = float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
             if not np.isnan(atr_val):
                 if direction == "long":
@@ -327,7 +376,7 @@ def update_trailing_stop(
         mult = float(config.get("mult", 3.0))
         if bar_index >= period:
             window = df.iloc[bar_index - period:bar_index + 1]
-            atr_val = float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
+            atr_val = atr_override if atr_override is not None else float(calc_atr(df["high"], df["low"], df["close"], period).iloc[bar_index])
             if direction == "long":
                 new_stop = float(window["high"].max()) - mult * atr_val
             else:

@@ -1,14 +1,16 @@
 /**
  * SimulationLab — real-time strategy validation using the full BacktestEngine.
  *
- * Features:
- *   - Candlestick chart with indicator overlays, trade markers, zoom/pan
- *   - Equity curve + drawdown
- *   - Play/pause/step/speed controls + live trade log + metrics panel
- *   - Full engine fidelity (risk, slippage, cooldowns, session windows, scaling)
+ * Layout:
+ *   - Collapsible setup drawer (auto-collapses after launch, re-opens via button)
+ *   - Full-width chart area: price (55%) + volume (10%) + oscillator (25%) + equity strip (10%)
+ *   - Indicator panel (grouped toggles, routes to correct pane automatically)
+ *   - Right sidebar: tabbed Metrics | Positions | Trade Log (no item cap)
+ *   - Chart parity with ChartLab: tms numeric x-axis, CSS color vars, median slot-width
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -22,15 +24,19 @@ import {
   ReferenceLine,
   ReferenceArea,
   Customized,
+  BarChart,
   Bar,
+  Cell,
 } from 'recharts'
 import {
   Play, Pause, SkipForward, FastForward, ChevronRight,
   AlertTriangle, Activity, Loader, RotateCcw, ZoomIn, ZoomOut,
+  Settings, ChevronDown, ChevronUp, X,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { strategiesApi } from '../api/strategies'
 import { servicesApi } from '../api/services'
+import { programsApi } from '../api/programs'
 import {
   simulationsApi, createSimulationWs,
   type BarSnapshotData, type SimulationMetadata, type TradeEvent,
@@ -38,6 +44,9 @@ import {
 import { DatePickerInput } from '../components/DatePickerInput'
 import { SelectMenu } from '../components/SelectMenu'
 import { TickerSearch } from '../components/TickerSearch'
+import { PageHelp } from '../components/PageHelp'
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const today = new Date().toISOString().slice(0, 10)
 const jan2020 = '2020-01-01'
@@ -47,49 +56,108 @@ const timeframeOptions = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1wk'].map
 }))
 
 const speedOptions = [
-  { value: '1', label: '1x' },
-  { value: '5', label: '5x' },
-  { value: '25', label: '25x' },
-  { value: '100', label: '100x' },
+  { value: '1',   label: '1×' },
+  { value: '5',   label: '5×' },
+  { value: '25',  label: '25×' },
+  { value: '100', label: '100×' },
   { value: '500', label: 'Max' },
 ]
 
-// ── Dynamic indicator classification + color system ─────────────────────────
-// No hardcoded indicator names — auto-detects from whatever the strategy produces.
+// ── Indicator catalogue (matches ChartLab) ────────────────────────────────────
 
-/** Known color overrides for common indicators. Unknown ones get auto-assigned. */
-const KNOWN_COLORS: Record<string, string> = {
-  ema_9: '#38bdf8', ema_20: '#818cf8', ema_21: '#818cf8', ema_55: '#a78bfa',
-  sma_20: '#fb923c', sma_50: '#fbbf24', sma_200: '#f87171',
-  bb_upper: '#7dd3fc', bb_lower: '#7dd3fc', bb_mid: '#7dd3fc', bb_width: '#7dd3fc',
-  kc_upper: '#86efac', kc_lower: '#86efac', kc_mid: '#86efac',
-  dc_upper: '#fca5a5', dc_lower: '#fca5a5', dc_mid: '#fca5a5',
-  sar: '#e879f9', hull_ma: '#34d399', vwap: '#2dd4bf',
-  rsi_14: '#f59e0b', rsi_3: '#fb923c', macd: '#38bdf8', macd_signal: '#f472b6', macd_hist: '#64748b',
-  adx: '#c084fc', plus_di: '#22c55e', minus_di: '#ef4444',
-  stoch_k: '#34d399', stoch_d: '#f472b6',
-  atr: '#fb7185', atr_14: '#fb7185', obv: '#94a3b8',
-  ibs: '#a3e635', zscore: '#22d3ee', bt_snipe: '#f472b6',
-}
-const PALETTE = ['#38bdf8','#818cf8','#f59e0b','#34d399','#fb923c','#f472b6','#a78bfa','#22d3ee','#fbbf24','#a3e635']
-
-/** PRICE overlay indicators (rendered on top of candles). Everything else is oscillator. */
-const PRICE_PREFIXES = ['ema_','sma_','bb_','kc_','dc_','hull_ma','vwap','sar','ichi_','chandelier_','swing_','donchian_','opening_range_','pd_']
-/** Indicators that use dashed lines */
-const DASHED_PREFIXES = ['sma_','bb_upper','bb_lower','kc_upper','kc_lower','dc_upper','dc_lower','chandelier_']
-
-function isPriceOverlay(key: string): boolean {
-  return PRICE_PREFIXES.some(p => key.startsWith(p))
-}
-function getIndColor(key: string, idx: number): string {
-  return KNOWN_COLORS[key] || PALETTE[idx % PALETTE.length]
-}
-function getIndDash(key: string): string | undefined {
-  if (DASHED_PREFIXES.some(p => key.startsWith(p))) return '3 3'
-  return undefined
+interface IndicatorDef {
+  spec: string
+  label: string
+  pane: 'price' | 'oscillator'
+  color: string
+  produces?: string[]
+  dash?: string
 }
 
-// ── TOS-style Candlestick + Trade Marker renderer ───────────────────────────
+const INDICATOR_GROUPS: { group: string; items: IndicatorDef[] }[] = [
+  {
+    group: 'Moving Averages',
+    items: [
+      { spec: 'ema_9',      label: 'EMA 9',      pane: 'price',      color: '#38bdf8' },
+      { spec: 'ema_20',     label: 'EMA 20',     pane: 'price',      color: '#818cf8' },
+      { spec: 'ema_50',     label: 'EMA 50',     pane: 'price',      color: '#a78bfa' },
+      { spec: 'ema_200',    label: 'EMA 200',    pane: 'price',      color: '#f472b6' },
+      { spec: 'sma_20',     label: 'SMA 20',     pane: 'price',      color: '#fb923c', dash: '4 2' },
+      { spec: 'sma_50',     label: 'SMA 50',     pane: 'price',      color: '#fbbf24', dash: '4 2' },
+      { spec: 'sma_200',    label: 'SMA 200',    pane: 'price',      color: '#f87171', dash: '4 2' },
+      { spec: 'hull_ma',    label: 'HMA 20',     pane: 'price',      color: '#34d399' },
+      { spec: 'vwap',       label: 'VWAP',       pane: 'price',      color: '#2dd4bf', dash: '6 2' },
+    ],
+  },
+  {
+    group: 'Bands & Channels',
+    items: [
+      { spec: 'bb_upper',   label: 'Bollinger',  pane: 'price',      color: '#7dd3fc',
+        produces: ['bb_upper', 'bb_mid', 'bb_lower'] },
+      { spec: 'kc_upper',   label: 'Keltner',    pane: 'price',      color: '#86efac',
+        produces: ['kc_upper', 'kc_mid', 'kc_lower'] },
+      { spec: 'dc_upper',   label: 'Donchian',   pane: 'price',      color: '#fca5a5',
+        produces: ['dc_upper', 'dc_mid', 'dc_lower'] },
+    ],
+  },
+  {
+    group: 'Trend',
+    items: [
+      { spec: 'sar',        label: 'Parabolic SAR', pane: 'price',   color: '#e879f9' },
+      { spec: 'macd',       label: 'MACD',       pane: 'oscillator', color: '#38bdf8',
+        produces: ['macd', 'macd_signal', 'macd_hist'] },
+      { spec: 'adx',        label: 'ADX 14',     pane: 'oscillator', color: '#c084fc',
+        produces: ['adx', 'plus_di', 'minus_di'] },
+    ],
+  },
+  {
+    group: 'Oscillators',
+    items: [
+      { spec: 'rsi_14',     label: 'RSI 14',     pane: 'oscillator', color: '#f59e0b' },
+      { spec: 'rsi_3',      label: 'RSI 3',      pane: 'oscillator', color: '#fb923c' },
+      { spec: 'stoch_k',    label: 'Stochastic', pane: 'oscillator', color: '#34d399',
+        produces: ['stoch_k', 'stoch_d'] },
+      { spec: 'ibs',        label: 'IBS',        pane: 'oscillator', color: '#a3e635' },
+      { spec: 'zscore',     label: 'Z-Score',    pane: 'oscillator', color: '#22d3ee' },
+      { spec: 'bt_snipe',   label: 'BT Snipe',   pane: 'oscillator', color: '#f472b6' },
+    ],
+  },
+  {
+    group: 'Volume / Volatility',
+    items: [
+      { spec: 'atr_14',     label: 'ATR 14',     pane: 'oscillator', color: '#fb7185' },
+      { spec: 'obv',        label: 'OBV',        pane: 'oscillator', color: '#94a3b8' },
+    ],
+  },
+]
+
+const ALL_INDICATORS: IndicatorDef[] = INDICATOR_GROUPS.flatMap(g => g.items)
+
+// Build lookup: data key → IndicatorDef
+const KEY_TO_DEF: Record<string, IndicatorDef> = {}
+for (const def of ALL_INDICATORS) {
+  for (const k of (def.produces ?? [def.spec])) {
+    KEY_TO_DEF[k] = def
+  }
+}
+
+// ── Date formatting ───────────────────────────────────────────────────────────
+
+function fmtTs(ms: number, tf: string): string {
+  const d = new Date(ms)
+  if (tf === '1d' || tf === '1wk') {
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
+  }
+  if (tf === '1wk') {
+    return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+  }
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' +
+    d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+// ── CandlestickLayer — parity with ChartLab ───────────────────────────────────
+// Uses tms (numeric ms) x-axis with median-distance slot-width calculation.
+// Colors use CSS variables to respect the active theme.
 
 function CandlestickLayer(props: any) {
   const { xAxisMap, yAxisMap, data } = props
@@ -101,14 +169,34 @@ function CandlestickLayer(props: any) {
 
   const yScale = yAxis.scale
   const xScale = xAxis?.scale
-  const xOff = xAxis?.x ?? 0
-  let slotW: number
+  const xOffset = xAxis?.x ?? 0
+
+  // Compute slot width using median of adjacent pixel distances (handles weekend gaps)
+  let slotWidth: number
   if (xScale?.bandwidth) {
-    slotW = xScale.bandwidth()
+    slotWidth = xScale.bandwidth()
   } else {
-    slotW = (xAxis?.width ?? 600) / data.length
+    try {
+      const xs: number[] = data
+        .map((d: any) => {
+          const px = xScale ? xScale(d.tms) : NaN
+          return typeof px === 'number' && !isNaN(px) ? px : NaN
+        })
+        .filter((v: number) => !isNaN(v))
+      if (xs.length >= 2) {
+        const diffs: number[] = []
+        for (let i = 1; i < xs.length; i++) diffs.push(Math.abs(xs[i] - xs[i - 1]))
+        diffs.sort((a, b) => a - b)
+        slotWidth = diffs[Math.floor(diffs.length / 2)]
+      } else {
+        slotWidth = (xAxis?.width ?? 600) / data.length
+      }
+    } catch {
+      slotWidth = (xAxis?.width ?? 600) / data.length
+    }
   }
-  const bw = Math.max(slotW - 2, 1)
+
+  const bw = Math.max(slotWidth - 2, 1)
 
   return (
     <g>
@@ -117,47 +205,54 @@ function CandlestickLayer(props: any) {
         if (open == null || close == null || high == null || low == null) return null
 
         const bullish = close >= open
-        const color = bullish ? '#26a69a' : '#ef5350'  // TOS green/red
+        const color = bullish ? 'var(--color-success)' : 'var(--color-danger)'
 
         let cx: number
         if (xScale?.bandwidth) {
-          cx = xOff + xScale(d.t) + xScale.bandwidth() / 2
+          cx = xOffset + (xScale(d.tms) ?? 0) + xScale.bandwidth() / 2
+        } else if (xScale) {
+          const px = xScale(d.tms)
+          cx = typeof px === 'number' && !isNaN(px) ? px : xOffset + (i + 0.5) * slotWidth
         } else {
-          cx = xOff + (i + 0.5) * slotW
+          cx = xOffset + (i + 0.5) * slotWidth
         }
 
-        const yH = yScale(high), yL = yScale(low)
-        const yO = yScale(open), yC = yScale(close)
+        const yH = yScale(high)
+        const yL = yScale(low)
+        const yO = yScale(open)
+        const yC = yScale(close)
         const bodyTop = Math.min(yO, yC)
         const bodyH = Math.max(Math.abs(yC - yO), 1)
 
         return (
           <g key={i}>
-            {/* Wick */}
             <line x1={cx} x2={cx} y1={yH} y2={yL} stroke={color} strokeWidth={1} />
-            {/* Body — TOS style: solid fill */}
             <rect x={cx - bw / 2} y={bodyTop} width={bw} height={bodyH}
               fill={color} fillOpacity={0.85} stroke={color} strokeWidth={0.5} />
-            {/* Entry arrow (green up-triangle) */}
+
+            {/* Entry arrow — green up-triangle below the bar */}
             {d._entry && (
               <g>
                 <polygon
                   points={`${cx},${yScale(d._entryPrice) - 14} ${cx - 6},${yScale(d._entryPrice) - 2} ${cx + 6},${yScale(d._entryPrice) - 2}`}
-                  fill="#26a69a" stroke="#1b5e20" strokeWidth={1} />
-                <text x={cx + 9} y={yScale(d._entryPrice) - 5} fontSize={8} fill="#26a69a" fontFamily="monospace">
+                  fill="var(--color-success)" stroke="rgba(0,0,0,0.4)" strokeWidth={1} />
+                <text x={cx + 9} y={yScale(d._entryPrice) - 5} fontSize={8}
+                  fill="var(--color-success)" fontFamily="monospace">
                   B {d._entryPrice?.toFixed(2)}
                 </text>
               </g>
             )}
-            {/* Exit arrow (down-triangle, color by P&L) */}
+
+            {/* Exit arrow — down-triangle, colored by P&L */}
             {d._exit && (
               <g>
                 <polygon
                   points={`${cx},${yScale(d._exitPrice) + 14} ${cx - 6},${yScale(d._exitPrice) + 2} ${cx + 6},${yScale(d._exitPrice) + 2}`}
-                  fill={d._exitPnl >= 0 ? '#26a69a' : '#ef5350'}
-                  stroke={d._exitPnl >= 0 ? '#1b5e20' : '#b71c1c'} strokeWidth={1} />
+                  fill={d._exitPnl >= 0 ? 'var(--color-success)' : 'var(--color-danger)'}
+                  stroke="rgba(0,0,0,0.4)" strokeWidth={1} />
                 <text x={cx + 9} y={yScale(d._exitPrice) + 12} fontSize={8}
-                  fill={d._exitPnl >= 0 ? '#26a69a' : '#ef5350'} fontFamily="monospace">
+                  fill={d._exitPnl >= 0 ? 'var(--color-success)' : 'var(--color-danger)'}
+                  fontFamily="monospace">
                   S {d._exitPrice?.toFixed(2)} ({d._exitPnl >= 0 ? '+' : ''}{d._exitPnl?.toFixed(0)})
                 </text>
               </g>
@@ -169,105 +264,166 @@ function CandlestickLayer(props: any) {
   )
 }
 
-// ── Main component ───────────────────────────────────────────────────────────
+// ── Shared tooltip ─────────────────────────────────────────────────────────────
 
+function SimTooltip({ active, payload, tf }: any) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (!d) return null
+  const label = typeof d.tms === 'number' ? fmtTs(d.tms, tf ?? '1d') : ''
+  return (
+    <div className="rounded-lg text-xs px-3 py-2 space-y-1 shadow-xl"
+      style={{ background: 'var(--color-bg-card)', border: '1px solid var(--color-border)', color: 'var(--color-text-primary)', minWidth: 160 }}>
+      <div className="font-semibold" style={{ color: 'var(--color-text-muted)' }}>{label}</div>
+      {d.open != null && (
+        <div className="grid grid-cols-2 gap-x-3 font-mono">
+          <span style={{ color: 'var(--color-text-faint)' }}>O</span><span>{d.open?.toFixed(2)}</span>
+          <span style={{ color: 'var(--color-text-faint)' }}>H</span>
+          <span style={{ color: 'var(--color-success)' }}>{d.high?.toFixed(2)}</span>
+          <span style={{ color: 'var(--color-text-faint)' }}>L</span>
+          <span style={{ color: 'var(--color-danger)' }}>{d.low?.toFixed(2)}</span>
+          <span style={{ color: 'var(--color-text-faint)' }}>C</span>
+          <span style={{ color: d.close >= d.open ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 600 }}>
+            {d.close?.toFixed(2)}
+          </span>
+        </div>
+      )}
+      {payload.slice(1).map((p: any) => {
+        if (p.value == null || p.dataKey === 'close') return null
+        return (
+          <div key={p.dataKey} className="flex justify-between gap-3 font-mono">
+            <span style={{ color: p.stroke ?? p.fill ?? 'var(--color-text-faint)' }}>{p.dataKey}</span>
+            <span>{typeof p.value === 'number' ? p.value.toFixed(3) : p.value}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── Metric row ────────────────────────────────────────────────────────────────
+
+function MR({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <>
+      <span style={{ color: 'var(--color-text-tertiary)' }}>{label}</span>
+      <span className="text-right font-medium tabular-nums truncate"
+        style={{ color: color || 'var(--color-text-primary)' }}>{value}</span>
+    </>
+  )
+}
+
+// ── Sidebar tab type ──────────────────────────────────────────────────────────
+
+type SidebarTab = 'metrics' | 'positions' | 'trades'
+
+// ── Main component ─────────────────────────────────────────────────────────────
 
 export function SimulationLab() {
-  // --- State persistence helpers ---
-  const STORAGE_KEY = 'simlab_state_v2';
-  function loadPersistedState() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      return JSON.parse(raw);
-    } catch { return null; }
-  }
-  function persistState(state: any) {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
-  }
+  const [searchParams] = useSearchParams()
+  const prefillProgramId = searchParams.get('program_id') ?? ''
 
-  // Setup state (with persistence)
-  const persisted = loadPersistedState() || {};
-  const [strategyId, setStrategyId] = useState(persisted.strategyId || '');
-  const [versionId, setVersionId] = useState(persisted.versionId || '');
-  const [symbols, setSymbols] = useState<string[]>(persisted.symbols || []);
-  const [timeframe, setTimeframe] = useState(persisted.timeframe || '1d');
-  const [startDate, setStartDate] = useState(persisted.startDate || jan2020);
-  const [endDate, setEndDate] = useState(persisted.endDate || today);
-  const [capital, setCapital] = useState(persisted.capital || 100000);
-  const [provider, setProvider] = useState(persisted.provider || 'auto');
-  const [selectedServiceId, setSelectedServiceId] = useState(persisted.selectedServiceId || '');
+  // ── Persisted setup state ────────────────────────────────────────────────────
 
-  // Save state on change
+  const STORAGE_KEY = 'simlab_state_v3'
+  function loadPersisted() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') ?? {} } catch { return {} }
+  }
+  const persisted = loadPersisted()
+
+  const [sourceMode, setSourceMode] = useState<'strategy' | 'program'>(
+    prefillProgramId ? 'program' : (persisted.sourceMode || 'strategy'))
+  const [programId, setProgramId] = useState(prefillProgramId || persisted.programId || '')
+  const [strategyId, setStrategyId] = useState(persisted.strategyId || '')
+  const [versionId, setVersionId] = useState(persisted.versionId || '')
+  const [symbols, setSymbols] = useState<string[]>(persisted.symbols || [])
+  const [timeframe, setTimeframe] = useState(persisted.timeframe || '1d')
+  const [startDate, setStartDate] = useState(persisted.startDate || jan2020)
+  const [endDate, setEndDate] = useState(persisted.endDate || today)
+  const [capital, setCapital] = useState(persisted.capital || 100000)
+  const [provider, setProvider] = useState(persisted.provider || 'auto')
+  const [selectedServiceId, setSelectedServiceId] = useState(persisted.selectedServiceId || '')
+
   useEffect(() => {
-    persistState({ strategyId, versionId, symbols, timeframe, startDate, endDate, capital, provider, selectedServiceId });
-  }, [strategyId, versionId, symbols, timeframe, startDate, endDate, capital, provider, selectedServiceId]);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        sourceMode, programId, strategyId, versionId, symbols,
+        timeframe, startDate, endDate, capital, provider, selectedServiceId,
+      }))
+    } catch {}
+  }, [sourceMode, programId, strategyId, versionId, symbols, timeframe, startDate, endDate, capital, provider, selectedServiceId])
 
-  // Simulation state
+  useEffect(() => {
+    if (!prefillProgramId) return
+    setSourceMode('program')
+    setProgramId(prefillProgramId)
+  }, [prefillProgramId])
+
+  // ── Simulation runtime state ─────────────────────────────────────────────────
+
   const [simMeta, setSimMeta] = useState<SimulationMetadata | null>(null)
   const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'playing' | 'paused' | 'completed'>('idle')
   const [speed, setSpeed] = useState(5)
   const [error, setError] = useState('')
+  const [setupOpen, setSetupOpen] = useState(true)
+  const [featurePlanOpen, setFeaturePlanOpen] = useState(false)
 
-  // Bar data accumulated for charts
+  // Bar data
   const [barHistory, setBarHistory] = useState<BarSnapshotData[]>([])
   const [latestBar, setLatestBar] = useState<BarSnapshotData | null>(null)
   const [allEntries, setAllEntries] = useState<TradeEvent[]>([])
   const [allExits, setAllExits] = useState<TradeEvent[]>([])
-  const [equityCurve, setEquityCurve] = useState<{ date: string; equity: number; drawdown: number }[]>([])
+  const [equityCurve, setEquityCurve] = useState<{ tms: number; equity: number; drawdown: number }[]>([])
   const [finalMetrics, setFinalMetrics] = useState<any>(null)
 
-  // Zoom state for price chart
-  const [zoomStart, setZoomStart] = useState<number | null>(null)
-  const [zoomEnd, setZoomEnd] = useState<number | null>(null)
+  // Active indicator toggles (matched against data keys)
+  const [activeSpecs, setActiveSpecs] = useState<Set<string>>(new Set())
+  const [indPanelOpen, setIndPanelOpen] = useState(false)
 
-  // Drag-to-zoom state
-  const [dragStart, setDragStart] = useState<string | null>(null)
-  const [dragEnd, setDragEnd] = useState<string | null>(null)
+  // Sidebar tab
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('metrics')
+
+  // Zoom state — index-based (same as ChartLab)
+  const [zoomWindow, setZoomWindow] = useState<[number, number] | null>(null)
+  const [dragStart, setDragStart] = useState<number | null>(null)
+  const [dragEnd, setDragEnd] = useState<number | null>(null)
   const isDragging = dragStart !== null
 
-  // WebSocket ref + mounted ref
   const wsRef = useRef<WebSocket | null>(null)
   const mountedRef = useRef(true)
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
 
-  useEffect(() => {
-    mountedRef.current = true
-    return () => { mountedRef.current = false }
-  }, [])
+  // ── Queries ──────────────────────────────────────────────────────────────────
 
-  // Queries
-  const { data: strategies } = useQuery({
-    queryKey: ['strategies'],
-    queryFn: () => strategiesApi.list(),
-  })
+  const { data: strategies } = useQuery({ queryKey: ['strategies'], queryFn: () => strategiesApi.list() })
   const { data: strategyDetail } = useQuery({
     queryKey: ['strategy', strategyId],
     queryFn: () => strategiesApi.get(strategyId),
     enabled: !!strategyId,
   })
+  const { data: services = [] } = useQuery({ queryKey: ['services'], queryFn: () => servicesApi.list() })
+  const { data: programs = [] } = useQuery({ queryKey: ['programs'], queryFn: () => programsApi.list() })
 
-  const { data: services = [] } = useQuery({
-    queryKey: ['services'],
-    queryFn: () => servicesApi.list(),
-  })
-
-  // Alpaca service selection
-  const alpacaServices = (services as any[]).filter((s) => s.provider === 'alpaca' && s.has_credentials);
-  // If only one, auto-select
+  const alpacaServices = (services as any[]).filter((s) => s.provider === 'alpaca' && s.has_credentials)
   useEffect(() => {
-    if (!selectedServiceId && alpacaServices.length === 1) setSelectedServiceId(alpacaServices[0].id);
-  }, [alpacaServices, selectedServiceId]);
+    if (!selectedServiceId && alpacaServices.length === 1) setSelectedServiceId(alpacaServices[0].id)
+  }, [alpacaServices, selectedServiceId])
 
   const versions = (strategyDetail as any)?.versions ?? []
-
-  // Auto-select latest version when strategy changes
   useEffect(() => {
-    if (versions.length > 0 && !versionId) {
-      setVersionId(versions[0].id)
-    }
+    if (versions.length > 0 && !versionId) setVersionId(versions[0].id)
   }, [versions, versionId])
 
-  // ── WebSocket message handler ──────────────────────────────────────────────
+  // ── Timeframe helpers ────────────────────────────────────────────────────────
+
+  const isIntraday = useMemo(() => ['1m', '5m', '15m', '30m', '1h', '4h'].includes(timeframe), [timeframe])
+
+  const makeBarKey = useCallback((raw: string): string => {
+    if (isIntraday) return raw.slice(0, 19)
+    return raw.split(' ')[0] || raw.slice(0, 10)
+  }, [isIntraday])
+
+  // ── WS handler ───────────────────────────────────────────────────────────────
 
   const handleWsMessage = useCallback((event: MessageEvent) => {
     if (!mountedRef.current) return
@@ -276,13 +432,13 @@ export function SimulationLab() {
       if (msg.type === 'bar') {
         const bar: BarSnapshotData = msg.data
         setLatestBar(bar)
-        setBarHistory((prev) => [...prev, bar].slice(-500))
+        setBarHistory((prev) => [...prev, bar])  // no cap — full history
         setEquityCurve((prev) => [
           ...prev,
-          { date: bar.timestamp, equity: bar.equity, drawdown: bar.drawdown },
+          { tms: new Date(bar.timestamp).getTime(), equity: bar.equity, drawdown: bar.drawdown },
         ])
-        if (bar.entries.length > 0) setAllEntries((prev) => [...prev, ...bar.entries])
-        if (bar.exits.length > 0) setAllExits((prev) => [...prev, ...bar.exits])
+        if (bar.entries?.length > 0) setAllEntries((prev) => [...prev, ...bar.entries])
+        if (bar.exits?.length > 0) setAllExits((prev) => [...prev, ...bar.exits])
       } else if (msg.type === 'completed') {
         setStatus('completed')
         setFinalMetrics(msg.data)
@@ -291,7 +447,7 @@ export function SimulationLab() {
         else if (msg.status === 'paused') setStatus('paused')
       } else if (msg.type === 'equity_catchup') {
         const curve = (msg.data || []).map((p: any) => ({
-          date: p.date, equity: p.equity, drawdown: p.drawdown,
+          tms: new Date(p.date).getTime(), equity: p.equity, drawdown: p.drawdown,
         }))
         setEquityCurve(curve)
       } else if (msg.type === 'init') {
@@ -300,71 +456,80 @@ export function SimulationLab() {
         setError(msg.message)
       }
     } catch (e) {
-      console.error('WS parse error:', e)
+      console.error('[SimLab] WS parse error:', e)
     }
   }, [])
 
-  // ── Actions ────────────────────────────────────────────────────────────────
-
+  // ── Actions ──────────────────────────────────────────────────────────────────
 
   const handleCreate = async () => {
-    // Data existence checks
-    if (!strategyId) { setError('Select a strategy first'); return; }
-    if (!versionId) { setError('Select a strategy version'); return; }
-    if (!symbols.length) { setError('Select at least one symbol'); return; }
-    if (!timeframe) { setError('Select a timeframe'); return; }
-    if (!startDate || !endDate) { setError('Select start and end dates'); return; }
-    if ((provider === 'alpaca' || provider === 'auto') && alpacaServices.length && !selectedServiceId) {
-      setError('Select an Alpaca service account'); return;
+    if (sourceMode === 'strategy') {
+      if (!strategyId) { setError('Select a strategy first'); return }
+      if (!versionId) { setError('Select a strategy version'); return }
+    } else {
+      if (!programId) { setError('Select a program'); return }
     }
-    setError('');
-    setStatus('loading');
-    setBarHistory([]); setLatestBar(null); setAllEntries([]); setAllExits([]);
-    setEquityCurve([]); setFinalMetrics(null); setZoomStart(null); setZoomEnd(null);
+    if (sourceMode === 'strategy' && !symbols.length) { setError('Select at least one symbol'); return }
+    if (!timeframe) { setError('Select a timeframe'); return }
+    if (!startDate || !endDate) { setError('Select start and end dates'); return }
+    if ((provider === 'alpaca' || provider === 'auto') && alpacaServices.length && !selectedServiceId) {
+      setError('Select an Alpaca service account'); return
+    }
 
-    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+    setError('')
+    setStatus('loading')
+    setBarHistory([]); setLatestBar(null); setAllEntries([]); setAllExits([])
+    setEquityCurve([]); setFinalMetrics(null); setZoomWindow(null)
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
 
     try {
-      // Use selected Alpaca service (if any)
-      let alpacaKey = '', alpacaSecret = '';
+      let alpacaKey = '', alpacaSecret = ''
       if ((provider === 'alpaca' || provider === 'auto') && selectedServiceId) {
-        const svc = alpacaServices.find(s => s.id === selectedServiceId);
-        if (svc) {
-          alpacaKey = svc.api_key;
-          alpacaSecret = svc.secret_key;
-        }
+        const svc = alpacaServices.find((s: any) => s.id === selectedServiceId)
+        if (svc) { alpacaKey = svc.api_key; alpacaSecret = svc.secret_key }
       }
 
       const meta = await simulationsApi.create({
-        strategy_version_id: versionId,
+        ...(sourceMode === 'program' ? { program_id: programId } : { strategy_version_id: versionId }),
         symbols, timeframe,
         start_date: startDate, end_date: endDate,
         initial_capital: capital, data_provider: provider,
         alpaca_api_key: alpacaKey || undefined,
         alpaca_secret_key: alpacaSecret || undefined,
-      });
-      if (!mountedRef.current) return;
-      setSimMeta(meta);
+      })
+      if (!mountedRef.current) return
+      setSimMeta(meta)
+      setSetupOpen(false)  // auto-collapse setup after successful init
 
-      // Show provider and any backend warnings (if present)
       if (meta.provider) {
-        setError(`Provider used: ${meta.provider}${meta.date_clamped ? ' (date range clamped)' : ''}`);
+        setError(`Provider: ${meta.provider}${meta.date_clamped ? ' (date range clamped)' : ''}`)
       }
 
-      const ws = createSimulationWs(meta.simulation_id);
-      ws.onopen = () => console.log('[SimLab] WS connected');
-      ws.onmessage = handleWsMessage;
+      // Auto-activate indicators that are present in the first bar's data
+      // We'll resolve these when the first bar arrives — for now seed from meta.indicators
+      if (meta.indicators?.length) {
+        const initial = new Set<string>()
+        for (const k of (meta.indicators as string[])) {
+          if (KEY_TO_DEF[k]) initial.add(KEY_TO_DEF[k].spec)
+        }
+        setActiveSpecs(initial)
+      }
+
+      const ws = createSimulationWs(meta.simulation_id)
+      ws.onopen = () => console.log('[SimLab] WS connected')
+      ws.onmessage = handleWsMessage
       ws.onerror = () => {
-        if (mountedRef.current) setError('WebSocket connection failed — restart Vite dev server if proxy changed');
-      };
+        if (mountedRef.current) setError('WebSocket connection failed')
+      }
       ws.onclose = () => {
         if (mountedRef.current && wsRef.current === ws) {
-          setStatus((prev) => prev === 'playing' ? 'paused' : prev);
+          if (status === 'playing') setError('Connection lost — simulation paused')
+          setStatus((prev) => prev === 'playing' ? 'paused' : prev)
         }
-      };
-      wsRef.current = ws;
+      }
+      wsRef.current = ws
     } catch (e: any) {
-      if (mountedRef.current) { setError(e.message || 'Failed to create simulation'); setStatus('idle'); }
+      if (mountedRef.current) { setError(e.message || 'Failed to create simulation'); setStatus('idle') }
     }
   }
 
@@ -377,88 +542,48 @@ export function SimulationLab() {
   const handleStep = () => { sendWs({ action: 'step' }); setStatus('paused') }
   const handleSkipToTrade = () => sendWs({ action: 'skip_to_trade' })
   const handleFinalize = () => sendWs({ action: 'finalize' })
-
-  const handleSpeedChange = (newSpeed: string) => {
-    const s = parseFloat(newSpeed)
-    setSpeed(s)
-    sendWs({ action: 'set_speed', speed: s })
-  }
+  const handleSpeedChange = (v: string) => { const s = parseFloat(v); setSpeed(s); sendWs({ action: 'set_speed', speed: s }) }
 
   const handleReset = () => {
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
     setStatus('idle'); setSimMeta(null); setBarHistory([]); setLatestBar(null)
     setAllEntries([]); setAllExits([]); setEquityCurve([]); setFinalMetrics(null)
-    setError(''); setZoomStart(null); setZoomEnd(null)
+    setError(''); setZoomWindow(null); setSetupOpen(true)
   }
 
   useEffect(() => () => { if (wsRef.current) wsRef.current.close() }, [])
 
-  // ── Smart date formatting based on timeframe context ──
+  // ── Chart data ───────────────────────────────────────────────────────────────
 
-  const isIntraday = useMemo(() => ['1m', '5m', '15m', '30m', '1h', '4h'].includes(timeframe), [timeframe])
-
-  /** Format a raw timestamp string into a display label based on timeframe context */
-  const formatTimestamp = useCallback((raw: string): string => {
-    if (!raw) return ''
-    if (isIntraday) {
-      // Show "Jan 15 09:30" for intraday
-      const d = new Date(raw)
-      if (isNaN(d.getTime())) return raw.slice(0, 16)
-      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' +
-             d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
-    }
-    if (timeframe === '1wk') {
-      // Show "Jan 2020" for weekly
-      const d = new Date(raw)
-      if (isNaN(d.getTime())) return raw.slice(0, 7)
-      return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
-    }
-    // Daily: "Jan 15, 25" compact
-    const d = new Date(raw)
-    if (isNaN(d.getTime())) return raw.slice(0, 10)
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
-  }, [isIntraday, timeframe])
-
-  /** Build a unique key for a timestamp — intraday keeps time, daily keeps date only */
-  const makeBarKey = useCallback((raw: string): string => {
-    if (isIntraday) return raw.slice(0, 19)  // "2020-01-15 09:30:00" or "2020-01-15T09:30:00"
-    return raw.split(' ')[0] || raw.slice(0, 10)  // "2020-01-15"
-  }, [isIntraday])
-
-  // ── Chart data — merge entries/exits INTO priceData for correct marker positioning ──
-
-  const primarySymbol = symbols[0] || ''
+  const activeSymbols = useMemo(
+    () => (simMeta?.symbols?.length ? simMeta.symbols : symbols),
+    [simMeta?.symbols, symbols],
+  )
+  const primarySymbol = activeSymbols[0] || ''
 
   const entryMap = useMemo(() => {
     const m = new Map<string, TradeEvent>()
-    for (const e of allEntries) {
-      if (e.symbol === primarySymbol && e.entry_time) {
-        m.set(makeBarKey(e.entry_time), e)
-      }
-    }
+    for (const e of allEntries) if (e.symbol === primarySymbol && e.entry_time) m.set(makeBarKey(e.entry_time), e)
     return m
   }, [allEntries, primarySymbol, makeBarKey])
 
   const exitMap = useMemo(() => {
     const m = new Map<string, TradeEvent>()
-    for (const e of allExits) {
-      if (e.symbol === primarySymbol && e.exit_time) {
-        m.set(makeBarKey(e.exit_time), e)
-      }
-    }
+    for (const e of allExits) if (e.symbol === primarySymbol && e.exit_time) m.set(makeBarKey(e.exit_time), e)
     return m
   }, [allExits, primarySymbol, makeBarKey])
 
-  const priceData = useMemo(() => {
+  // Build rows with tms numeric timestamps (matches ChartLab)
+  const rows = useMemo(() => {
     return barHistory.map((b) => {
       const sym = b.symbols[primarySymbol]
       if (!sym) return null
       const barKey = makeBarKey(b.timestamp)
       const entry = entryMap.get(barKey)
       const exit = exitMap.get(barKey)
+      const tms = new Date(b.timestamp).getTime()
       return {
-        t: formatTimestamp(b.timestamp),
-        _rawTs: b.timestamp,
+        tms,
         open: sym.open, high: sym.high, low: sym.low, close: sym.close, volume: sym.volume,
         ...Object.fromEntries(
           Object.entries(sym).filter(([k]) => !['open', 'high', 'low', 'close', 'volume', 'regime'].includes(k))
@@ -469,579 +594,1012 @@ export function SimulationLab() {
         _exitPrice: exit?.exit_price,
         _exitPnl: exit?.net_pnl ?? 0,
       }
-    }).filter(Boolean)
-  }, [barHistory, primarySymbol, entryMap, exitMap, makeBarKey, formatTimestamp])
+    }).filter(Boolean) as any[]
+  }, [barHistory, primarySymbol, entryMap, exitMap, makeBarKey])
 
-  // Zoom slice
-  const zoomedData = useMemo(() => {
-    if (zoomStart != null && zoomEnd != null && zoomStart < zoomEnd) {
-      return priceData.slice(zoomStart, zoomEnd + 1)
-    }
-    return priceData
-  }, [priceData, zoomStart, zoomEnd])
+  // Visible slice
+  const visibleRows = useMemo(() => {
+    if (!zoomWindow) return rows
+    return rows.slice(zoomWindow[0], zoomWindow[1] + 1)
+  }, [rows, zoomWindow])
 
-  // Thin equity curve
+  // Price domain with 5% padding
+  const visiblePriceDomain = useMemo(() => {
+    if (!visibleRows.length) return ['auto', 'auto'] as ['auto', 'auto']
+    const prices = visibleRows.flatMap((r: any) => [r.high, r.low])
+    const mn = Math.min(...prices), mx = Math.max(...prices)
+    const pad = (mx - mn) * 0.05
+    return [Math.floor((mn - pad) * 100) / 100, Math.ceil((mx + pad) * 100) / 100] as [number, number]
+  }, [visibleRows])
+
+  // Thin equity for smooth area chart
   const thinEquity = useMemo(() => {
-    if (equityCurve.length <= 300) return equityCurve
-    const step = Math.ceil(equityCurve.length / 300)
+    if (equityCurve.length <= 500) return equityCurve
+    const step = Math.ceil(equityCurve.length / 500)
     return equityCurve.filter((_, i) => i % step === 0 || i === equityCurve.length - 1)
   }, [equityCurve])
 
-  // Combined trade log sorted by time
+  // Determine which indicator keys are present in the live data
+  const availableDataKeys = useMemo(() => {
+    if (!rows[0]) return new Set<string>()
+    const skip = new Set(['tms', 'open', 'high', 'low', 'close', 'volume', '_entry', '_entryPrice', '_exit', '_exitPrice', '_exitPnl'])
+    return new Set(Object.keys(rows[0]).filter(k => !skip.has(k) && (rows[0] as any)[k] != null))
+  }, [rows])
+
+  // Active indicator defs split by pane
+  const { priceIndicators, oscIndicators } = useMemo(() => {
+    const price: IndicatorDef[] = []
+    const osc: IndicatorDef[] = []
+    const seen = new Set<string>()
+    for (const spec of activeSpecs) {
+      const def = ALL_INDICATORS.find(d => d.spec === spec)
+      if (!def || seen.has(def.spec)) continue
+      // Only show if any of its keys are present in the data
+      const keys = def.produces ?? [def.spec]
+      if (!keys.some(k => availableDataKeys.has(k))) continue
+      seen.add(def.spec)
+      if (def.pane === 'price') price.push(def)
+      else osc.push(def)
+    }
+    return { priceIndicators: price, oscIndicators: osc }
+  }, [activeSpecs, availableDataKeys])
+
+  // ── Zoom helpers ─────────────────────────────────────────────────────────────
+
+  const commitZoomIndices = useCallback((i1: number, i2: number) => {
+    const offset = zoomWindow ? zoomWindow[0] : 0
+    const a = offset + i1, b = offset + i2
+    if (a === b) return
+    const lo = Math.min(a, b), hi = Math.max(a, b)
+    if (hi - lo < 2) return
+    setZoomWindow([lo, hi])
+  }, [zoomWindow])
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault()
+    const total = rows.length
+    if (!total) return
+    const [lo, hi] = zoomWindow ?? [0, total - 1]
+    const factor = e.deltaY > 0 ? 1.15 : 0.87
+    const newVis = Math.round(Math.min(Math.max((hi - lo) * factor, 10), total))
+    const center = Math.round((lo + hi) / 2)
+    const nLo = Math.max(0, center - Math.floor(newVis / 2))
+    const nHi = Math.min(total - 1, nLo + newVis)
+    if (nHi - nLo < 2) return
+    setZoomWindow([nLo, nHi])
+  }, [rows, zoomWindow])
+
+  const handleZoomIn = () => {
+    const total = rows.length
+    if (total < 10) return
+    const [lo, hi] = zoomWindow ?? [0, total - 1]
+    const newVis = Math.max(10, Math.round((hi - lo) * 0.6))
+    const center = Math.round((lo + hi) / 2)
+    const nLo = Math.max(0, center - Math.floor(newVis / 2))
+    setZoomWindow([nLo, Math.min(total - 1, nLo + newVis)])
+  }
+
+  const handleZoomOut = () => {
+    const total = rows.length
+    if (!total || !zoomWindow) return
+    const [lo, hi] = zoomWindow
+    const newVis = Math.min(total, Math.round((hi - lo) * 1.6))
+    const center = Math.round((lo + hi) / 2)
+    const nLo = Math.max(0, center - Math.floor(newVis / 2))
+    const nHi = Math.min(total - 1, nLo + newVis)
+    if (nHi - nLo >= total - 2) setZoomWindow(null)
+    else setZoomWindow([nLo, nHi])
+  }
+
+  // ── Trade log — full, sorted newest-first ────────────────────────────────────
+
   const tradeLog = useMemo(() => {
     const items: Array<TradeEvent & { _type: 'entry' | 'exit' }> = [
       ...allEntries.map((e) => ({ ...e, _type: 'entry' as const })),
       ...allExits.map((e) => ({ ...e, _type: 'exit' as const })),
     ]
     items.sort((a, b) => {
-      const ta = a._type === 'exit' ? a.exit_time : a.entry_time
-      const tb = b._type === 'exit' ? b.exit_time : b.entry_time
-      return (tb || '').localeCompare(ta || '')
+      const ta = a._type === 'exit' ? (a.exit_time ?? '') : (a.entry_time ?? '')
+      const tb = b._type === 'exit' ? (b.exit_time ?? '') : (b.entry_time ?? '')
+      return tb.localeCompare(ta)
     })
-    return items.slice(0, 40)
+    return items  // no slice — full history
   }, [allEntries, allExits])
 
-  // Zoom handlers
-  const handleZoomIn = () => {
-    const total = priceData.length
-    if (total < 10) return
-    const lo = zoomStart ?? 0, hi = zoomEnd ?? total - 1
-    const visible = hi - lo
-    const newVis = Math.max(10, Math.round(visible * 0.6))
-    const center = Math.round((lo + hi) / 2)
-    const nLo = Math.max(0, center - Math.floor(newVis / 2))
-    const nHi = Math.min(total - 1, nLo + newVis)
-    setZoomStart(nLo); setZoomEnd(nHi)
-  }
-  const handleZoomOut = () => {
-    const total = priceData.length
-    if (total === 0) return
-    if (zoomStart == null || zoomEnd == null) return  // already fully zoomed out
-    const lo = zoomStart, hi = zoomEnd
-    const visible = hi - lo
-    const newVis = Math.min(total, Math.round(visible * 1.6))
-    const center = Math.round((lo + hi) / 2)
-    const nLo = Math.max(0, center - Math.floor(newVis / 2))
-    const nHi = Math.min(total - 1, nLo + newVis)
-    if (nHi - nLo >= total - 2) { setZoomStart(null); setZoomEnd(null) }
-    else { setZoomStart(nLo); setZoomEnd(nHi) }
-  }
-  const handleZoomReset = () => { setZoomStart(null); setZoomEnd(null) }
-
-  // Drag-to-zoom commit
-  const commitDragZoom = useCallback((t1: string, t2: string) => {
-    const i1 = priceData.findIndex((d: any) => d?.t === t1)
-    const i2 = priceData.findIndex((d: any) => d?.t === t2)
-    if (i1 < 0 || i2 < 0 || i1 === i2) return
-    const lo = Math.min(i1, i2), hi = Math.max(i1, i2)
-    if (hi - lo < 3) return
-    setZoomStart(lo); setZoomEnd(hi)
-  }, [priceData])
-
-  const isZoomed = zoomStart != null && zoomEnd != null
-  const zoomBarCount = isZoomed ? (zoomEnd! - zoomStart! + 1) : priceData.length
-
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Derived state ─────────────────────────────────────────────────────────────
 
   const isSetupMode = status === 'idle' || status === 'loading'
+  const isZoomed = zoomWindow !== null
+  const zoomBarCount = isZoomed ? (zoomWindow![1] - zoomWindow![0] + 1) : rows.length
+
+  const pxColor = (v: number) => v >= 0 ? 'var(--color-success)' : 'var(--color-danger)'
+
+  // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="space-y-3 h-full flex flex-col">
-      <div className="flex items-center justify-between">
-        <h1 className="text-base font-semibold" style={{ color: 'var(--color-text-primary)' }}>Simulation Lab</h1>
-        {simMeta && (
-          <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
-            <span>{simMeta.strategy_name}</span>
-            <span className="opacity-50">|</span>
-            <span>{symbols.join(', ')}</span>
-            <span className="opacity-50">|</span>
-            <span>{timeframe}</span>
-            {latestBar && (
-              <>
-                <span className="opacity-50">|</span>
-                <span>Bar {(latestBar.bar_num + 1).toLocaleString()}/{latestBar.total_bars.toLocaleString()}</span>
-              </>
-            )}
-          </div>
-        )}
+    <div className="h-full flex flex-col gap-0" style={{ minHeight: 0 }}>
+
+      {/* ── Top bar ─────────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between px-3 py-2 flex-shrink-0"
+        style={{ borderBottom: '1px solid var(--color-border)', backgroundColor: 'var(--color-bg-secondary)' }}>
+        <div className="flex items-center gap-3">
+          <h1 className="text-sm font-semibold flex items-center gap-1.5" style={{ color: 'var(--color-text-primary)' }}>
+            Simulation Lab<PageHelp page="simlab" />
+          </h1>
+          {simMeta && (
+            <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+              <span style={{ color: 'var(--color-accent)' }}>{simMeta.strategy_name}</span>
+              <span className="opacity-40">·</span>
+              <span>{activeSymbols.join(', ')}</span>
+              <span className="opacity-40">·</span>
+              <span>{timeframe}</span>
+              {latestBar && (
+                <>
+                  <span className="opacity-40">·</span>
+                  <span className="tabular-nums">
+                    {(latestBar.bar_num + 1).toLocaleString()} / {latestBar.total_bars.toLocaleString()} bars
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* Setup toggle button — only when simulation is running */}
+          {!isSetupMode && (
+            <button
+              className="btn-ghost text-xs flex items-center gap-1 py-1 px-2"
+              onClick={() => setSetupOpen(o => !o)}
+            >
+              <Settings size={11} />
+              Setup
+              {setupOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            </button>
+          )}
+
+          {!isSetupMode && (
+            <button className="btn-sm text-xs flex items-center gap-1" onClick={handleReset}>
+              <RotateCcw size={12} /> Reset
+            </button>
+          )}
+        </div>
       </div>
 
+      {/* ── Error / info banner ─────────────────────────────────────────────── */}
       {error && (
-        <div className="p-2 rounded text-xs flex items-center gap-2" style={{ backgroundColor: 'rgba(239,68,68,0.15)', color: '#f87171' }}>
-          <AlertTriangle size={14} /> {error}
-          <button className="ml-auto underline" onClick={() => setError('')}>dismiss</button>
+        <div className="flex items-center gap-2 px-3 py-1.5 text-xs flex-shrink-0"
+          style={{
+            backgroundColor: error.startsWith('Provider:') ? 'rgba(56,189,248,0.08)' : 'rgba(239,68,68,0.12)',
+            color: error.startsWith('Provider:') ? 'var(--color-text-secondary)' : '#f87171',
+            borderBottom: '1px solid var(--color-border)',
+          }}>
+          {!error.startsWith('Provider:') && <AlertTriangle size={12} />}
+          <span>{error}</span>
+          <button className="ml-auto opacity-60 hover:opacity-100" onClick={() => setError('')}>
+            <X size={12} />
+          </button>
         </div>
       )}
 
-      {/* ── SETUP PANEL ─────────────────────────────────────────────────────── */}
-      {isSetupMode && (
-        <div className="card p-4 space-y-4">
-          <h2 className="text-sm font-medium" style={{ color: 'var(--color-text-primary)' }}>Configure Simulation</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Strategy</label>
-              <SelectMenu
-                value={strategyId}
-                onChange={(v) => { setStrategyId(v); setVersionId('') }}
-                options={(strategies || []).map((s: any) => ({ value: s.id, label: s.name }))}
-                placeholder="Select strategy..."
-              />
+      {/* ── Collapsible setup drawer ─────────────────────────────────────────── */}
+      {(isSetupMode || setupOpen) && (
+        <div className="flex-shrink-0 border-b" style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-secondary)' }}>
+          <div className="p-4 space-y-4 max-w-5xl">
+
+            {/* Source toggle */}
+            <div className="flex gap-1 rounded border border-gray-700 bg-gray-900/60 p-0.5 w-fit">
+              {(['strategy', 'program'] as const).map((mode) => (
+                <button key={mode} onClick={() => setSourceMode(mode)}
+                  className={clsx('px-3 py-1 rounded text-xs font-medium transition-colors',
+                    sourceMode === mode ? 'bg-sky-600 text-white' : 'text-gray-400 hover:text-gray-200')}>
+                  {mode === 'strategy' ? 'Strategy Version' : 'Program'}
+                </button>
+              ))}
             </div>
-            <div className="space-y-1">
-              <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Version</label>
-              <SelectMenu
-                value={versionId}
-                onChange={setVersionId}
-                options={versions.map((v: any) => ({
-                  value: v.id,
-                  label: `v${v.version} — ${v.duration_mode || 'swing'} ${v.notes ? '(' + v.notes.slice(0, 30) + ')' : ''}`,
-                }))}
-                placeholder={strategyId ? (versions.length === 0 ? 'Loading...' : 'Select version...') : 'Pick a strategy first'}
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Symbols</label>
-              <TickerSearch selected={symbols} onChange={setSymbols} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Timeframe</label>
-              <SelectMenu value={timeframe} onChange={setTimeframe} options={timeframeOptions} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Start Date</label>
-              <DatePickerInput value={startDate} onChange={setStartDate} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>End Date</label>
-              <DatePickerInput value={endDate} onChange={setEndDate} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Initial Capital</label>
-              <input type="number" className="input w-full" value={capital} onChange={(e) => setCapital(Number(e.target.value))} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Data Provider</label>
-              <SelectMenu value={provider} onChange={setProvider} options={[
-                { value: 'auto', label: 'Auto' }, { value: 'yfinance', label: 'Yahoo Finance' }, { value: 'alpaca', label: 'Alpaca' },
-              ]} />
-            </div>
-            {(provider === 'alpaca' || provider === 'auto') && (
-              <div className="space-y-1">
-                <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Alpaca Service Account</label>
-                {alpacaServices.length === 0 ? (
-                  <div className="rounded border border-amber-800/60 bg-amber-900/20 p-2 text-xs text-amber-300">
-                    No Alpaca service account found. <a href="/services" className="underline hover:text-amber-200">Create one</a> to use Alpaca as a data provider.
+
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+              {/* Strategy/Program picker */}
+              {sourceMode === 'strategy' ? (
+                <>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Strategy</label>
+                    <SelectMenu value={strategyId} onChange={(v) => { setStrategyId(v); setVersionId('') }}
+                      options={(strategies || []).map((s: any) => ({ value: s.id, label: s.name }))}
+                      placeholder="Select strategy..." />
                   </div>
-                ) : (
-                  <SelectMenu
-                    className="w-full"
-                    value={selectedServiceId}
-                    placeholder="- Select an Alpaca account -"
-                    options={alpacaServices.map(s => ({ value: s.id, label: s.name }))}
-                    onChange={setSelectedServiceId}
-                  />
-                )}
-                {selectedServiceId && (
-                  <p className="text-[11px] text-green-500">Credentials loaded from service account.</p>
-                )}
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Version</label>
+                    <SelectMenu value={versionId} onChange={setVersionId}
+                      options={versions.map((v: any) => ({
+                        value: v.id,
+                        label: `v${v.version} — ${v.duration_mode || 'swing'}${v.notes ? ' (' + v.notes.slice(0, 24) + ')' : ''}`,
+                      }))}
+                      placeholder={strategyId ? (versions.length === 0 ? 'Loading...' : 'Select version...') : 'Pick a strategy first'} />
+                  </div>
+                </>
+              ) : (
+                <div className="space-y-1 col-span-2">
+                  <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Program</label>
+                  <SelectMenu value={programId} onChange={setProgramId}
+                    options={(programs as any[]).map((p) => ({ value: p.id, label: `${p.name} v${p.version}` }))}
+                    placeholder="Select a saved program..." />
+                </div>
+              )}
+
+              {/* Symbols */}
+              <div className="space-y-1 col-span-2 md:col-span-1">
+                <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Symbols</label>
+                <TickerSearch selected={symbols} onChange={setSymbols} />
               </div>
-            )}
-          </div>
-          <div className="flex justify-end pt-2">
-            <button className="btn-primary flex items-center gap-2" onClick={handleCreate} disabled={status === 'loading'}>
-              {status === 'loading' ? <Loader size={14} className="animate-spin" /> : <Play size={14} />}
-              {status === 'loading' ? 'Loading data & indicators...' : 'Initialize Simulation'}
-            </button>
+
+              {/* Timeframe */}
+              <div className="space-y-1">
+                <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Timeframe</label>
+                <SelectMenu value={timeframe} onChange={setTimeframe} options={timeframeOptions} />
+              </div>
+
+              {/* Start date */}
+              <div className="space-y-1">
+                <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Start</label>
+                <DatePickerInput value={startDate} onChange={setStartDate} />
+              </div>
+
+              {/* End date */}
+              <div className="space-y-1">
+                <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>End</label>
+                <DatePickerInput value={endDate} onChange={setEndDate} />
+              </div>
+
+              {/* Capital */}
+              <div className="space-y-1">
+                <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Capital</label>
+                <input type="number" className="input w-full" value={capital}
+                  onChange={(e) => setCapital(Number(e.target.value))} />
+              </div>
+
+              {/* Provider */}
+              <div className="space-y-1">
+                <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Data Provider</label>
+                <SelectMenu value={provider} onChange={setProvider} options={[
+                  { value: 'auto', label: 'Auto' },
+                  { value: 'yfinance', label: 'Yahoo Finance' },
+                  { value: 'alpaca', label: 'Alpaca' },
+                ]} />
+              </div>
+
+              {/* Alpaca service */}
+              {(provider === 'alpaca' || provider === 'auto') && alpacaServices.length > 0 && (
+                <div className="space-y-1">
+                  <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Alpaca Account</label>
+                  <SelectMenu value={selectedServiceId} onChange={setSelectedServiceId}
+                    options={alpacaServices.map((s: any) => ({ value: s.id, label: s.name || s.id.slice(0, 8) }))}
+                    placeholder="Select account..." />
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              {!isSetupMode && (
+                <button className="btn-sm text-xs" onClick={() => setSetupOpen(false)}>Cancel</button>
+              )}
+              <button className="btn-primary flex items-center gap-2 text-sm px-4 py-2"
+                onClick={handleCreate} disabled={status === 'loading'}>
+                {status === 'loading'
+                  ? <><Loader size={14} className="animate-spin" /> Loading data &amp; indicators…</>
+                  : <><Play size={14} /> Initialize Simulation</>}
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* ── SIMULATION VIEW ─────────────────────────────────────────────────── */}
+      {/* ── Simulation view ──────────────────────────────────────────────────── */}
       {!isSetupMode && (
-        <>
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+
           {/* Controls bar */}
-          <div className="card px-3 py-2 flex items-center gap-3 flex-shrink-0 flex-wrap">
-            <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2 px-3 py-1.5 flex-shrink-0 flex-wrap"
+            style={{ borderBottom: '1px solid var(--color-border)', backgroundColor: 'var(--color-bg-secondary)' }}>
+
+            {/* Transport */}
+            <div className="flex items-center gap-0.5">
               {status === 'playing' ? (
-                <button className="btn-sm" onClick={handlePause} title="Pause"><Pause size={14} /></button>
+                <button className="btn-sm" onClick={handlePause} title="Pause"><Pause size={13} /></button>
               ) : (
                 <button className="btn-sm btn-primary" onClick={handlePlay} title="Play" disabled={status === 'completed'}>
-                  <Play size={14} />
+                  <Play size={13} />
                 </button>
               )}
-              <button className="btn-sm" onClick={handleStep} title="Step one bar" disabled={status === 'completed' || status === 'playing'}>
-                <ChevronRight size={14} />
+              <button className="btn-sm" onClick={handleStep} title="Step" disabled={status === 'completed' || status === 'playing'}>
+                <ChevronRight size={13} />
               </button>
               <button className="btn-sm" onClick={handleSkipToTrade} title="Skip to next trade" disabled={status === 'completed' || status === 'playing'}>
-                <SkipForward size={14} />
+                <SkipForward size={13} />
               </button>
               <button className="btn-sm" onClick={handleFinalize} title="Run to end" disabled={status === 'completed'}>
-                <FastForward size={14} />
+                <FastForward size={13} />
               </button>
             </div>
 
-            <div className="h-4 border-r" style={{ borderColor: 'var(--color-border)' }} />
+            <div className="h-4 w-px flex-shrink-0" style={{ backgroundColor: 'var(--color-border)' }} />
 
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>Speed:</span>
+            {/* Speed */}
+            <div className="flex items-center gap-1">
               {speedOptions.map((opt) => (
-                <button
-                  key={opt.value}
-                  className={clsx('text-xs px-1.5 py-0.5 rounded', speed === parseFloat(opt.value) ? 'btn-primary' : 'btn-sm')}
-                  onClick={() => handleSpeedChange(opt.value)}
-                >
+                <button key={opt.value}
+                  className={clsx('text-xs px-1.5 py-0.5 rounded transition-all',
+                    speed === parseFloat(opt.value) ? 'btn-primary' : 'btn-sm')}
+                  onClick={() => handleSpeedChange(opt.value)}>
                   {opt.label}
                 </button>
               ))}
             </div>
 
-            <div className="h-4 border-r" style={{ borderColor: 'var(--color-border)' }} />
+            <div className="h-4 w-px flex-shrink-0" style={{ backgroundColor: 'var(--color-border)' }} />
 
+            {/* Progress */}
             {latestBar && (
-              <div className="flex-1 flex items-center gap-2 min-w-[120px]">
-                <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--color-bg-tertiary)' }}>
-                  <div className="h-full rounded-full transition-all" style={{ width: `${latestBar.progress_pct}%`, backgroundColor: 'var(--color-accent)' }} />
+              <div className="flex items-center gap-2 min-w-[100px] flex-1">
+                <div className="flex-1 h-1 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--color-bg-tertiary)' }}>
+                  <div className="h-full rounded-full transition-all duration-150"
+                    style={{ width: `${latestBar.progress_pct}%`, backgroundColor: 'var(--color-accent)' }} />
                 </div>
-                <span className="text-xs tabular-nums" style={{ color: 'var(--color-text-secondary)' }}>{latestBar.progress_pct.toFixed(0)}%</span>
+                <span className="text-xs tabular-nums flex-shrink-0" style={{ color: 'var(--color-text-secondary)' }}>
+                  {latestBar.progress_pct.toFixed(0)}%
+                </span>
               </div>
             )}
 
-            <span className={clsx(
-              'text-xs px-2 py-0.5 rounded-full font-medium',
-              status === 'playing' && 'bg-green-900/40 text-green-400',
-              status === 'paused' && 'bg-yellow-900/40 text-yellow-400',
+            {/* Status badge */}
+            <span className={clsx('text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0',
+              status === 'playing'   && 'bg-green-900/40 text-green-400',
+              status === 'paused'    && 'bg-yellow-900/40 text-yellow-400',
               status === 'completed' && 'bg-blue-900/40 text-blue-400',
-              status === 'ready' && 'bg-gray-800/40 text-gray-400',
+              status === 'ready'     && 'bg-gray-800 text-gray-400',
             )}>
               {status}
             </span>
 
-            <div className="flex items-center gap-1">
-              <button className="btn-sm" onClick={handleZoomIn} title="Zoom in"><ZoomIn size={14} /></button>
-              <button className="btn-sm" onClick={handleZoomOut} title="Zoom out"><ZoomOut size={14} /></button>
+            <div className="h-4 w-px flex-shrink-0" style={{ backgroundColor: 'var(--color-border)' }} />
+
+            {/* Zoom controls */}
+            <div className="flex items-center gap-0.5">
+              <button className="btn-sm" onClick={handleZoomIn} title="Zoom in"><ZoomIn size={13} /></button>
+              <button className="btn-sm" onClick={handleZoomOut} title="Zoom out"><ZoomOut size={13} /></button>
               {isZoomed && (
-                <button className="btn-sm text-xs px-2" onClick={handleZoomReset} title="Reset zoom"
+                <button className="btn-sm text-xs px-2"
+                  onClick={() => { setZoomWindow(null); setDragStart(null); setDragEnd(null) }}
                   style={{ color: 'var(--color-accent)' }}>
-                  {zoomBarCount} bars
+                  {zoomBarCount} bars ↺
                 </button>
               )}
             </div>
 
-            <button className="btn-sm" onClick={handleReset} title="Reset"><RotateCcw size={14} /></button>
+            {/* Indicator panel toggle */}
+            <button className="btn-ghost text-xs flex items-center gap-1 py-1 px-2 ml-auto"
+              onClick={() => setIndPanelOpen(o => !o)}>
+              <Activity size={11} />
+              Studies
+              {activeSpecs.size > 0 && (
+                <span className="px-1 rounded text-[10px]"
+                  style={{ background: 'color-mix(in srgb, var(--color-accent) 20%, transparent)', color: 'var(--color-accent)' }}>
+                  {activeSpecs.size}
+                </span>
+              )}
+              {indPanelOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            </button>
           </div>
 
-          {/* Main content */}
-          <div className="flex-1 flex flex-col lg:flex-row gap-3 min-h-0" style={{ overflow: 'hidden', maxHeight: 'calc(100vh - 140px)' }}>
-            {/* LEFT: Charts — TOS-inspired layout */}
-            <div className="flex-1 flex flex-col min-w-0" style={{ minHeight: 0, gap: 0 }}>
-              {/* ── Chart header: symbol, OHLC, strategy logic ──────────── */}
-              <div className="px-3 py-1.5 flex items-center justify-between" style={{ backgroundColor: 'var(--color-bg-secondary)', borderBottom: '1px solid var(--color-border)' }}>
-                <div className="flex items-center gap-3 text-xs font-mono">
-                  <span className="font-bold text-sm" style={{ color: '#26a69a' }}>{primarySymbol}</span>
-                  {symbols.length > 1 && <span style={{ color: 'var(--color-text-tertiary)' }}>+{symbols.length - 1}</span>}
+          {/* Indicator panel — only shows indicators present in the simulation data */}
+          {indPanelOpen && (
+            <div className="flex-shrink-0 px-3 py-2"
+              style={{ borderBottom: '1px solid var(--color-border)', backgroundColor: 'var(--color-bg-card)' }}>
+              {availableDataKeys.size === 0 ? (
+                <p className="text-xs" style={{ color: 'var(--color-text-faint)' }}>
+                  No indicators in data yet — start the simulation to see available studies.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-4">
+                  {INDICATOR_GROUPS.map(group => {
+                    const availableItems = group.items.filter(ind =>
+                      (ind.produces ?? [ind.spec]).some(k => availableDataKeys.has(k))
+                    )
+                    if (!availableItems.length) return null
+                    return (
+                      <div key={group.group} className="min-w-[130px]">
+                        <div className="text-[10px] uppercase tracking-wide mb-1.5 font-semibold"
+                          style={{ color: 'var(--color-text-faint)' }}>
+                          {group.group}
+                        </div>
+                        <div className="space-y-0.5">
+                          {availableItems.map(ind => {
+                            const on = activeSpecs.has(ind.spec)
+                            return (
+                              <button key={ind.spec} type="button"
+                                onClick={() => setActiveSpecs(prev => {
+                                  const next = new Set(prev)
+                                  on ? next.delete(ind.spec) : next.add(ind.spec)
+                                  return next
+                                })}
+                                className="flex items-center gap-1.5 w-full text-left px-2 py-1 rounded text-xs transition-all"
+                                style={{
+                                  background: on ? `color-mix(in srgb, ${ind.color} 18%, transparent)` : 'transparent',
+                                  border: `1px solid ${on ? ind.color : 'var(--color-border)'}`,
+                                  color: on ? ind.color : 'var(--color-text-faint)',
+                                }}
+                              >
+                                <span className="w-2 h-2 rounded-full flex-shrink-0"
+                                  style={{ background: on ? ind.color : 'var(--color-border)' }} />
+                                {ind.label}
+                                <span className="ml-auto text-[9px] opacity-50">
+                                  {ind.pane === 'price' ? 'P' : 'O'}
+                                </span>
+                                {on && <X size={9} className="flex-shrink-0" style={{ color: ind.color }} />}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Feature plan (collapsible) */}
+          {simMeta?.feature_plan_preview && (
+            <div className="flex-shrink-0" style={{ borderBottom: '1px solid var(--color-border)' }}>
+              <button
+                className="w-full flex items-center justify-between px-3 py-1.5 text-xs"
+                style={{ backgroundColor: 'var(--color-bg-tertiary)', color: 'var(--color-text-secondary)' }}
+                onClick={() => setFeaturePlanOpen(o => !o)}
+              >
+                <span className="flex items-center gap-2">
+                  <span style={{ color: 'var(--color-accent)' }}>Feature Engine</span>
+                  <span>{simMeta.feature_plan_preview.features.length} features</span>
+                  <span className="opacity-50">·</span>
+                  <span>warmup: {Object.values(simMeta.feature_plan_preview.warmup_bars_by_timeframe).reduce((a: number, b: any) => a + b, 0)} bars</span>
+                </span>
+                {featurePlanOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              </button>
+              {featurePlanOpen && (
+                <div className="px-3 py-3 grid gap-3 xl:grid-cols-2"
+                  style={{ backgroundColor: 'var(--color-bg-secondary)' }}>
+                  <div className="rounded-lg border p-3 space-y-1.5" style={{ borderColor: 'var(--color-border)' }}>
+                    <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: 'var(--color-text-secondary)' }}>
+                      Planned Features
+                    </div>
+                    {simMeta.feature_plan_preview.features.map((f: any, i: number) => (
+                      <div key={i} className="flex items-center justify-between text-xs py-1 border-b last:border-0"
+                        style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-primary)' }}>
+                        <span>{f.kind}{Object.keys(f.params || {}).length > 0 ? ` (${Object.entries(f.params).map(([k, v]) => `${k}=${v}`).join(', ')})` : ''}</span>
+                        <span style={{ color: 'var(--color-text-faint)' }}>{f.timeframe}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rounded-lg border p-3 space-y-1.5" style={{ borderColor: 'var(--color-border)' }}>
+                    <div className="text-xs font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-secondary)' }}>
+                      Warm-Up by Frame
+                    </div>
+                    {Object.entries(simMeta.feature_plan_preview.warmup_bars_by_timeframe).map(([frame, bars]: [string, any]) => (
+                      <div key={frame} className="flex justify-between text-xs">
+                        <span style={{ color: 'var(--color-text-secondary)' }}>{frame}</span>
+                        <span className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>{bars} bars</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Main body — chart + sidebar */}
+          <div className="flex-1 flex min-h-0 overflow-hidden">
+
+            {/* LEFT: Charts ──────────────────────────────────────────────────── */}
+            <div className="flex-1 flex flex-col min-w-0 min-h-0" style={{ gap: 0 }}>
+
+              {/* Chart header: symbol · OHLC · indicators */}
+              <div className="flex items-center justify-between px-3 py-1 flex-shrink-0"
+                style={{ backgroundColor: 'var(--color-bg-secondary)', borderBottom: '1px solid var(--color-border)' }}>
+                <div className="flex items-center gap-2 text-xs font-mono">
+                  <span className="font-bold" style={{ color: 'var(--color-success)' }}>{primarySymbol}</span>
+                  {activeSymbols.length > 1 && (
+                    <span style={{ color: 'var(--color-text-tertiary)' }}>+{activeSymbols.length - 1}</span>
+                  )}
                   <span style={{ color: 'var(--color-text-tertiary)' }}>·</span>
                   <span style={{ color: 'var(--color-text-secondary)' }}>{timeframe}</span>
-                  {/* Active indicator pills — auto-detected from strategy */}
-                  {simMeta?.indicators && (() => {
-                    const allInds = simMeta.indicators as string[]
-                    const priceInds = allInds.filter(isPriceOverlay).slice(0, 8)
-                    return priceInds.map((ind, i) => (
-                      <span key={ind} className="px-1.5 py-0.5 rounded text-[10px]"
-                        style={{ backgroundColor: getIndColor(ind, i) + '22', color: getIndColor(ind, i) }}>
-                        {ind.replace(/_/g, ' ').toUpperCase()}
-                      </span>
-                    ))
-                  })()}
+                  {priceIndicators.map((ind, i) => (
+                    <span key={ind.spec} className="px-1.5 py-0.5 rounded text-[10px]"
+                      style={{ backgroundColor: ind.color + '22', color: ind.color }}>
+                      {ind.label}
+                    </span>
+                  ))}
                 </div>
-                {/* OHLC data box — TOS style */}
+
                 {latestBar?.symbols[primarySymbol] && (
-                  <div className="flex items-center gap-3 text-xs font-mono tabular-nums">
+                  <div className="flex items-center gap-2 text-xs font-mono tabular-nums">
                     <span style={{ color: 'var(--color-text-tertiary)' }}>O</span>
-                    <span style={{ color: 'var(--color-text-primary)' }}>{(latestBar.symbols[primarySymbol]?.open as number)?.toFixed(2)}</span>
+                    <span>{(latestBar.symbols[primarySymbol]?.open as number)?.toFixed(2)}</span>
                     <span style={{ color: 'var(--color-text-tertiary)' }}>H</span>
-                    <span style={{ color: '#26a69a' }}>{(latestBar.symbols[primarySymbol]?.high as number)?.toFixed(2)}</span>
+                    <span style={{ color: 'var(--color-success)' }}>{(latestBar.symbols[primarySymbol]?.high as number)?.toFixed(2)}</span>
                     <span style={{ color: 'var(--color-text-tertiary)' }}>L</span>
-                    <span style={{ color: '#ef5350' }}>{(latestBar.symbols[primarySymbol]?.low as number)?.toFixed(2)}</span>
+                    <span style={{ color: 'var(--color-danger)' }}>{(latestBar.symbols[primarySymbol]?.low as number)?.toFixed(2)}</span>
                     <span style={{ color: 'var(--color-text-tertiary)' }}>C</span>
-                    <span style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>{(latestBar.symbols[primarySymbol]?.close as number)?.toFixed(2)}</span>
+                    <span className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>
+                      {(latestBar.symbols[primarySymbol]?.close as number)?.toFixed(2)}
+                    </span>
                   </div>
                 )}
               </div>
 
-              {/* Strategy logic summary bar */}
+              {/* Strategy info bar — reads from simMeta, not hardcoded */}
               {simMeta && (
-                <div className="px-3 py-1 flex items-center gap-2 text-[10px] font-mono" style={{ backgroundColor: 'var(--color-bg-tertiary)', borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-tertiary)' }}>
-                  <span style={{ color: '#26a69a' }}>STRATEGY</span>
+                <div className="px-3 py-1 flex items-center gap-2 text-[10px] font-mono flex-shrink-0"
+                  style={{ backgroundColor: 'var(--color-bg-tertiary)', borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-tertiary)' }}>
+                  <span style={{ color: 'var(--color-accent)' }}>STRATEGY</span>
                   <span>{simMeta.strategy_name}</span>
-                  <span style={{ color: 'var(--color-text-tertiary)' }}>·</span>
-                  <span style={{ color: '#fbbf24' }}>ENTRY</span>
-                  <span>BB lower + RSI oversold</span>
-                  <span style={{ color: 'var(--color-text-tertiary)' }}>·</span>
-                  <span style={{ color: '#ef5350' }}>EXIT</span>
-                  <span>Target 2R / Stop BB-based</span>
-                  <span style={{ color: 'var(--color-text-tertiary)' }}>·</span>
-                  <span style={{ color: '#818cf8' }}>RISK</span>
-                  <span>1% per trade</span>
+                  {simMeta.timeframe && (
+                    <>
+                      <span className="opacity-40">·</span>
+                      <span style={{ color: 'var(--color-text-secondary)' }}>{simMeta.timeframe}</span>
+                    </>
+                  )}
+                  {simMeta.start_date && simMeta.end_date && (
+                    <>
+                      <span className="opacity-40">·</span>
+                      <span>{simMeta.start_date} → {simMeta.end_date}</span>
+                    </>
+                  )}
+                  {latestBar && (
+                    <>
+                      <span className="opacity-40">·</span>
+                      <span style={{ color: latestBar.total_return_pct >= 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                        {latestBar.total_return_pct >= 0 ? '+' : ''}{latestBar.total_return_pct.toFixed(2)}%
+                      </span>
+                    </>
+                  )}
                 </div>
               )}
 
-              {/* ── Price pane (55%) ─────────────────────────────────────── */}
-              <div style={{ flex: '0 0 55%', minHeight: 250, position: 'relative' }}
-                onWheel={(e) => {
-                  e.preventDefault()
-                  const total = priceData.length
-                  if (total === 0) return
-                  const lo = zoomStart ?? 0, hi = zoomEnd ?? total - 1
-                  const visible = hi - lo
-                  const factor = e.deltaY > 0 ? 1.15 : 0.87
-                  const newVis = Math.round(Math.min(Math.max(visible * factor, 10), total))
-                  const center = Math.round((lo + hi) / 2)
-                  const nLo = Math.max(0, center - Math.floor(newVis / 2))
-                  const nHi = Math.min(total - 1, nLo + newVis)
-                  if (nHi - nLo < 2) return
-                  setZoomStart(nLo); setZoomEnd(nHi)
-                }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={zoomedData} margin={{ top: 8, right: 60, bottom: 0, left: 0 }}
-                    onMouseDown={(e: any) => e?.activeLabel && setDragStart(e.activeLabel)}
-                    onMouseMove={(e: any) => isDragging && e?.activeLabel && setDragEnd(e.activeLabel)}
+              {/* ── Chart panes — flex-1 gives a concrete height for %-based flex-basis ── */}
+              <div className="flex-1 flex flex-col min-h-0 overflow-hidden" style={{ gap: 0 }}>
+
+              {/* ── Price pane (55%) ─────────────────────────────────────────── */}
+              <div style={{ flex: '0 0 55%', minHeight: 220, position: 'relative' }} onWheel={handleWheel}>
+                <div className="text-[10px] uppercase tracking-wide px-2 pt-1 flex items-center gap-2"
+                  style={{ color: 'var(--color-text-faint)' }}>
+                  <span>{primarySymbol} · Price</span>
+                  {isZoomed && (
+                    <span style={{ color: 'var(--color-accent)' }}>· {zoomBarCount} bars zoomed</span>
+                  )}
+                </div>
+                <ResponsiveContainer width="100%" height="calc(100% - 18px)">
+                  <ComposedChart data={visibleRows} margin={{ top: 4, right: 60, bottom: 0, left: 0 }}
+                    onMouseDown={(e: any) => typeof e?.activeTooltipIndex === 'number' && setDragStart(e.activeTooltipIndex)}
+                    onMouseMove={(e: any) => isDragging && typeof e?.activeTooltipIndex === 'number' && setDragEnd(e.activeTooltipIndex)}
                     onMouseUp={() => {
-                      if (dragStart && dragEnd) commitDragZoom(dragStart, dragEnd)
+                      if (dragStart !== null && dragEnd !== null) commitZoomIndices(dragStart, dragEnd)
                       setDragStart(null); setDragEnd(null)
                     }}>
                     <CartesianGrid stroke="var(--color-border)" strokeDasharray="1 4" opacity={0.2} />
-                    <XAxis dataKey="t" tick={{ fontSize: 9, fill: 'var(--color-text-tertiary)' }} tickLine={false} axisLine={{ stroke: 'var(--color-border)' }}
-                      interval={Math.max(0, Math.ceil(zoomedData.length / 12) - 1)} />
-                    <YAxis yAxisId="price" orientation="right" domain={['auto', 'auto']}
-                      tick={{ fontSize: 10, fill: 'var(--color-text-secondary)', fontFamily: 'monospace' }}
-                      tickLine={false} axisLine={{ stroke: 'var(--color-border)' }} width={55} />
-                    <Tooltip cursor={{ stroke: 'var(--color-text-tertiary)', strokeDasharray: '3 3' }}
-                      contentStyle={{ backgroundColor: 'rgba(15,23,42,0.95)', border: '1px solid #334155', fontSize: 11, fontFamily: 'monospace', borderRadius: 4 }}
-                      labelStyle={{ color: '#94a3b8', marginBottom: 4 }} />
-                    {/* Invisible line to anchor Y axis */}
-                    <Line yAxisId="price" type="monotone" dataKey="close" stroke="transparent" dot={false} activeDot={false} />
-                    {/* TOS-style candlesticks */}
+                    <XAxis dataKey="tms" type="number" domain={['dataMin', 'dataMax']}
+                      tick={{ fontSize: 9, fill: 'var(--color-text-tertiary)' }} tickLine={false}
+                      tickFormatter={(v: number) => fmtTs(v, timeframe)} />
+                    <YAxis yAxisId="price" orientation="right" domain={visiblePriceDomain}
+                      tick={{ fontSize: 9, fill: 'var(--color-text-secondary)', fontFamily: 'monospace' }}
+                      tickLine={false} width={58} tickFormatter={(v: number) => v.toFixed(2)} />
+                    <Tooltip content={<SimTooltip tf={timeframe} />}
+                      cursor={{ stroke: 'var(--color-text-faint)', strokeDasharray: '3 3', strokeWidth: 1 }} />
+
+                    {/* Invisible close line to anchor Y axis domain */}
+                    <Line yAxisId="price" type="monotone" dataKey="close" stroke="transparent"
+                      dot={false} isAnimationActive={false} legendType="none" />
+
+                    {/* TOS-style candlesticks — theme-aware colors */}
                     <Customized component={CandlestickLayer} />
-                    {/* Dynamic indicator overlays — auto-detected from data, not hardcoded */}
-                    {(() => {
-                      if (!zoomedData[0]) return null
-                      const first = zoomedData[0] as any
-                      const skip = new Set(['t','_rawTs','open','high','low','close','volume','_entry','_entryPrice','_exit','_exitPrice','_exitPnl'])
-                      // Find all price-overlay keys that have data
-                      const priceKeys = Object.keys(first).filter(k => !skip.has(k) && isPriceOverlay(k) && first[k] != null)
-                      return priceKeys.map((k, i) => (
+
+                    {/* Price-overlay indicators */}
+                    {priceIndicators.map(ind => {
+                      const keys = ind.produces ?? [ind.spec]
+                      return keys.map((k, ki) => (
                         <Line key={k} yAxisId="price" type="monotone" dataKey={k}
-                          stroke={getIndColor(k, i)} dot={false}
-                          strokeWidth={k.includes('mid') ? 0.6 : 1}
-                          strokeDasharray={getIndDash(k)}
-                          opacity={k.includes('mid') ? 0.5 : 0.8}
-                          isAnimationActive={false} />
+                          stroke={ind.color} strokeWidth={ki === 0 ? 1.5 : 1}
+                          strokeDasharray={ind.dash ?? (k.includes('upper') || k.includes('lower') ? '3 3' : undefined)}
+                          strokeOpacity={ki === 0 ? 1 : 0.7}
+                          dot={false} isAnimationActive={false} connectNulls />
                       ))
-                    })()}
-                    {/* Stop price lines */}
+                    })}
+
+                    {/* Open position reference lines */}
                     {latestBar?.open_positions?.filter(p => p.symbol === primarySymbol && p.stop_price).map((p, i) => (
                       <ReferenceLine key={`stop-${i}`} yAxisId="price" y={p.stop_price!}
-                        stroke="#ef5350" strokeDasharray="6 3" strokeWidth={1.5}
-                        label={{ value: `STOP ${p.stop_price?.toFixed(2)}`, position: 'right', fontSize: 9, fill: '#ef5350', fontFamily: 'monospace' }} />
+                        stroke="var(--color-danger)" strokeDasharray="6 3" strokeWidth={1.5}
+                        label={{ value: `SL ${p.stop_price?.toFixed(2)}`, position: 'right', fontSize: 9, fill: 'var(--color-danger)', fontFamily: 'monospace' }} />
                     ))}
-                    {/* Target price lines */}
                     {latestBar?.open_positions?.filter(p => p.symbol === primarySymbol).flatMap(p =>
-                      (p.target_prices || []).map((tp, i) => (
+                      (p.target_prices || []).map((tp: number, i: number) => (
                         <ReferenceLine key={`tgt-${p.trade_id}-${i}`} yAxisId="price" y={tp}
-                          stroke="#26a69a" strokeDasharray="4 4" strokeWidth={1}
-                          label={{ value: `T${i + 1} ${tp.toFixed(2)}`, position: 'right', fontSize: 9, fill: '#26a69a', fontFamily: 'monospace' }} />
+                          stroke="var(--color-success)" strokeDasharray="4 4" strokeWidth={1}
+                          label={{ value: `T${i + 1} ${tp.toFixed(2)}`, position: 'right', fontSize: 9, fill: 'var(--color-success)', fontFamily: 'monospace' }} />
                       ))
                     )}
-                    {/* Entry price line for open position */}
                     {latestBar?.open_positions?.filter(p => p.symbol === primarySymbol).map((p, i) => (
                       <ReferenceLine key={`entry-${i}`} yAxisId="price" y={p.avg_entry}
-                        stroke="#fbbf24" strokeDasharray="2 4" strokeWidth={1} opacity={0.6}
-                        label={{ value: `Entry ${p.avg_entry.toFixed(2)}`, position: 'right', fontSize: 8, fill: '#fbbf24', fontFamily: 'monospace' }} />
+                        stroke="#fbbf24" strokeDasharray="2 4" strokeWidth={1} opacity={0.7}
+                        label={{ value: `Avg ${p.avg_entry.toFixed(2)}`, position: 'right', fontSize: 8, fill: '#fbbf24', fontFamily: 'monospace' }} />
                     ))}
-                    {/* Drag-to-zoom selection highlight */}
-                    {isDragging && dragStart && dragEnd && (
-                      <ReferenceArea x1={dragStart} x2={dragEnd}
-                        strokeOpacity={0.3} fill="#38bdf8" fillOpacity={0.12} />
-                    )}
+
+                    {/* Drag-to-zoom highlight */}
+                    {isDragging && dragStart !== null && dragEnd !== null &&
+                      visibleRows[dragStart] && visibleRows[dragEnd] && (
+                        <ReferenceArea
+                          x1={(visibleRows[dragStart] as any).tms}
+                          x2={(visibleRows[dragEnd] as any).tms}
+                          strokeOpacity={0.3} fill="var(--color-accent)" fillOpacity={0.12} />
+                      )}
                   </ComposedChart>
                 </ResponsiveContainer>
-                {/* Zoom range indicator overlay */}
-                {isZoomed && (
-                  <div className="absolute top-2 right-16 text-[10px] font-mono px-2 py-0.5 rounded"
-                    style={{ backgroundColor: 'rgba(56,189,248,0.15)', color: '#38bdf8' }}>
-                    {zoomBarCount} bars · drag to select · scroll to zoom · <button onClick={handleZoomReset} className="underline">reset</button>
+              </div>
+
+              {/* ── Volume pane (10%) ─────────────────────────────────────────── */}
+              <div style={{ flex: '0 0 10%', minHeight: 36 }}>
+                <div className="text-[10px] px-2 pt-0.5 uppercase tracking-wide"
+                  style={{ color: 'var(--color-text-faint)' }}>Volume</div>
+                <ResponsiveContainer width="100%" height="calc(100% - 16px)">
+                  <BarChart data={visibleRows} margin={{ top: 0, right: 60, bottom: 0, left: 0 }}>
+                    <XAxis dataKey="tms" type="number" domain={['dataMin', 'dataMax']} hide />
+                    <YAxis orientation="right" tick={{ fontSize: 8, fill: 'var(--color-text-faint)' }}
+                      tickLine={false} width={58}
+                      tickFormatter={(v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1000 ? `${(v / 1000).toFixed(0)}K` : String(v)} />
+                    <Bar dataKey="volume" isAnimationActive={false}>
+                      {visibleRows.map((r: any, i: number) => (
+                        <Cell key={i}
+                          fill={r.close >= r.open ? 'var(--color-success)' : 'var(--color-danger)'}
+                          fillOpacity={0.45} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* ── Oscillator pane (25%) — only when oscillator indicators active ── */}
+              {oscIndicators.length > 0 && (
+                <div style={{ flex: '0 0 25%', minHeight: 80 }}>
+                  <div className="text-[10px] px-2 pt-0.5 uppercase tracking-wide"
+                    style={{ color: 'var(--color-text-faint)' }}>
+                    {oscIndicators.map(i => i.label).join(' · ')}
                   </div>
-                )}
-              </div>
+                  <ResponsiveContainer width="100%" height="calc(100% - 16px)">
+                    <ComposedChart data={visibleRows} margin={{ top: 4, right: 60, bottom: 0, left: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.3} />
+                      <XAxis dataKey="tms" type="number" domain={['dataMin', 'dataMax']}
+                        tick={{ fontSize: 9, fill: 'var(--color-text-faint)' }} tickLine={false}
+                        tickFormatter={(v: number) => fmtTs(v, timeframe)} />
+                      <YAxis orientation="right" tick={{ fontSize: 9, fill: 'var(--color-text-faint)' }}
+                        tickLine={false} width={58} />
+                      <Tooltip content={<SimTooltip tf={timeframe} />}
+                        cursor={{ stroke: 'var(--color-text-faint)', strokeDasharray: '3 3', strokeWidth: 1 }} />
 
-              {/* ── Volume pane (10%) ────────────────────────────────────── */}
-              <div style={{ flex: '0 0 10%', minHeight: 40 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={zoomedData} margin={{ top: 0, right: 60, bottom: 0, left: 0 }}>
-                    <XAxis dataKey="t" tick={false} axisLine={false} hide />
-                    <YAxis orientation="right" tick={{ fontSize: 8, fill: 'var(--color-text-tertiary)', fontFamily: 'monospace' }} tickLine={false} width={55} />
-                    <Bar dataKey="volume" fill="#334155" opacity={0.6} radius={[1, 1, 0, 0]} isAnimationActive={false} />
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
+                      {/* Reference levels */}
+                      {oscIndicators.some(i => i.spec.startsWith('rsi')) && (
+                        <>
+                          <ReferenceLine y={70} stroke="var(--color-danger)"   strokeDasharray="4 2" strokeOpacity={0.5} />
+                          <ReferenceLine y={50} stroke="var(--color-border)"   strokeDasharray="2 2" strokeOpacity={0.4} />
+                          <ReferenceLine y={30} stroke="var(--color-success)"  strokeDasharray="4 2" strokeOpacity={0.5} />
+                        </>
+                      )}
+                      {oscIndicators.some(i => i.spec === 'stoch_k') && (
+                        <>
+                          <ReferenceLine y={80} stroke="var(--color-danger)"  strokeDasharray="4 2" strokeOpacity={0.5} />
+                          <ReferenceLine y={20} stroke="var(--color-success)" strokeDasharray="4 2" strokeOpacity={0.5} />
+                        </>
+                      )}
+                      {oscIndicators.some(i => ['zscore', 'bt_snipe'].includes(i.spec)) && (
+                        <>
+                          <ReferenceLine y={2}  stroke="var(--color-danger)"  strokeDasharray="4 2" strokeOpacity={0.5} />
+                          <ReferenceLine y={-2} stroke="var(--color-success)" strokeDasharray="4 2" strokeOpacity={0.5} />
+                          <ReferenceLine y={0}  stroke="var(--color-border)"  strokeDasharray="2 2" strokeOpacity={0.4} />
+                        </>
+                      )}
+                      {oscIndicators.some(i => i.spec === 'macd') && (
+                        <ReferenceLine y={0} stroke="var(--color-border)" strokeDasharray="2 2" strokeOpacity={0.5} />
+                      )}
+                      {oscIndicators.some(i => i.spec === 'ibs') && (
+                        <>
+                          <ReferenceLine y={0.8} stroke="var(--color-danger)"  strokeDasharray="4 2" strokeOpacity={0.5} />
+                          <ReferenceLine y={0.5} stroke="var(--color-border)"  strokeDasharray="2 2" strokeOpacity={0.4} />
+                          <ReferenceLine y={0.2} stroke="var(--color-success)" strokeDasharray="4 2" strokeOpacity={0.5} />
+                        </>
+                      )}
 
-              {/* ── Equity pane (30%) ────────────────────────────────────── */}
-              <div style={{ flex: '0 0 30%', minHeight: 80, borderTop: '1px solid var(--color-border)' }}>
-                <div className="px-3 py-1 text-[10px] font-mono" style={{ color: 'var(--color-text-tertiary)' }}>
-                  EQUITY · ${latestBar?.equity?.toLocaleString() || '—'}
-                  {latestBar && <span style={{ color: latestBar.total_return_pct >= 0 ? '#26a69a' : '#ef5350', marginLeft: 8 }}>
-                    {latestBar.total_return_pct >= 0 ? '+' : ''}{latestBar.total_return_pct.toFixed(2)}%
-                  </span>}
-                  <span style={{ marginLeft: 8 }}>DD {latestBar ? (latestBar.drawdown * 100).toFixed(2) + '%' : '—'}</span>
+                      {/* MACD histogram */}
+                      {activeSpecs.has('macd') && (
+                        <Bar dataKey="macd_hist" isAnimationActive={false} opacity={0.6}>
+                          {visibleRows.map((r: any, i: number) => (
+                            <Cell key={i} fill={(r.macd_hist ?? 0) >= 0 ? 'var(--color-success)' : 'var(--color-danger)'} />
+                          ))}
+                        </Bar>
+                      )}
+
+                      {/* Oscillator lines */}
+                      {oscIndicators.map(ind => {
+                        const keys = (ind.produces ?? [ind.spec]).filter(k => k !== 'macd_hist')
+                        const colorOverrides: Record<string, string> = {
+                          macd_signal: '#f472b6',
+                          plus_di: 'var(--color-success)',
+                          minus_di: 'var(--color-danger)',
+                          stoch_d: '#fb923c',
+                        }
+                        return keys.map((k, ki) => (
+                          <Line key={k} type="monotone" dataKey={k}
+                            stroke={colorOverrides[k] ?? ind.color}
+                            strokeWidth={ki === 0 ? 1.5 : 1}
+                            dot={false} isAnimationActive={false} connectNulls
+                            strokeOpacity={ki === 0 ? 1 : 0.75}
+                            strokeDasharray={ki > 0 ? '4 2' : undefined} />
+                        ))
+                      })}
+                    </ComposedChart>
+                  </ResponsiveContainer>
                 </div>
-                <ResponsiveContainer width="100%" height="85%">
+              )}
+
+              {/* ── Equity strip (remaining space, min 10%) ──────────────────── */}
+              <div style={{ flex: '1 0 10%', minHeight: 60, borderTop: '1px solid var(--color-border)' }}>
+                <div className="px-2 py-0.5 text-[10px] font-mono flex items-center gap-3"
+                  style={{ color: 'var(--color-text-tertiary)' }}>
+                  <span>EQUITY</span>
+                  {latestBar && (
+                    <>
+                      <span className="font-semibold" style={{ color: 'var(--color-text-primary)' }}>
+                        ${latestBar.equity.toLocaleString()}
+                      </span>
+                      <span style={{ color: pxColor(latestBar.total_return_pct) }}>
+                        {latestBar.total_return_pct >= 0 ? '+' : ''}{latestBar.total_return_pct.toFixed(2)}%
+                      </span>
+                      <span>DD {(latestBar.drawdown * 100).toFixed(2)}%</span>
+                    </>
+                  )}
+                </div>
+                <ResponsiveContainer width="100%" height="calc(100% - 20px)">
                   <AreaChart data={thinEquity} margin={{ top: 0, right: 60, bottom: 0, left: 0 }}>
                     <defs>
                       <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#26a69a" stopOpacity={0.3} />
-                        <stop offset="100%" stopColor="#26a69a" stopOpacity={0.02} />
+                        <stop offset="0%" stopColor="var(--color-success)" stopOpacity={0.3} />
+                        <stop offset="100%" stopColor="var(--color-success)" stopOpacity={0.02} />
                       </linearGradient>
                     </defs>
-                    <XAxis dataKey="date" tick={false} axisLine={false} hide />
+                    <XAxis dataKey="tms" type="number" domain={['dataMin', 'dataMax']} hide />
                     <YAxis orientation="right" domain={['auto', 'auto']}
-                      tick={{ fontSize: 9, fill: 'var(--color-text-tertiary)', fontFamily: 'monospace' }} tickLine={false} width={55} />
-                    <Tooltip cursor={{ stroke: '#475569', strokeDasharray: '3 3' }}
-                      contentStyle={{ backgroundColor: 'rgba(15,23,42,0.95)', border: '1px solid #334155', fontSize: 10, fontFamily: 'monospace', borderRadius: 4 }}
-                      formatter={(v: number) => ['$' + v.toLocaleString(), 'Equity']} />
-                    <Area type="monotone" dataKey="equity" stroke="#26a69a" fill="url(#eqGrad)" strokeWidth={1.5} dot={false} isAnimationActive={false} />
-                    <ReferenceLine y={simMeta?.initial_capital || 100000} stroke="#475569" strokeDasharray="4 4" strokeWidth={0.5} />
+                      tick={{ fontSize: 8, fill: 'var(--color-text-faint)', fontFamily: 'monospace' }}
+                      tickLine={false} width={58} tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: 'var(--color-bg-card)', border: '1px solid var(--color-border)', fontSize: 10, borderRadius: 4 }}
+                      formatter={(v: any) => [`$${Number(v).toLocaleString()}`, 'Equity']} />
+                    <Area type="monotone" dataKey="equity" stroke="var(--color-success)"
+                      fill="url(#eqGrad)" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                    <ReferenceLine y={simMeta?.initial_capital || 100000}
+                      stroke="var(--color-border)" strokeDasharray="4 4" strokeWidth={0.75} />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
+
+              </div>{/* end chart panes wrapper */}
             </div>
 
-            {/* RIGHT: Metrics + Trade Log */}
-            <div className="w-full lg:w-96 flex-shrink-0 flex flex-col gap-2 overflow-y-auto">
-              {/* Live metrics */}
-              <div className="card p-3 space-y-2">
-                <h3 className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Live Metrics</h3>
-                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-                  <MR label="Equity" value={latestBar ? `$${latestBar.equity.toLocaleString()}` : '—'} />
-                  <MR label="Return" value={latestBar ? `${latestBar.total_return_pct.toFixed(2)}%` : '—'}
-                    c={latestBar && latestBar.total_return_pct >= 0 ? '#26a69a' : '#ef5350'} />
-                  <MR label="Drawdown" value={latestBar ? `${(latestBar.drawdown * 100).toFixed(2)}%` : '—'} c="#ef5350" />
-                  <MR label="Daily P&L" value={latestBar ? `$${latestBar.daily_pnl.toFixed(0)}` : '—'}
-                    c={latestBar && latestBar.daily_pnl >= 0 ? '#26a69a' : '#ef5350'} />
-                  <MR label="Trades" value={latestBar?.total_trades?.toString() || '0'} />
-                  <MR label="Win Rate" value={latestBar ? `${latestBar.win_rate.toFixed(1)}%` : '—'} />
-                  <MR label="Net P&L" value={latestBar ? `$${latestBar.total_net_pnl.toFixed(0)}` : '—'}
-                    c={latestBar && latestBar.total_net_pnl >= 0 ? '#26a69a' : '#ef5350'} />
-                  <MR label="Heat" value={latestBar ? `${(latestBar.portfolio_heat * 100).toFixed(1)}%` : '—'} />
-                  <MR label="Positions" value={latestBar?.open_positions?.length?.toString() || '0'} />
-                  <MR label="Regime" value={latestBar?.regime || '—'} />
-                </div>
+            {/* RIGHT: Tabbed sidebar ──────────────────────────────────────────── */}
+            <div className="w-72 xl:w-80 flex-shrink-0 flex flex-col border-l min-h-0"
+              style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-bg-secondary)' }}>
+
+              {/* Tab bar */}
+              <div className="flex flex-shrink-0" style={{ borderBottom: '1px solid var(--color-border)' }}>
+                {(['metrics', 'positions', 'trades'] as SidebarTab[]).map((tab) => {
+                  const labels: Record<SidebarTab, string> = {
+                    metrics: 'Metrics',
+                    positions: `Positions${latestBar?.open_positions?.length ? ` (${latestBar.open_positions.length})` : ''}`,
+                    trades: `Trades${allExits.length ? ` (${allExits.length})` : ''}`,
+                  }
+                  return (
+                    <button key={tab} onClick={() => setSidebarTab(tab)}
+                      className="flex-1 py-1.5 text-xs font-medium transition-colors"
+                      style={{
+                        color: sidebarTab === tab ? 'var(--color-accent)' : 'var(--color-text-faint)',
+                        borderBottom: sidebarTab === tab ? '2px solid var(--color-accent)' : '2px solid transparent',
+                        backgroundColor: 'transparent',
+                      }}>
+                      {labels[tab]}
+                    </button>
+                  )
+                })}
               </div>
 
-              {/* Open positions */}
-              <div className="card p-3 flex-1 overflow-auto min-h-[80px]">
-                <h3 className="text-xs font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
-                  Open Positions ({latestBar?.open_positions?.length || 0})
-                </h3>
-                {(latestBar?.open_positions || []).map((pos, i) => (
-                  <div key={i} className="text-xs py-1 border-b flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
-                    <div>
-                      <span className="font-medium">{pos.symbol}</span>
-                      <span className={clsx('ml-1', pos.direction === 'long' ? 'text-green-400' : 'text-red-400')}>
-                        {pos.direction.toUpperCase()}
-                      </span>
-                      <span className="ml-1 opacity-60">x{pos.quantity.toFixed(0)}</span>
-                    </div>
-                    <div className="text-right">
-                      <span className={pos.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
-                        ${pos.unrealized_pnl.toFixed(0)} ({pos.unrealized_pnl_pct.toFixed(1)}%)
-                      </span>
-                      {pos.stop_price && <span className="block opacity-50">stop: ${pos.stop_price.toFixed(2)}</span>}
-                    </div>
-                  </div>
-                ))}
-                {!latestBar?.open_positions?.length && <p className="text-xs opacity-50 italic">No open positions</p>}
-              </div>
+              {/* Tab content */}
+              <div className="flex-1 overflow-y-auto min-h-0 p-3">
 
-              {/* Trade log */}
-              <div className="card p-3 flex-1 overflow-auto min-h-[80px]">
-                <h3 className="text-xs font-medium mb-2" style={{ color: 'var(--color-text-secondary)' }}>
-                  Trade Log ({allEntries.length + allExits.length})
-                </h3>
-                <div className="space-y-1 max-h-48 overflow-auto">
-                  {tradeLog.map((t, i) => (
-                    <div key={i} className="text-xs flex items-center justify-between py-0.5">
-                      <div>
-                        <span className={t._type === 'exit' ? 'text-red-400' : 'text-green-400'}>
-                          {t._type === 'exit' ? 'EXIT' : 'ENTRY'}
-                        </span>{' '}
-                        <span className="font-medium">{t.symbol}</span>{' '}
-                        <span className="opacity-50">{t._type === 'exit' ? t.exit_reason : t.direction}</span>
+                {/* ── Metrics tab ── */}
+                {sidebarTab === 'metrics' && (
+                  <div className="space-y-3">
+                    {/* Live stats */}
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                      <MR label="Equity" value={latestBar ? `$${latestBar.equity.toLocaleString()}` : '—'} />
+                      <MR label="Return" value={latestBar ? `${latestBar.total_return_pct.toFixed(2)}%` : '—'}
+                        color={latestBar ? pxColor(latestBar.total_return_pct) : undefined} />
+                      <MR label="Net P&amp;L" value={latestBar ? `$${latestBar.total_net_pnl.toFixed(0)}` : '—'}
+                        color={latestBar ? pxColor(latestBar.total_net_pnl) : undefined} />
+                      <MR label="Drawdown" value={latestBar ? `${(latestBar.drawdown * 100).toFixed(2)}%` : '—'}
+                        color="var(--color-danger)" />
+                      <MR label="Win Rate" value={latestBar ? `${latestBar.win_rate.toFixed(1)}%` : '—'} />
+                      <MR label="Trades" value={latestBar?.total_trades?.toString() || '0'} />
+                      <MR label="Daily P&amp;L" value={latestBar ? `$${latestBar.daily_pnl.toFixed(0)}` : '—'}
+                        color={latestBar ? pxColor(latestBar.daily_pnl) : undefined} />
+                      <MR label="Heat" value={latestBar ? `${(latestBar.portfolio_heat * 100).toFixed(1)}%` : '—'} />
+                      <MR label="Positions" value={latestBar?.open_positions?.length?.toString() || '0'} />
+                      <MR label="Regime" value={latestBar?.regime || '—'} />
+                    </div>
+
+                    {/* Final results when complete */}
+                    {status === 'completed' && finalMetrics?.metrics && (
+                      <div className="rounded-lg border border-green-800/50 p-3 space-y-2">
+                        <div className="text-xs font-semibold" style={{ color: 'var(--color-success)' }}>
+                          Simulation Complete
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                          <MR label="Total Return" value={`${(finalMetrics.metrics.total_return_pct ?? 0).toFixed(2)}%`} />
+                          <MR label="Sharpe" value={(finalMetrics.metrics.sharpe_ratio ?? 0).toFixed(2)} />
+                          <MR label="Max DD" value={`${(finalMetrics.metrics.max_drawdown_pct ?? 0).toFixed(2)}%`} />
+                          <MR label="Win Rate" value={`${(finalMetrics.metrics.win_rate_pct ?? 0).toFixed(1)}%`} />
+                          <MR label="Prof. Factor" value={(finalMetrics.metrics.profit_factor ?? 0).toFixed(2)} />
+                          <MR label="SQN" value={(finalMetrics.metrics.sqn ?? 0).toFixed(2)} />
+                          <MR label="Avg R" value={(finalMetrics.metrics.avg_r_multiple ?? 0).toFixed(2)} />
+                          <MR label="Total Trades" value={`${finalMetrics.total_trades ?? 0}`} />
+                        </div>
                       </div>
-                      {t._type === 'exit' ? (
-                        <span className={(t.net_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}>
-                          ${(t.net_pnl ?? 0).toFixed(0)}
-                          {t.r_multiple != null && <span className="opacity-60 ml-1">({t.r_multiple.toFixed(1)}R)</span>}
-                        </span>
-                      ) : (
-                        <span className="opacity-60">@{t.entry_price.toFixed(2)} x{t.quantity.toFixed(0)}</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
+                    )}
 
-              {/* Risk rejections */}
-              {latestBar?.rejections && latestBar.rejections.length > 0 && (
-                <div className="card p-3">
-                  <h3 className="text-xs font-medium mb-1 text-amber-400">Risk Rejections</h3>
-                  {latestBar.rejections.map((r, i) => (
-                    <div key={i} className="text-xs py-0.5 opacity-75">
-                      <span className="font-medium">{r.symbol}</span> --- {r.reason}
-                    </div>
-                  ))}
-                </div>
-              )}
+                    {/* Risk rejections */}
+                    {latestBar?.rejections && latestBar.rejections.length > 0 && (
+                      <div className="space-y-1">
+                        <div className="text-xs font-medium" style={{ color: '#fbbf24' }}>Risk Rejections</div>
+                        {latestBar.rejections.map((r: any, i: number) => (
+                          <div key={i} className="text-xs py-0.5 opacity-75">
+                            <span className="font-medium">{r.symbol}</span>
+                            <span className="opacity-60"> — {r.reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
-              {/* Cooldowns */}
-              {latestBar && Object.keys(latestBar.cooldowns).length > 0 && (
-                <div className="card p-3">
-                  <h3 className="text-xs font-medium mb-1 text-yellow-400">Active Cooldowns</h3>
-                  {Object.entries(latestBar.cooldowns).map(([sym, cd]) => (
-                    <div key={sym} className="text-xs py-0.5 opacity-75">
-                      <span className="font-medium">{sym}</span> --- {cd.trigger}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-                              {/* Final metrics */}
-              {status === 'completed' && finalMetrics?.metrics && (
-                <div className="card p-3 border-green-800/50">
-                  <h3 className="text-xs font-semibold text-green-400 mb-2">Simulation Complete</h3>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                    <MR label="Total Return" value={`${(finalMetrics.metrics.total_return_pct ?? 0).toFixed(2)}%`} />
-                    <MR label="Sharpe" value={`${(finalMetrics.metrics.sharpe_ratio ?? 0).toFixed(2)}`} />
-                    <MR label="Max DD" value={`${(finalMetrics.metrics.max_drawdown_pct ?? 0).toFixed(2)}%`} />
-                    <MR label="Win Rate" value={`${(finalMetrics.metrics.win_rate_pct ?? 0).toFixed(1)}%`} />
-                    <MR label="Profit Factor" value={`${(finalMetrics.metrics.profit_factor ?? 0).toFixed(2)}`} />
-                    <MR label="Total Trades" value={`${finalMetrics.total_trades ?? 0}`} />
+                    {/* Active cooldowns */}
+                    {latestBar && Object.keys(latestBar.cooldowns).length > 0 && (
+                      <div className="space-y-1">
+                        <div className="text-xs font-medium" style={{ color: '#fbbf24' }}>Cooldowns</div>
+                        {Object.entries(latestBar.cooldowns).map(([sym, cd]: [string, any]) => (
+                          <div key={sym} className="text-xs py-0.5 opacity-75">
+                            <span className="font-medium">{sym}</span>
+                            <span className="opacity-60"> — {cd.trigger}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                </div>
-              )}
+                )}
+
+                {/* ── Positions tab ── */}
+                {sidebarTab === 'positions' && (
+                  <div className="space-y-2">
+                    {(latestBar?.open_positions || []).length === 0 && (
+                      <p className="text-xs italic" style={{ color: 'var(--color-text-faint)' }}>No open positions</p>
+                    )}
+                    {(latestBar?.open_positions || []).map((pos: any, i: number) => (
+                      <div key={i} className="rounded-lg p-2.5 space-y-1.5"
+                        style={{ border: '1px solid var(--color-border)', backgroundColor: 'var(--color-bg-card)' }}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="font-semibold text-xs">{pos.symbol}</span>
+                            <span className={clsx('text-[10px] px-1.5 py-0.5 rounded font-medium',
+                              pos.direction === 'long' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400')}>
+                              {pos.direction.toUpperCase()}
+                            </span>
+                          </div>
+                          <span className="text-xs tabular-nums font-medium"
+                            style={{ color: pxColor(pos.unrealized_pnl) }}>
+                            ${pos.unrealized_pnl.toFixed(0)}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-3 text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                          <span>Qty</span><span className="tabular-nums">{pos.quantity.toFixed(1)}</span>
+                          <span>Entry</span><span className="tabular-nums">${pos.avg_entry.toFixed(2)}</span>
+                          {pos.stop_price && (
+                            <><span>Stop</span><span className="tabular-nums text-red-400">${pos.stop_price.toFixed(2)}</span></>
+                          )}
+                          <span>Return</span>
+                          <span className="tabular-nums" style={{ color: pxColor(pos.unrealized_pnl_pct) }}>
+                            {pos.unrealized_pnl_pct.toFixed(2)}%
+                          </span>
+                        </div>
+                        {(pos.target_prices || []).length > 0 && (
+                          <div className="flex items-center gap-1 flex-wrap">
+                            {(pos.target_prices as number[]).map((tp: number, ti: number) => (
+                              <span key={ti} className="text-[10px] px-1.5 py-0.5 rounded"
+                                style={{ backgroundColor: 'rgba(34,197,94,0.12)', color: 'var(--color-success)' }}>
+                                T{ti + 1} {tp.toFixed(2)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* ── Trades tab ── */}
+                {sidebarTab === 'trades' && (
+                  <div className="space-y-0.5">
+                    {tradeLog.length === 0 && (
+                      <p className="text-xs italic" style={{ color: 'var(--color-text-faint)' }}>No trades yet</p>
+                    )}
+                    {tradeLog.map((t, i) => (
+                      <div key={i} className="flex items-center justify-between py-1 text-xs border-b"
+                        style={{ borderColor: 'var(--color-border)' }}>
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className={clsx('font-medium text-[10px] px-1 py-0.5 rounded',
+                              t._type === 'exit' ? 'bg-red-900/30 text-red-400' : 'bg-green-900/30 text-green-400')}>
+                              {t._type === 'exit' ? 'EXIT' : 'ENTRY'}
+                            </span>
+                            <span className="font-medium">{t.symbol}</span>
+                            <span className="opacity-50 text-[10px]">
+                              {t._type === 'exit' ? t.exit_reason : t.direction}
+                            </span>
+                          </div>
+                          <div className="opacity-40 text-[10px] font-mono">
+                            {t._type === 'exit'
+                              ? (t.exit_time || '').slice(0, 16).replace('T', ' ')
+                              : (t.entry_time || '').slice(0, 16).replace('T', ' ')}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          {t._type === 'exit' ? (
+                            <>
+                              <span className="font-medium tabular-nums" style={{ color: pxColor(t.net_pnl ?? 0) }}>
+                                ${(t.net_pnl ?? 0).toFixed(0)}
+                              </span>
+                              {t.r_multiple != null && (
+                                <div className="text-[10px] opacity-50 tabular-nums">{t.r_multiple.toFixed(2)}R</div>
+                              )}
+                            </>
+                          ) : (
+                            <span className="opacity-60 tabular-nums">
+                              @{t.entry_price.toFixed(2)} ×{t.quantity.toFixed(0)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </>
+        </div>
+      )}
+
+      {/* Empty state when no simulation has been started */}
+      {isSetupMode && !setupOpen && (
+        <div className="flex-1 flex flex-col items-center justify-center gap-3"
+          style={{ color: 'var(--color-text-faint)' }}>
+          <Activity size={32} />
+          <p className="text-sm">Configure and initialize a simulation to begin.</p>
+          <button className="btn-primary px-4 py-2 text-sm flex items-center gap-2"
+            onClick={() => setSetupOpen(true)}>
+            <Settings size={14} /> Open Setup
+          </button>
+        </div>
       )}
     </div>
-  )
-}
-
-function MR({ label, value, c }: { label: string; value: string; c?: string }) {
-  return (
-    <>
-      <span style={{ color: 'var(--color-text-tertiary)' }}>{label}</span>
-      <span className="text-right font-medium tabular-nums truncate" style={{ color: c || 'var(--color-text-primary)' }}>{value}</span>
-    </>
   )
 }
 

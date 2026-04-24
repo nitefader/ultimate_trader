@@ -222,3 +222,31 @@ async def test_run_param_optimization_no_data_returns_error():
 
     assert result["evaluated"] == 0
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_run_param_optimization_uses_recommended_provider_for_auto():
+    df = _make_ohlcv_df(200)
+    captured: list[str] = []
+
+    def _fake_fetch_market_data(**kwargs):
+        captured.append(kwargs["provider"])
+        return df
+
+    with patch("app.services.market_data_service.fetch_market_data", side_effect=_fake_fetch_market_data):
+        result = await run_param_optimization(
+            strategy_config=_minimal_strategy(),
+            run_config={
+                **_minimal_run_config(),
+                "timeframe": "5m",
+                "data_provider": "auto",
+                "alpaca_api_key": "key",
+                "alpaca_secret_key": "secret",
+            },
+            param_grid={"stop_loss.multiplier": [1.5]},
+            objective_metric="sharpe_ratio",
+            max_combinations=5,
+        )
+
+    assert result["evaluated"] == 1
+    assert captured == ["alpaca"]

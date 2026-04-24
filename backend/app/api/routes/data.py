@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
+from app.features.source_contracts import resolve_requested_provider
 from app.services.market_data_service import (
     cache_path_for,
     fetch_market_data,
@@ -96,6 +97,7 @@ async def get_bars_with_indicators(
     )
 
     symbol = symbol.upper()
+    actual_provider = provider
     cache_file = _cache_file_for(symbol, timeframe, provider)
     if not cache_file.exists():
         # Fall back to any provider that has this symbol/timeframe cached
@@ -105,6 +107,7 @@ async def get_bars_with_indicators(
             alt = _cache_file_for(symbol, timeframe, fallback)
             if alt.exists():
                 cache_file = alt
+                actual_provider = fallback
                 break
         else:
             raise HTTPException(
@@ -243,7 +246,7 @@ async def get_bars_with_indicators(
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "provider": provider,
+            "provider": actual_provider,
             "bars": bars,
             "series": computed,
         }
@@ -359,21 +362,32 @@ async def fetch_data(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
     start = body.get("start", "2020-01-01")
     end = body.get("end", "2024-01-01")
     force = body.get("force", False) or body.get("force_download", False)
-    provider = body.get("provider", "yfinance")
+    provider = body.get("provider", "auto")
 
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol required")
 
     # Smart date clamping — same limits as backtest and simulation
-    from app.services.data_limits import clamp_date_range, select_provider, check_bar_count
+    from app.services.data_limits import clamp_date_range, check_bar_count
+    from app.services.backtest_service import recommend_data_provider
     effective_start, effective_end, was_clamped = clamp_date_range(start, end, timeframe, mode="download")
     has_alpaca = bool(body.get("api_key") and body.get("secret_key"))
-    if provider == "auto":
-        provider = select_provider(timeframe, "auto", has_alpaca)
+    provider_decision = recommend_data_provider(
+        timeframe=timeframe,
+        start_date=effective_start,
+        end_date=effective_end,
+        symbol_count=1,
+        has_alpaca_credentials=has_alpaca,
+    )
+    selected_provider = resolve_requested_provider(
+        requested_provider=provider_decision["provider"] if provider == "auto" else provider,
+        runtime_mode="simulation",
+        alpaca_credentials_configured=has_alpaca,
+    )
 
     try:
-        api_key = body.get("api_key", "") if provider == "alpaca" else ""
-        secret_key = body.get("secret_key", "") if provider == "alpaca" else ""
+        api_key = body.get("api_key", "") if selected_provider == "alpaca" else ""
+        secret_key = body.get("secret_key", "") if selected_provider == "alpaca" else ""
         df = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: fetch_market_data(
@@ -381,7 +395,7 @@ async def fetch_data(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
                 timeframe=timeframe,
                 start=effective_start,
                 end=effective_end,
-                provider=provider,
+                provider=selected_provider,
                 adjusted=True,
                 force_download=force,
                 api_key=api_key,
@@ -393,12 +407,12 @@ async def fetch_data(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
 
         # Persist inventory record in DB
         try:
-            cache_file = _cache_file_for(symbol, timeframe, provider)
+            cache_file = _cache_file_for(symbol, timeframe, selected_provider)
             await upsert_inventory(
                 db,
                 symbol=symbol,
                 timeframe=timeframe,
-                provider=provider,
+                provider=selected_provider,
                 file_path=str(cache_file),
                 first_date=str(df.index[0].date()),
                 last_date=str(df.index[-1].date()),
@@ -411,7 +425,8 @@ async def fetch_data(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "provider": provider,
+            "provider_requested": provider,
+            "provider": selected_provider,
             "bar_count": len(df),
             "first_date": str(df.index[0].date()),
             "last_date": str(df.index[-1].date()),
@@ -427,20 +442,31 @@ async def fetch_data(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
 @router.post("/fetch-many")
 async def fetch_many(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
     """Download multiple symbols at once."""
-    from app.services.data_limits import clamp_date_range, select_provider, check_bar_count
+    from app.services.data_limits import clamp_date_range, check_bar_count
+    from app.services.backtest_service import recommend_data_provider
 
     symbols = [s.upper() for s in body.get("symbols", [])]
     timeframe = body.get("timeframe", "1d")
     start = body.get("start", "2020-01-01")
     end = body.get("end", "2024-01-01")
-    provider = body.get("provider", "yfinance")
+    provider = body.get("provider", "auto")
     api_key = body.get("api_key", "")
     secret_key = body.get("secret_key", "")
 
     # Smart date clamping
     effective_start, effective_end, _ = clamp_date_range(start, end, timeframe)
-    if provider == "auto":
-        provider = select_provider(timeframe, "auto", bool(api_key and secret_key))
+    provider_decision = recommend_data_provider(
+        timeframe=timeframe,
+        start_date=effective_start,
+        end_date=effective_end,
+        symbol_count=len(symbols),
+        has_alpaca_credentials=bool(api_key and secret_key),
+    )
+    selected_provider = resolve_requested_provider(
+        requested_provider=provider_decision["provider"] if provider == "auto" else provider,
+        runtime_mode="simulation",
+        alpaca_credentials_configured=bool(api_key and secret_key),
+    )
 
     results = []
     for symbol in symbols:
@@ -452,7 +478,7 @@ async def fetch_many(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
                     timeframe=timeframe,
                     start=effective_start,
                     end=effective_end,
-                    provider=provider,
+                    provider=selected_provider,
                     adjusted=True,
                     force_download=False,
                     api_key=api_key,
@@ -461,12 +487,12 @@ async def fetch_many(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
             )
             # Upsert DB inventory for each successful fetch
             try:
-                cache_file = _cache_file_for(symbol, timeframe, provider)
+                cache_file = _cache_file_for(symbol, timeframe, selected_provider)
                 await upsert_inventory(
                     db,
                     symbol=symbol,
                     timeframe=timeframe,
-                    provider=provider,
+                    provider=selected_provider,
                     file_path=str(cache_file),
                     first_date=str(df.index[0].date()),
                     last_date=str(df.index[-1].date()),
@@ -475,11 +501,11 @@ async def fetch_many(body: dict[str, Any], db: AsyncSession = Depends(get_db)):
             except Exception:
                 pass
 
-            results.append({"symbol": symbol, "status": "ok", "bar_count": len(df)})
+            results.append({"symbol": symbol, "status": "ok", "bar_count": len(df), "provider": selected_provider})
         except Exception as e:
-            results.append({"symbol": symbol, "status": "error", "error": str(e)})
+            results.append({"symbol": symbol, "status": "error", "error": str(e), "provider": selected_provider})
 
-    return {"results": results}
+    return {"provider_requested": provider, "provider": selected_provider, "results": results}
 
 
 @router.delete("/cache/{symbol}/{timeframe}")

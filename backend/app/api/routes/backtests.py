@@ -17,11 +17,12 @@ from sqlalchemy.orm import selectinload, joinedload
 from app.database import get_db, AsyncSessionLocal
 from app.data.providers.yfinance_provider import TIMEFRAME_MAP
 from app.data.providers.alpaca_provider import TIMEFRAME_MAP as ALPACA_TIMEFRAME_MAP
+from app.features.preview import build_feature_plan_preview
 from app.models.run import BacktestRun, RunMetrics
 from app.models.validation_evidence import ValidationEvidence
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.trade import Trade
-from app.services.backtest_service import launch_backtest, recommend_data_provider
+from app.services.backtest_service import launch_backtest, recommend_data_provider, resolve_program_to_config
 
 router = APIRouter(prefix="/backtests", tags=["backtests"])
 
@@ -29,7 +30,8 @@ SUPPORTED_BACKTEST_TIMEFRAMES = tuple(sorted(set(TIMEFRAME_MAP.keys()) | set(ALP
 
 
 class BacktestLaunchRequest(BaseModel):
-    strategy_version_id: str
+    strategy_version_id: str | None = None
+    program_id: str | None = None
     symbols: list[str] | None = None
     timeframe: str | None = None
     start_date: str = "2018-01-01"
@@ -57,6 +59,12 @@ class BacktestLaunchRequest(BaseModel):
         "max_combos": 30,
         "min_bars_path": 30,
     })
+
+    @model_validator(mode="after")
+    def _require_strategy_or_program(self) -> "BacktestLaunchRequest":
+        if not self.strategy_version_id and not self.program_id:
+            raise ValueError("Provide either strategy_version_id or program_id")
+        return self
 
     @field_validator("timeframe")
     @classmethod
@@ -200,6 +208,32 @@ def _normalize_symbols(symbols: list[str] | None) -> list[str]:
     return normalized
 
 
+def _resolve_trade_replay_provider(run: BacktestRun) -> str:
+    from app.features.source_contracts import resolve_requested_provider
+
+    requested_provider: str | None = None
+    if isinstance(run.parameters, dict):
+        data_provider_used = run.parameters.get("data_provider_used")
+        if isinstance(data_provider_used, str) and data_provider_used.strip().lower() in {"alpaca", "yfinance"}:
+            requested_provider = data_provider_used
+        else:
+            data_provider_requested = run.parameters.get("data_provider_requested")
+            if isinstance(data_provider_requested, str) and data_provider_requested.strip().lower() in {"alpaca", "yfinance"}:
+                requested_provider = data_provider_requested
+
+    if requested_provider is None:
+        raise ValueError(
+            "Trade replay is unavailable for this run because provider provenance is ambiguous. "
+            "Expected run.parameters.data_provider_used or an explicit non-auto data_provider_requested."
+        )
+
+    return resolve_requested_provider(
+        requested_provider=requested_provider,
+        runtime_mode="research",
+        alpaca_credentials_configured=False,
+    )
+
+
 async def _run_backtest_background(run_id: str, strategy_version_id: str, strategy_config: dict, run_config: dict) -> None:
     """Execute a backtest in the background using its own DB session."""
     async with AsyncSessionLocal() as db:
@@ -222,19 +256,28 @@ async def launch(body: BacktestLaunchRequest, db: AsyncSession = Depends(get_db)
     Launch a backtest. Returns immediately with the run_id; execution happens in the background.
     Poll GET /backtests/{run_id} to track progress.
     """
-    strategy_version_id = body.strategy_version_id
+    # Resolve config: either from a program (5-component overlay) or directly from a strategy version
+    if body.program_id:
+        try:
+            strategy_version_id, strategy_config, resolved_symbols = await resolve_program_to_config(body.program_id, db)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            logger.exception(f"resolve_program_to_config failed for {body.program_id}: {e}")
+            raise HTTPException(status_code=500, detail="Database error. Check server logs for details.")
+    else:
+        strategy_version_id = body.strategy_version_id  # type: ignore[assignment]
+        try:
+            sv = await db.get(StrategyVersion, strategy_version_id)
+        except Exception as e:
+            logger.exception(f"Database error fetching strategy_version {strategy_version_id}: {e}")
+            raise HTTPException(status_code=500, detail="Database error. Check server logs for details.")
+        if not sv:
+            raise HTTPException(status_code=404, detail=f"StrategyVersion {strategy_version_id} not found")
+        strategy_config = dict(sv.config)
+        resolved_symbols = strategy_config.get("symbols", [])
 
-    try:
-        sv = await db.get(StrategyVersion, strategy_version_id)
-    except Exception as e:
-        logger.exception(f"Database error fetching strategy_version {strategy_version_id}: {e}")
-        raise HTTPException(status_code=500, detail="Database error. Check server logs for details.")
-
-    if not sv:
-        raise HTTPException(status_code=404, detail=f"StrategyVersion {strategy_version_id} not found")
-
-    strategy_config = dict(sv.config)
-    symbols = _normalize_symbols(body.symbols if body.symbols is not None else strategy_config.get("symbols", ["SPY"]))
+    symbols = _normalize_symbols(body.symbols if body.symbols is not None else resolved_symbols or strategy_config.get("symbols", ["SPY"]))
     if not symbols:
         raise HTTPException(status_code=422, detail="At least one valid symbol is required")
 
@@ -297,6 +340,12 @@ async def launch(body: BacktestLaunchRequest, db: AsyncSession = Depends(get_db)
             "commission_pct_per_trade": body.commission_pct_per_trade,
             "walk_forward": body.walk_forward if isinstance(body.walk_forward, dict) else (body.walk_forward.model_dump() if body.walk_forward else {}),
             "cpcv": body.cpcv if isinstance(body.cpcv, dict) else (body.cpcv.model_dump() if body.cpcv else {}),
+            "feature_plan_preview": build_feature_plan_preview(
+                strategy_config,
+                duration_mode=strategy_config.get("duration_mode"),
+                symbols=symbols,
+                timeframe=timeframe,
+            ),
         },
         started_at=datetime.now(timezone.utc),
     )
@@ -344,6 +393,11 @@ def _fmt_run(r: BacktestRun) -> dict:
     """Serialise a BacktestRun including a compact metrics summary."""
     sv = getattr(r, 'strategy_version', None)
     strategy = getattr(sv, 'strategy', None) if sv else None
+    feature_plan_preview = None
+    if isinstance(r.parameters, dict):
+        candidate = r.parameters.get("feature_plan_preview")
+        if isinstance(candidate, dict):
+            feature_plan_preview = candidate
     base = {
         "id": r.id,
         "strategy_version_id": r.strategy_version_id,
@@ -362,6 +416,7 @@ def _fmt_run(r: BacktestRun) -> dict:
         "error_message": r.error_message,
         "metrics": None,
         "validation_evidence": None,
+        "feature_plan_preview": feature_plan_preview,
     }
     if r.metrics:
         m = r.metrics
@@ -472,7 +527,11 @@ async def update_run(run_id: str, body: BacktestRunUpdateRequest, db: AsyncSessi
     await db.commit()
     result = await db.execute(
         select(BacktestRun)
-        .options(selectinload(BacktestRun.metrics), selectinload(BacktestRun.validation_evidence))
+        .options(
+            selectinload(BacktestRun.metrics),
+            selectinload(BacktestRun.validation_evidence),
+            selectinload(BacktestRun.strategy_version).selectinload(StrategyVersion.strategy),
+        )
         .where(BacktestRun.id == run_id)
     )
     updated = result.scalar_one()
@@ -515,6 +574,206 @@ async def get_trades(run_id: str, db: AsyncSession = Depends(get_db)):
         }
         for t in trades
     ]
+
+
+# ── Trade replay ─────────────────────────────────────────────────────────────
+
+@router.get("/{run_id}/trades/{trade_id}/replay")
+async def get_trade_replay(
+    run_id: str,
+    trade_id: str,
+    context_bars: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Return bar-by-bar OHLCV window for a single trade, plus entry/exit/stop/target
+    annotations and the conditions that fired at entry.
+
+    context_bars: how many bars before entry and after exit to include.
+    """
+    run = await db.get(BacktestRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    trade = await db.get(Trade, trade_id)
+    if not trade or trade.run_id != run_id:
+        raise HTTPException(status_code=404, detail="Trade not found in this run")
+
+    # Fetch OHLCV bars from the cached data provider (yfinance default)
+    try:
+        from app.services.market_data_service import fetch_market_data
+        import pandas as pd
+        selected_provider = _resolve_trade_replay_provider(run)
+
+        df: pd.DataFrame = fetch_market_data(
+            symbol=trade.symbol,
+            timeframe=run.timeframe,
+            start=run.start_date,
+            end=run.end_date,
+            provider=selected_provider,
+        )
+
+        if df.empty:
+            return {"bars": [], "annotations": {}, "conditions_fired": trade.entry_conditions_fired or []}
+
+        # Normalize index to UTC-aware datetime for comparison
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, utc=True)
+        elif df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+
+        entry_dt = pd.Timestamp(trade.entry_time, tz="UTC") if trade.entry_time.tzinfo is None else pd.Timestamp(trade.entry_time).tz_convert("UTC")
+        exit_dt = pd.Timestamp(trade.exit_time, tz="UTC") if trade.exit_time and trade.exit_time.tzinfo is None else (pd.Timestamp(trade.exit_time).tz_convert("UTC") if trade.exit_time else None)
+
+        # Find index positions
+        entry_pos = df.index.searchsorted(entry_dt, side="left")
+        exit_pos = df.index.searchsorted(exit_dt, side="right") if exit_dt else entry_pos + 1
+
+        start_pos = max(0, entry_pos - context_bars)
+        end_pos = min(len(df), exit_pos + context_bars)
+
+        window = df.iloc[start_pos:end_pos]
+
+        bars = []
+        for ts, row in window.iterrows():
+            bars.append({
+                "time": ts.isoformat(),
+                "open": round(float(row.get("Open", row.get("open", 0))), 4),
+                "high": round(float(row.get("High", row.get("high", 0))), 4),
+                "low": round(float(row.get("Low", row.get("low", 0))), 4),
+                "close": round(float(row.get("Close", row.get("close", 0))), 4),
+                "volume": int(row.get("Volume", row.get("volume", 0))),
+            })
+
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Trade replay data fetch failed for %s: %s", trade_id, exc)
+        raise HTTPException(status_code=502, detail="Trade replay data fetch failed. Check server logs.") from exc
+
+    return {
+        "trade_id": trade_id,
+        "symbol": trade.symbol,
+        "direction": trade.direction,
+        "bars": bars,
+        "annotations": {
+            "entry_time": trade.entry_time.isoformat() if trade.entry_time else None,
+            "entry_price": trade.entry_price,
+            "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
+            "exit_price": trade.exit_price,
+            "initial_stop": trade.initial_stop,
+            "initial_target": trade.initial_target,
+            "exit_reason": trade.exit_reason,
+            "net_pnl": trade.net_pnl,
+            "r_multiple": trade.r_multiple,
+            "regime_at_entry": trade.regime_at_entry,
+        },
+        "conditions_fired": trade.entry_conditions_fired or [],
+    }
+
+
+@router.post("/{run_id}/suggest-risk-profile")
+async def suggest_risk_profile_from_backtest(run_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Derive a suggested RiskProfile from a completed backtest run and persist it.
+
+    Loads the BacktestRun metrics and trades, runs the pure-function generator,
+    saves the result as a RiskProfile row with source_run_id=run_id, and returns
+    the saved profile.
+    """
+    import uuid as _uuid
+    from app.models.risk_profile import RiskProfile
+    from app.services import risk_profile_generator
+
+    # Load run + metrics
+    result = await db.execute(
+        select(BacktestRun)
+        .options(selectinload(BacktestRun.metrics))
+        .where(BacktestRun.id == run_id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status != "completed":
+        raise HTTPException(status_code=409, detail="Run must be completed before suggesting a risk profile")
+
+    # Load trades
+    trades_result = await db.execute(
+        select(Trade).where(Trade.run_id == run_id).order_by(Trade.entry_time)
+    )
+    trades_orm = trades_result.scalars().all()
+
+    # Normalise trades to the dict schema expected by the generator
+    trades_dicts = [
+        {
+            "direction": t.direction,
+            "entry_price": t.entry_price,
+            "quantity": t.initial_quantity,
+            "net_pnl": t.net_pnl,
+            "initial_risk": (
+                abs(t.entry_price - t.initial_stop) * t.initial_quantity
+                if t.initial_stop and t.entry_price and t.initial_quantity
+                else None
+            ),
+            "entry_time": t.entry_time.isoformat() if t.entry_time else None,
+            "exit_time": t.exit_time.isoformat() if t.exit_time else None,
+        }
+        for t in trades_orm
+    ]
+
+    # Build a metrics dict from the RunMetrics row
+    m = run.metrics
+    metrics_dict: dict = {}
+    if m:
+        metrics_dict = {
+            "max_drawdown_pct": m.max_drawdown_pct or 0.0,
+            "total_return_pct": m.total_return_pct or 0.0,
+            "sharpe_ratio": m.sharpe_ratio or 0.0,
+        }
+
+    suggested = risk_profile_generator.suggest_from_backtest(
+        metrics=metrics_dict,
+        trades=trades_dicts,
+        initial_capital=run.initial_capital or 100_000.0,
+    )
+
+    # Build a descriptive name from the run
+    symbols_str = ", ".join((run.symbols or [])[:3])
+    if run.symbols and len(run.symbols) > 3:
+        symbols_str += f" +{len(run.symbols) - 3}"
+    profile_name = f"Auto: {symbols_str} ({run.timeframe}) [{run_id[:8]}]"
+
+    profile = RiskProfile(
+        id=str(_uuid.uuid4()),
+        name=profile_name,
+        description=f"Auto-generated from backtest run {run_id}",
+        source_type="backtest",
+        source_run_id=run_id,
+        **{k: v for k, v in suggested.items() if k != "source_type"},
+    )
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+
+    return {
+        "id": profile.id,
+        "name": profile.name,
+        "description": profile.description,
+        "source_type": profile.source_type,
+        "source_run_id": profile.source_run_id,
+        "max_open_positions_long": profile.max_open_positions_long,
+        "max_open_positions_short": profile.max_open_positions_short,
+        "max_portfolio_heat_long": profile.max_portfolio_heat_long,
+        "max_portfolio_heat_short": profile.max_portfolio_heat_short,
+        "max_correlated_exposure_long": profile.max_correlated_exposure_long,
+        "max_correlated_exposure_short": profile.max_correlated_exposure_short,
+        "max_position_size_pct_long": profile.max_position_size_pct_long,
+        "max_position_size_pct_short": profile.max_position_size_pct_short,
+        "max_daily_loss_pct": profile.max_daily_loss_pct,
+        "max_drawdown_lockout_pct": profile.max_drawdown_lockout_pct,
+        "max_leverage": profile.max_leverage,
+        "created_at": profile.created_at.isoformat() if profile.created_at else None,
+    }
 
 
 @router.post("/{run_id}/compare")
@@ -602,6 +861,152 @@ async def compare_runs(run_id: str, body: CompareRunsRequest, db: AsyncSession =
     }
 
     return {"left_run": left, "right_run": right, "deltas": deltas}
+
+
+# ── Regime suitability analysis ──────────────────────────────────────────────
+
+@router.get("/{run_id}/regime-analysis")
+async def get_regime_analysis(run_id: str, db: AsyncSession = Depends(get_db)):
+    """Group trades by regime and compute per-regime win rate, avg P&L, and suitability."""
+    run = await db.get(BacktestRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    result = await db.execute(
+        select(Trade).where(Trade.run_id == run_id)
+    )
+    trades = result.scalars().all()
+
+    if not trades:
+        return {"regimes": []}
+
+    from collections import defaultdict
+    buckets: dict[str, list] = defaultdict(list)
+    for t in trades:
+        regime = t.regime_at_entry or "unknown"
+        buckets[regime].append(t)
+
+    regimes = []
+    for regime, ts in buckets.items():
+        count = len(ts)
+        wins = sum(1 for t in ts if (t.net_pnl or 0) > 0)
+        win_rate = wins / count if count else 0.0
+        avg_pnl = sum(t.net_pnl or 0 for t in ts) / count if count else 0.0
+
+        if count >= 5 and win_rate > 0.55:
+            suitability = "recommended"
+        elif count >= 5 and win_rate < 0.35:
+            suitability = "avoid"
+        else:
+            suitability = "neutral"
+
+        regimes.append({
+            "regime": regime,
+            "trade_count": count,
+            "win_rate": round(win_rate, 4),
+            "avg_pnl": round(avg_pnl, 2),
+            "suitability": suitability,
+        })
+
+    regimes.sort(key=lambda r: {"recommended": 0, "neutral": 1, "avoid": 2}[r["suitability"]])
+    return {"regimes": regimes}
+
+
+# ── Strategy diagnostics ──────────────────────────────────────────────────────
+
+@router.get("/{run_id}/recommendations")
+async def get_recommendations(run_id: str, db: AsyncSession = Depends(get_db)):
+    """Heuristic strategy diagnostics — no ML, pure rules."""
+    result = await db.execute(
+        select(BacktestRun)
+        .options(selectinload(BacktestRun.metrics))
+        .where(BacktestRun.id == run_id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    m = run.metrics
+    recs = []
+
+    if m:
+        max_dd = abs(m.max_drawdown_pct or 0)
+        pf = m.profit_factor or 0
+        total_trades = m.total_trades or 0
+        sharpe = m.sharpe_ratio or 0
+
+        if max_dd > 20 and pf > 1.5:
+            recs.append({
+                "severity": "warning",
+                "message": f"Drawdown {max_dd:.1f}% is high relative to profit factor {pf:.2f}. Consider tightening stop loss.",
+            })
+
+        if total_trades < 30:
+            recs.append({
+                "severity": "warning",
+                "message": f"Only {total_trades} trades — extend date range or add symbols for statistical significance.",
+            })
+
+        # Walk-forward degradation
+        wfa = m.walk_forward or {}
+        if isinstance(wfa, dict):
+            agg = wfa.get("aggregated") or {}
+            if isinstance(agg, dict):
+                oos_sharpe = agg.get("avg_oos_sharpe")
+                if oos_sharpe is not None and sharpe > 0:
+                    degradation = (sharpe - oos_sharpe) / sharpe
+                    if degradation > 0.50:
+                        recs.append({
+                            "severity": "danger",
+                            "message": f"IS-to-OOS Sharpe degradation {degradation:.0%} — possible overfitting. Simplify entry conditions.",
+                        })
+
+        # Duration mode check
+        avg_hold = None
+        trade_result = await db.execute(select(Trade).where(Trade.run_id == run_id))
+        trades = trade_result.scalars().all()
+        if trades:
+            holds = []
+            for t in trades:
+                if t.entry_time and t.exit_time:
+                    holds.append((t.exit_time - t.entry_time).total_seconds() / 86400)
+            if holds:
+                avg_hold = sum(holds) / len(holds)
+
+            sv_result = await db.execute(select(StrategyVersion).where(StrategyVersion.id == run.strategy_version_id))
+            sv = sv_result.scalar_one_or_none()
+            duration_mode = sv.duration_mode if sv else "swing"
+            if avg_hold is not None and avg_hold < 1.5 and duration_mode == "swing":
+                recs.append({
+                    "severity": "info",
+                    "message": f"Average hold {avg_hold:.1f} days on a swing strategy — consider day trading mode.",
+                })
+
+            # Best regime suggestion
+            from collections import defaultdict
+            buckets: dict[str, list] = defaultdict(list)
+            for t in trades:
+                regime = t.regime_at_entry or "unknown"
+                buckets[regime].append(t)
+            best_regime = None
+            best_wr = 0.0
+            for regime, ts in buckets.items():
+                if len(ts) < 5:
+                    continue
+                wr = sum(1 for t in ts if (t.net_pnl or 0) > 0) / len(ts)
+                if wr > best_wr:
+                    best_wr = wr
+                    best_regime = regime
+            if best_regime and best_wr > 0.60:
+                recs.append({
+                    "severity": "info",
+                    "message": f"Best performance in '{best_regime}' regime ({best_wr:.0%} win rate) — consider adding a regime filter.",
+                })
+
+    if not recs:
+        recs.append({"severity": "info", "message": "No issues detected. Strategy looks well-configured."})
+
+    return {"recommendations": recs}
 
 
 # ── Parameter optimization ────────────────────────────────────────────────────

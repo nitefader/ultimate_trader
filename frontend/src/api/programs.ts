@@ -5,13 +5,19 @@ export interface TradingProgram {
   name: string
   version: number
   description: string | null
+  notes: string | null
   status: 'draft' | 'frozen' | 'deprecated'
   duration_mode: string
   strategy_version_id: string | null
+  strategy_governor_id: string | null
+  execution_style_id: string | null
+  risk_profile_id: string | null
   optimization_profile_id: string | null
   weight_profile_id: string | null
   symbol_universe_snapshot_id: string | null
   execution_policy: Record<string, unknown>
+  watchlist_subscriptions: string[]
+  watchlist_combination_rule: string
   parent_program_id: string | null
   frozen_at: string | null
   frozen_by: string | null
@@ -49,6 +55,14 @@ export interface PromotionReview {
   review_payload: Record<string, unknown>
 }
 
+export interface ProgramValidation {
+  can_deploy: boolean
+  missing_components: string[]
+  warnings: string[]
+  expected_behavior: string[]
+  attached_components: Record<string, boolean>
+}
+
 export const programsApi = {
   list: (): Promise<TradingProgram[]> =>
     api.get('/programs').then((r) => r.data),
@@ -59,7 +73,11 @@ export const programsApi = {
   create: (data: {
     name: string
     description?: string
+    notes?: string
     strategy_version_id?: string
+    strategy_governor_id?: string
+    execution_style_id?: string
+    risk_profile_id?: string
     optimization_profile_id?: string
     weight_profile_id?: string
     symbol_universe_snapshot_id?: string
@@ -72,8 +90,8 @@ export const programsApi = {
   update: (id: string, updates: Partial<TradingProgram>): Promise<TradingProgram> =>
     api.patch(`/programs/${id}`, updates).then((r) => r.data),
 
-  freeze: (id: string, frozenBy = 'user'): Promise<TradingProgram> =>
-    api.post(`/programs/${id}/freeze`, { frozen_by: frozenBy }).then((r) => r.data),
+  validate: (id: string): Promise<ProgramValidation> =>
+    api.post(`/programs/${id}/validate`).then((r) => r.data),
 
   deprecate: (id: string, reason = 'superseded'): Promise<TradingProgram> =>
     api.post(`/programs/${id}/deprecate`, null, { params: { reason } }).then((r) => r.data),

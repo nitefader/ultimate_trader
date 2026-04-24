@@ -18,5 +18,5 @@ test('critical navigation path renders core pages', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Accounts' })).toBeVisible()
 
   await page.getByRole('link', { name: /Services/i }).click()
-  await expect(page.getByText('Data Services')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Data Services' })).toBeVisible()
 })

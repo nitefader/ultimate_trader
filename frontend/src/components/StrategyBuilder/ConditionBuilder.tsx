@@ -1,9 +1,10 @@
-import React from 'react'
-import { Plus, Trash2 } from 'lucide-react'
+import React, { useState, useRef } from 'react'
+import { Plus, Trash2, Sparkles, ChevronDown, ChevronUp, Loader2 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import type { Condition } from '../../types'
 import { SelectMenu } from '../SelectMenu'
 import { strategiesApi } from '../../api/strategies'
+import { FALLBACK_INDICATOR_KINDS } from './constants'
 
 interface Props {
   conditions: Condition[]
@@ -16,44 +17,18 @@ interface Props {
 
 const OPERATORS = ['>', '>=', '<', '<=', '==', '!=', 'crosses_above', 'crosses_below', 'between', 'in']
 const FIELDS = ['close', 'open', 'high', 'low', 'volume']
-const INDICATORS = [
-  // Momentum / oscillators
-  'rsi_14', 'rsi_7', 'rsi_3', 'rsi_8', 'rsi_2',
-  // Moving averages
-  'ema_9', 'ema_21', 'ema_55', 'ema_200',
-  'sma_20', 'sma_50', 'sma_200',
-  'hull_ma', 'hull_ma_20', 'hull_ma_50',
-  // Volatility / trend
-  'atr_14', 'adx', 'plus_di', 'minus_di',
-  // MACD
-  'macd', 'macd_signal', 'macd_hist',
-  // Bollinger
-  'bb_upper', 'bb_lower', 'bb_mid',
-  // Stochastic
-  'stoch_k', 'stoch_d',
-  // Donchian
-  'dc_upper', 'dc_lower', 'dc_mid',
-  'donchian_high', 'donchian_low',
-  // Parabolic SAR — stop-and-reverse trailing stop
-  'sar',        // SAR price level
-  'sar_trend',  // +1 = uptrend (price above SAR), -1 = downtrend
-  // IBS — Internal Bar Strength (0–1, near 1 = closed near high)
-  'ibs',
-  // Z-score — std devs from 20-bar mean (>2 overbought, <-2 oversold)
-  'zscore', 'zscore_10', 'zscore_20',
-  // BT_Snipe — z-score of (close - EMA), mean-reversion exhaustion
-  'bt_snipe',
-  // TheStrat: 1=inside, 2=two-up, -2=two-down, 3=outside
-  'strat_num',
-  // Opening range breakout levels
-  'opening_range_high', 'opening_range_low',
-  // Gap vs prior close
-  'open_gap_pct',
-  // Pivot levels
-  'pp', 'r1', 'r2', 'r3', 's1', 's2', 's3',
-]
-
 type ValueType = 'literal' | 'field' | 'indicator' | 'prev_bar'
+
+const TIMEFRAME_OPTIONS = [
+  { value: '', label: 'Trade TF' },
+  { value: '1m', label: '1m' },
+  { value: '5m', label: '5m' },
+  { value: '15m', label: '15m' },
+  { value: '30m', label: '30m' },
+  { value: '1h', label: '1h' },
+  { value: '4h', label: '4h' },
+  { value: '1d', label: '1d' },
+]
 
 interface SingleConditionEditorProps {
   cond: Condition
@@ -79,7 +54,10 @@ function summarizeValue(spec: Condition['left']): string {
   if (!spec || typeof spec !== 'object') return 'Value'
   const offset = typeof spec.n_bars_back === 'number' && spec.n_bars_back > 0 ? `[${spec.n_bars_back}]` : ''
   if ('field' in spec) return `Price.${spec.field}${offset}`
-  if ('indicator' in spec) return `${String(spec.indicator)}${offset}`
+  if ('indicator' in spec) {
+    const tf = spec.timeframe ? `@${spec.timeframe}` : ''
+    return `${String(spec.indicator)}${tf}${offset}`
+  }
   if ('prev_bar' in spec) return `Prev.${spec.prev_bar}`
   return 'Value'
 }
@@ -177,13 +155,14 @@ function ValueEditor({
               onChange={(e) => onChange({
                 indicator: e.target.value,
                 n_bars_back: Number(val.n_bars_back ?? 0) || undefined,
+                timeframe: (val.timeframe as string) || undefined,
               })}
               placeholder="rsi_2, ema_20, ema_50..."
             />
             <datalist id="indicator-options">
               {indicatorKinds.map((i) => <option key={i} value={i} />)}
             </datalist>
-            <div className="grid gap-2 sm:grid-cols-[88px_minmax(0,1fr)]">
+            <div className="grid gap-2 sm:grid-cols-[88px_120px_minmax(0,1fr)]">
               <input
                 type="number"
                 min="0"
@@ -194,12 +173,22 @@ function ValueEditor({
                   onChange({
                     indicator: (val.indicator as string) ?? 'rsi_14',
                     n_bars_back: n > 0 ? n : undefined,
+                    timeframe: (val.timeframe as string) || undefined,
                   })
                 }}
                 placeholder="Bars"
               />
+              <SelectMenu
+                value={(val.timeframe as string) ?? ''}
+                onChange={(tf) => onChange({
+                  indicator: (val.indicator as string) ?? 'rsi_14',
+                  n_bars_back: Number(val.n_bars_back ?? 0) || undefined,
+                  timeframe: tf || undefined,
+                })}
+                options={TIMEFRAME_OPTIONS}
+              />
               <div className="flex items-center text-xs text-gray-500">
-                Bar offset. `1` means previous bar, `2` means two bars back.
+                Bar offset · Timeframe override
               </div>
             </div>
           </div>
@@ -262,7 +251,41 @@ export function ConditionBuilder({ conditions, onChange, logic, onLogicChange, l
     queryFn: strategiesApi.indicatorKinds,
     staleTime: Infinity,
   })
-  const indicatorKinds = propKinds ?? fetchedKinds ?? INDICATORS
+  const indicatorKinds = propKinds ?? fetchedKinds ?? FALLBACK_INDICATOR_KINDS
+
+  const [aiOpen, setAiOpen] = useState(false)
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiError, setAiError] = useState<string | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const handleGenerate = async () => {
+    if (!aiPrompt.trim()) return
+    setAiLoading(true)
+    setAiError(null)
+    try {
+      const result = await strategiesApi.generateConditions(aiPrompt.trim())
+      if (result.conditions.length > 0) {
+        onChange(result.conditions)
+        onLogicChange(result.logic)
+        setAiOpen(false)
+        setAiPrompt('')
+      } else {
+        setAiError('AI returned no conditions. Try a more specific description.')
+      }
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } }
+      const status = axiosErr?.response?.status
+      const detail = axiosErr?.response?.data?.detail
+      if (status === 424) {
+        setAiError(`AI service not configured. ${detail ?? 'Go to Services → add a Groq or Gemini key and set it as Default AI.'}`)
+      } else {
+        setAiError(detail ?? (err instanceof Error ? err.message : 'Generation failed'))
+      }
+    } finally {
+      setAiLoading(false)
+    }
+  }
 
   const addCondition = () => {
     onChange([
@@ -298,11 +321,59 @@ export function ConditionBuilder({ conditions, onChange, logic, onLogicChange, l
               options={LOGIC_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
             />
           </div>
+          <button
+            type="button"
+            className="flex items-center justify-center gap-1.5 rounded-lg border border-violet-700/60 bg-violet-950/50 px-3 py-2 text-xs text-violet-300 transition hover:border-violet-500 hover:bg-violet-900/50 hover:text-violet-100"
+            onClick={() => { setAiOpen(o => !o); setAiError(null) }}
+          >
+            <Sparkles size={12} />
+            Generate with AI
+            {aiOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
           <button className="btn-primary flex items-center justify-center gap-1.5 px-3 py-2 text-xs" onClick={addCondition}>
             <Plus size={12} /> Add Study Trigger
           </button>
         </div>
       </div>
+
+      {aiOpen && (
+        <div className="rounded-2xl border border-violet-800/50 bg-gradient-to-br from-violet-950/40 via-gray-950 to-gray-900 p-4 shadow-[0_0_24px_rgba(109,40,217,0.12)]">
+          <div className="mb-2 flex items-center gap-2">
+            <Sparkles size={14} className="text-violet-400" />
+            <span className="text-xs font-medium text-violet-300 uppercase tracking-widest">AI Condition Generator</span>
+          </div>
+          <p className="mb-3 text-xs text-gray-400">
+            Describe your entry signal in plain English. The AI will generate a condition tree using your available indicators.
+          </p>
+          <textarea
+            ref={textareaRef}
+            className="w-full rounded-xl border border-gray-700 bg-gray-950/80 px-3 py-2.5 text-sm text-gray-100 placeholder-gray-600 outline-none focus:border-violet-600 focus:ring-1 focus:ring-violet-600/40 resize-none"
+            rows={3}
+            placeholder="e.g. Buy when RSI crosses above 30 and price is above the 20-period EMA and MACD histogram is positive"
+            value={aiPrompt}
+            onChange={e => setAiPrompt(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleGenerate() }}
+            disabled={aiLoading}
+          />
+          {aiError && (
+            <div className="mt-2 rounded-lg border border-red-800/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+              {aiError}
+            </div>
+          )}
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span className="text-[10px] text-gray-600">Ctrl+Enter to generate · Replaces current conditions</span>
+            <button
+              type="button"
+              className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-xs font-medium text-white transition hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={handleGenerate}
+              disabled={aiLoading || !aiPrompt.trim()}
+            >
+              {aiLoading ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+              {aiLoading ? 'Generating…' : 'Generate'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {conditions.length === 0 && (
         <div className="rounded-2xl border border-dashed border-gray-700 bg-gray-950/40 px-4 py-8 text-center">

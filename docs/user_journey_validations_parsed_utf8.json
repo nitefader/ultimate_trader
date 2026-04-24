@@ -1,0 +1,802 @@
+[
+  {
+    "id": 1,
+    "title": "First-time platform setup",
+    "pages_components": "Services, AccountMonitor, CredentialManager",
+    "api_routes": "`POST /api/services`, `POST /api/accounts`, `POST /api/accounts/:id/credentials`, `POST /api/accounts/:id/validate-credentials`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 2,
+    "title": "Adding a live Alpaca account",
+    "pages_components": "AccountMonitor, CredentialManager",
+    "api_routes": "`POST /api/accounts`, `POST /api/accounts/:id/credentials`, `POST /api/accounts/:id/validate-credentials`, `GET /api/accounts/:id/snapshot`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 3,
+    "title": "Connecting an AI service",
+    "pages_components": "Services (AI Providers tab)",
+    "api_routes": "`POST /api/services`, `POST /api/services/:id/test`, `POST /api/services/:id/set-default-ai`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 4,
+    "title": "Configuring a second Alpaca data service",
+    "pages_components": "Services",
+    "api_routes": "`POST /api/services`, `POST /api/services/:id/test`, `POST /api/services/:id/set-default`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 5,
+    "title": "Backing up the database",
+    "pages_components": "BackupRestore",
+    "api_routes": "`GET /api/admin/backup`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 6,
+    "title": "Restoring from a backup",
+    "pages_components": "BackupRestore",
+    "api_routes": "`POST /api/admin/restore`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 7,
+    "title": "Reviewing system health via logs",
+    "pages_components": "LogsPanel, Backlog",
+    "api_routes": "`GET /api/admin/logs`, `GET /api/backlog`, `POST /api/backlog/:id/cancel`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 8,
+    "title": "Setting up event calendar awareness",
+    "pages_components": "EventCalendar, StrategyGovernors",
+    "api_routes": "`GET /api/events` (EventCalendar), governor edit flow",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 9,
+    "title": "Creating a manual watchlist",
+    "pages_components": "WatchlistLibrary",
+    "api_routes": "`POST /api/watchlists`, `POST /api/watchlists/:id/add-symbols`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 10,
+    "title": "Promoting a candidate symbol to active",
+    "pages_components": "WatchlistLibrary (membership table)",
+    "api_routes": "`POST /api/watchlists/:id/set-membership-state`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 11,
+    "title": "Suspending a symbol after an earnings miss",
+    "pages_components": "WatchlistLibrary (membership table)",
+    "api_routes": "`POST /api/watchlists/:id/set-membership-state`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 12,
+    "title": "Creating a sector rotation watchlist",
+    "pages_components": "WatchlistLibrary",
+    "api_routes": "`POST /api/watchlists`, `POST /api/watchlists/:id/add-symbols`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 13,
+    "title": "Refreshing an index watchlist",
+    "pages_components": "WatchlistLibrary",
+    "api_routes": "`POST /api/watchlists/:id/refresh`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 14,
+    "title": "Deleting a stale watchlist",
+    "pages_components": "WatchlistLibrary",
+    "api_routes": "`DELETE /api/watchlists/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 15,
+    "title": "Linking a watchlist to multiple programs",
+    "pages_components": "TradingPrograms (Watchlist card)",
+    "api_routes": "`PUT /api/programs/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 16,
+    "title": "Creating an earnings calendar watchlist",
+    "pages_components": "WatchlistLibrary",
+    "api_routes": "`POST /api/watchlists`, `POST /api/watchlists/:id/refresh`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 17,
+    "title": "Building a momentum breakout strategy",
+    "pages_components": "StrategyCreator (Core + Signals tabs)",
+    "api_routes": "`POST /api/strategies`, `POST /api/strategies/validate`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 18,
+    "title": "Building a mean reversion strategy",
+    "pages_components": "StrategyCreator",
+    "api_routes": "`POST /api/strategies`, `POST /api/strategies/validate`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 19,
+    "title": "Using the condition builder for complex entry logic",
+    "pages_components": "StrategyBuilder/ConditionBuilder",
+    "api_routes": "`POST /api/strategies/validate`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 20,
+    "title": "Setting an ATR-based stop loss",
+    "pages_components": "StrategyCreator (Core tab)",
+    "api_routes": "`POST /api/strategies/validate`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 21,
+    "title": "Defining scale-out targets",
+    "pages_components": "StrategyCreator (Core tab)",
+    "api_routes": "`POST /api/strategies/validate`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 22,
+    "title": "Creating a new strategy version",
+    "pages_components": "StrategyDetails",
+    "api_routes": "`POST /api/strategies/:id/versions`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 23,
+    "title": "Comparing two strategy versions",
+    "pages_components": "StrategyDetails, VersionDiffPanel",
+    "api_routes": "`GET /api/strategies/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 24,
+    "title": "Exporting a strategy",
+    "pages_components": "StrategyDetails",
+    "api_routes": "`GET /api/strategies/:id/export`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 25,
+    "title": "Deprecating an outdated strategy",
+    "pages_components": "StrategyDetails",
+    "api_routes": "`POST /api/strategies/:id/deprecate`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 26,
+    "title": "Validating a strategy with the validator",
+    "pages_components": "StrategyCreator",
+    "api_routes": "`POST /api/strategies/validate`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 27,
+    "title": "Tagging strategies for organization",
+    "pages_components": "Strategies list, StrategyDetails",
+    "api_routes": "`PUT /api/strategies/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 28,
+    "title": "Launching a basic backtest",
+    "pages_components": "BacktestLauncher",
+    "api_routes": "`POST /api/backtests/launch`",
+    "status": "covered",
+    "raw_status": "[x]"
+  },
+  {
+    "id": 29,
+    "title": "Backtesting with yFinance data",
+    "pages_components": "BacktestLauncher",
+    "api_routes": "`POST /api/backtests/launch` (provider=yfinance)",
+    "status": "covered",
+    "raw_status": "[x]"
+  },
+  {
+    "id": 30,
+    "title": "Running a walk-forward backtest",
+    "pages_components": "BacktestLauncher (walk-forward config)",
+    "api_routes": "`POST /api/backtests/launch` (walk_forward params)",
+    "status": "partial",
+    "raw_status": "[~]"
+  },
+  {
+    "id": 31,
+    "title": "Cancelling a long-running backtest",
+    "pages_components": "RunHistory",
+    "api_routes": "`POST /api/backtests/:id/cancel`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 32,
+    "title": "Reviewing a completed backtest in detail",
+    "pages_components": "RunDetails",
+    "api_routes": "`GET /api/backtests/:id`, `GET /api/backtests/:id/trades`",
+    "status": "covered",
+    "raw_status": "[x]"
+  },
+  {
+    "id": 33,
+    "title": "Reading the monthly heatmap",
+    "pages_components": "RunDetails (MonthlyHeatmap)",
+    "api_routes": "`GET /api/backtests/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 34,
+    "title": "Deleting a failed backtest run",
+    "pages_components": "RunHistory",
+    "api_routes": "`DELETE /api/backtests/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 35,
+    "title": "Running CPCV validation",
+    "pages_components": "BacktestLauncher (CPCV config)",
+    "api_routes": "`POST /api/backtests/launch` (cpcv params)",
+    "status": "partial",
+    "raw_status": "[~]"
+  },
+  {
+    "id": 36,
+    "title": "Comparing two backtest runs",
+    "pages_components": "OptimizationLab (Comparison tab)",
+    "api_routes": "`GET /api/backtests/:id` (x2)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 37,
+    "title": "Promoting a backtest run to paper deployment",
+    "pages_components": "RunDetails",
+    "api_routes": "`POST /api/deployments/promote-to-paper`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 38,
+    "title": "Checking AI provider recommendation",
+    "pages_components": "BacktestLauncher",
+    "api_routes": "`POST /api/backtests/recommend-provider`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 39,
+    "title": "Running a live simulation",
+    "pages_components": "SimulationLab",
+    "api_routes": "`POST /api/simulations/create`, `WS /api/simulations/ws/:sid`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 40,
+    "title": "Stepping through trades manually",
+    "pages_components": "SimulationLab (Step control)",
+    "api_routes": "`POST /api/simulations/:sid/step`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 41,
+    "title": "Reviewing simulation metrics panel",
+    "pages_components": "SimulationLab (Metrics panel)",
+    "api_routes": "`WS /api/simulations/ws/:sid`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 42,
+    "title": "Resetting and replaying with different parameters",
+    "pages_components": "SimulationLab (Reset button)",
+    "api_routes": "`POST /api/simulations/:sid/reset`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 43,
+    "title": "Using max speed for a quick pass",
+    "pages_components": "SimulationLab (speed control)",
+    "api_routes": "`POST /api/simulations/:sid/step` (rapid calls)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 44,
+    "title": "Watching trade markers on candlestick chart",
+    "pages_components": "SimulationLab (CandlestickLayer)",
+    "api_routes": "`WS /api/simulations/ws/:sid`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 45,
+    "title": "Running a parameter sweep",
+    "pages_components": "OptimizationLab (Results tab), BacktestLauncher",
+    "api_routes": "`POST /api/backtests/launch` (x6), `GET /api/backtests`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 46,
+    "title": "Analyzing walk-forward fold performance",
+    "pages_components": "OptimizationLab (Walk-Forward tab)",
+    "api_routes": "`GET /api/backtests/:id` (walk_forward_summary)",
+    "status": "partial",
+    "raw_status": "[~]"
+  },
+  {
+    "id": 47,
+    "title": "Detecting overfit strategies",
+    "pages_components": "OptimizationLab (Results tab, overfit_flag)",
+    "api_routes": "`GET /api/backtests`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 48,
+    "title": "Checking signal independence",
+    "pages_components": "OptimizationLab (Independence tab)",
+    "api_routes": "`POST /api/ml/signal-independence-check`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 49,
+    "title": "Promoting best run to paper from Optimization Lab",
+    "pages_components": "OptimizationLab (Stress tab)",
+    "api_routes": "`POST /api/deployments/promote-to-paper`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 50,
+    "title": "Viewing the parameter heatmap",
+    "pages_components": "OptimizationLab (Param Search tab)",
+    "api_routes": "`GET /api/backtests`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 51,
+    "title": "Comparing IS vs. OOS returns",
+    "pages_components": "OptimizationLab (Comparison tab)",
+    "api_routes": "`GET /api/backtests/:id` (x4)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 52,
+    "title": "Creating a day-trading governor",
+    "pages_components": "StrategyGovernors",
+    "api_routes": "`POST /api/strategy-governors`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 53,
+    "title": "Setting earnings blackout",
+    "pages_components": "StrategyGovernors (edit form)",
+    "api_routes": "`PUT /api/strategy-governors/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 54,
+    "title": "Configuring regime filters",
+    "pages_components": "StrategyGovernors (edit form)",
+    "api_routes": "`PUT /api/strategy-governors/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 55,
+    "title": "Cloning a governor for a swing variant",
+    "pages_components": "StrategyGovernors",
+    "api_routes": "`POST /api/strategy-governors` (copy flow)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 56,
+    "title": "Marking a governor as golden",
+    "pages_components": "StrategyGovernors",
+    "api_routes": "`POST /api/strategy-governors/:id/mark-golden`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 57,
+    "title": "Creating a conservative risk profile",
+    "pages_components": "RiskProfiles",
+    "api_routes": "`POST /api/risk-profiles`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 58,
+    "title": "Creating an aggressive profile for a sub-account",
+    "pages_components": "RiskProfiles",
+    "api_routes": "`POST /api/risk-profiles`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 59,
+    "title": "Cloning and adjusting a risk profile",
+    "pages_components": "RiskProfiles",
+    "api_routes": "`POST /api/risk-profiles/:id/clone`, `PUT /api/risk-profiles/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 60,
+    "title": "Reviewing which programs use a risk profile",
+    "pages_components": "RiskProfiles (detail view)",
+    "api_routes": "`GET /api/risk-profiles/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 61,
+    "title": "Generating a risk profile from backtest metrics",
+    "pages_components": "OptimizationLab, RiskProfiles",
+    "api_routes": "`POST /api/optimizations/:id/generate-weights`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 62,
+    "title": "Creating a bracket order execution style",
+    "pages_components": "ExecutionStyles",
+    "api_routes": "`POST /api/execution-styles`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 63,
+    "title": "Creating a trailing stop style",
+    "pages_components": "ExecutionStyles",
+    "api_routes": "`POST /api/execution-styles`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 64,
+    "title": "Setting scale-out tiers",
+    "pages_components": "ExecutionStyles (edit form)",
+    "api_routes": "`PUT /api/execution-styles/:id`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 65,
+    "title": "Configuring a market-on-open entry",
+    "pages_components": "ExecutionStyles",
+    "api_routes": "`POST /api/execution-styles`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 66,
+    "title": "Cloning an execution style for a faster variant",
+    "pages_components": "ExecutionStyles",
+    "api_routes": "`POST /api/execution-styles/:id/clone`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 67,
+    "title": "Composing a complete trading program",
+    "pages_components": "TradingPrograms (ProgramSwimlane)",
+    "api_routes": "`POST /api/programs`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 68,
+    "title": "Freezing a program before paper deployment",
+    "pages_components": "TradingPrograms",
+    "api_routes": "`POST /api/programs/:id/freeze`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 69,
+    "title": "Allocating a program to a paper account",
+    "pages_components": "TradingPrograms",
+    "api_routes": "`POST /api/programs/:id/allocate`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 70,
+    "title": "Reviewing the promotion eligibility checklist",
+    "pages_components": "TradingPrograms",
+    "api_routes": "`GET /api/programs/:id/allocations/:alloc_id/promotion-review`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 71,
+    "title": "Executing paper-to-live promotion",
+    "pages_components": "TradingPrograms",
+    "api_routes": "`POST /api/programs/:id/allocations/:alloc_id/execute-promotion`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 72,
+    "title": "Deprecating an old program version",
+    "pages_components": "TradingPrograms",
+    "api_routes": "`PUT /api/programs/:id` (status=deprecated)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 73,
+    "title": "Hot-adding a new program to a running governor",
+    "pages_components": "AccountGovernor",
+    "api_routes": "`POST /api/governor/account/:account_id/hot-add-program`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 74,
+    "title": "Monitoring the governor event log",
+    "pages_components": "AccountGovernor (event log)",
+    "api_routes": "`GET /api/governor/account/:account_id/events`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 75,
+    "title": "Halting the governor in an emergency",
+    "pages_components": "AccountGovernor",
+    "api_routes": "`POST /api/governor/account/:account_id/halt`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 76,
+    "title": "Resuming after a halt",
+    "pages_components": "AccountGovernor",
+    "api_routes": "`POST /api/governor/account/:account_id/resume`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 77,
+    "title": "Reviewing governor metrics by program",
+    "pages_components": "AccountGovernor (metrics panel)",
+    "api_routes": "`GET /api/governor/account/:account_id/metrics`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 78,
+    "title": "Resolving a daily loss lockout",
+    "pages_components": "AccountGovernor (event log)",
+    "api_routes": "`GET /api/governor/account/:account_id/events` (daily_loss_lockout)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 79,
+    "title": "Attaching a new risk profile to a running governor",
+    "pages_components": "AccountGovernor",
+    "api_routes": "`POST /api/governor/account/:account_id/risk-profile/attach`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 80,
+    "title": "Checking the correlation matrix",
+    "pages_components": "AccountGovernor (metrics panel)",
+    "api_routes": "`GET /api/governor/account/:account_id/metrics` (correlation_matrix)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 81,
+    "title": "Starting a paper deployment",
+    "pages_components": "DeploymentManager",
+    "api_routes": "`POST /api/deployments/:id/start`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 82,
+    "title": "Monitoring real-time positions in LiveMonitor",
+    "pages_components": "LiveMonitor (positions table)",
+    "api_routes": "`GET /api/monitor/runs/:id`, `WS /api/monitor/ws`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 83,
+    "title": "Manually closing a position from LiveMonitor",
+    "pages_components": "LiveMonitor",
+    "api_routes": "`POST /api/monitor/runs/:id/close-position`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 84,
+    "title": "Using Close All for emergency liquidation",
+    "pages_components": "LiveMonitor",
+    "api_routes": "`POST /api/monitor/runs/:id/close-all`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 85,
+    "title": "Pausing a deployment mid-day",
+    "pages_components": "DeploymentManager",
+    "api_routes": "`POST /api/deployments/:id/pause`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 86,
+    "title": "Reviewing the full trade history for a deployment",
+    "pages_components": "DeploymentManager (Trades panel)",
+    "api_routes": "`GET /api/deployments/:id/trades`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 87,
+    "title": "Stopping and archiving a deployment",
+    "pages_components": "DeploymentManager",
+    "api_routes": "`POST /api/deployments/:id/stop`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 88,
+    "title": "Promoting a deployment from the Stress tab",
+    "pages_components": "OptimizationLab (Stress tab)",
+    "api_routes": "`POST /api/deployments/promote-to-live`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 89,
+    "title": "Fetching historical data for a new symbol",
+    "pages_components": "DataManager (wizard)",
+    "api_routes": "`POST /api/data/fetch`, `GET /api/data/inventory`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 90,
+    "title": "Batch-fetching data for a sector",
+    "pages_components": "DataManager (batch fetch)",
+    "api_routes": "`POST /api/data/batch-fetch`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 91,
+    "title": "Exploring indicators in ChartLab",
+    "pages_components": "ChartLab",
+    "api_routes": "`GET /api/data/inventory`, `GET /api/data/inventory/:symbol/:timeframe`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 92,
+    "title": "Deleting stale cached data",
+    "pages_components": "DataManager (inventory)",
+    "api_routes": "`DELETE /api/data/inventory/:symbol/:timeframe`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 93,
+    "title": "Visually validating a strategy signal in ChartLab",
+    "pages_components": "ChartLab (indicator overlays)",
+    "api_routes": "`GET /api/data/inventory/:symbol/:timeframe`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 94,
+    "title": "Using the global kill switch",
+    "pages_components": "KillSwitch component",
+    "api_routes": "`POST /api/control/kill`, `GET /api/control/status`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 95,
+    "title": "Checking PDT status on an account",
+    "pages_components": "AccountMonitor (account stats)",
+    "api_routes": "`GET /api/accounts/:id/snapshot`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 96,
+    "title": "Running an account-governor-review before merge",
+    "pages_components": "`.claude/skills/account-governor-review`",
+    "api_routes": "N/A (skill invocation)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 97,
+    "title": "Enforcing Alpaca native bracket orders",
+    "pages_components": "Code review / architecture guard",
+    "api_routes": "N/A (architecture enforcement)",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 98,
+    "title": "Reviewing the performance summary dashboard",
+    "pages_components": "Dashboard",
+    "api_routes": "`GET /api/bi/performance-summary`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 99,
+    "title": "Analyzing drawdown periods",
+    "pages_components": "BI drawdown view",
+    "api_routes": "`GET /api/bi/drawdown-periods`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  },
+  {
+    "id": 100,
+    "title": "Running a Monte Carlo robustness check",
+    "pages_components": "ML endpoint / pre-deployment flow",
+    "api_routes": "`POST /api/ml/monte-carlo`",
+    "status": "not_covered",
+    "raw_status": "[ ]"
+  }
+]

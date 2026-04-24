@@ -8,7 +8,7 @@ services:
     container_name: ultratrader-backend
     restart: unless-stopped
     environment:
-      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///./ultratrader.db}
+      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:////app/ultratrader.db}
       - DEBUG=${DEBUG:-false}
       - PLATFORM_MODE=${PLATFORM_MODE:-backtest}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}

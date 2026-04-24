@@ -9,12 +9,13 @@ import pandas as pd
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.features.source_contracts import resolve_requested_provider
 from app.models.market_metadata import MarketMetadataSnapshot, MarketMetadataSymbol
 from app.services.market_data_service import fetch_market_data
 
 
 def _annualized_realized_vol(close: pd.Series, window: int = 30) -> float | None:
-    returns = close.pct_change().dropna()
+    returns = close.pct_change(fill_method=None).dropna()
     if len(returns) < max(window, 2):
         return None
     sample = returns.tail(window)
@@ -34,7 +35,7 @@ def _pairwise_correlation_summary(price_frames: dict[str, pd.DataFrame], window:
         return {}
 
     close_df = pd.DataFrame(close_map).sort_index()
-    returns_df = close_df.pct_change().dropna().tail(window)
+    returns_df = close_df.pct_change(fill_method=None).dropna().tail(window)
     if returns_df.empty or returns_df.shape[1] == 1:
         return {symbol: None for symbol in close_map}
 
@@ -89,7 +90,7 @@ async def create_market_metadata_snapshot(
     *,
     symbols: list[str],
     as_of_date: str,
-    provider: str = "yfinance",
+    provider: str = "auto",
     api_key: str = "",
     secret_key: str = "",
     sector_overrides: dict[str, str] | None = None,
@@ -105,6 +106,11 @@ async def create_market_metadata_snapshot(
 
     sector_overrides = {k.upper(): v for k, v in (sector_overrides or {}).items()}
     benchmark_overrides = {k.upper(): v for k, v in (benchmark_overrides or {}).items()}
+    selected_provider = resolve_requested_provider(
+        requested_provider=provider,
+        runtime_mode="research",
+        alpaca_credentials_configured=bool(api_key and secret_key),
+    )
 
     price_frames: dict[str, pd.DataFrame] = {}
     for symbol in normalized_symbols:
@@ -113,7 +119,7 @@ async def create_market_metadata_snapshot(
             timeframe="1d",
             start=start_ts,
             end=end_str,
-            provider=provider,
+            provider=selected_provider,
             adjusted=True,
             force_download=False,
             api_key=api_key,
@@ -128,6 +134,10 @@ async def create_market_metadata_snapshot(
     snapshot = MarketMetadataSnapshot(
         metadata_version_id=metadata_version_id,
         as_of_date=end_str,
+        provider_requested=(provider or "auto").strip().lower(),
+        provider_used=selected_provider,
+        fetch_start_date=start_ts,
+        fetch_end_date=end_str,
         symbol_count=len(normalized_symbols),
         correlation_window_days=60,
     )
@@ -161,6 +171,10 @@ def serialize_snapshot(snapshot: MarketMetadataSnapshot) -> dict[str, Any]:
         "id": snapshot.id,
         "metadata_version_id": snapshot.metadata_version_id,
         "as_of_date": snapshot.as_of_date,
+        "provider_requested": snapshot.provider_requested,
+        "provider_used": snapshot.provider_used,
+        "fetch_start_date": snapshot.fetch_start_date,
+        "fetch_end_date": snapshot.fetch_end_date,
         "symbol_count": snapshot.symbol_count,
         "correlation_window_days": snapshot.correlation_window_days,
         "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,

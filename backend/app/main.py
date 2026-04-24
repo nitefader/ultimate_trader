@@ -31,6 +31,11 @@ from app.api.routes.services import router as services_router
 from app.api.routes.programs import router as programs_router
 from app.api.routes.watchlists import router as watchlists_router
 from app.api.routes.simulations import router as simulations_router
+from app.api.routes.risk_profiles import router as risk_profiles_router
+from app.api.routes.strategy_governors import router as strategy_controls_router
+from app.api.routes.execution_styles import router as execution_styles_router
+from app.api.routes.governor import router as governor_router
+from app.api.routes.admin import router as admin_router
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -117,9 +122,88 @@ async def _run_schema_migrations() -> None:
         ("market_metadata_symbols", "adv_usd_30d", "REAL"),
         ("market_metadata_symbols", "spread_proxy_bps_30d", "REAL"),
         ("market_metadata_symbols", "regime_tag", "TEXT DEFAULT 'unknown'"),
+        ("market_metadata_snapshots", "provider_requested", "TEXT DEFAULT 'auto'"),
+        ("market_metadata_snapshots", "provider_used", "TEXT DEFAULT 'yfinance'"),
+        ("market_metadata_snapshots", "fetch_start_date", "TEXT"),
+        ("market_metadata_snapshots", "fetch_end_date", "TEXT"),
+        # RiskProfile FK on accounts
+        ("accounts", "risk_profile_id", "TEXT"),
+        # Governor fields on deployments
+        ("deployments", "governor_label", "TEXT"),
+        ("deployments", "governor_status", "TEXT DEFAULT 'active'"),
+        ("deployments", "risk_profile_id", "TEXT"),
+        ("deployments", "poll_config", "TEXT DEFAULT '{}'"),
+        ("deployments", "collision_state_snapshot", "TEXT DEFAULT '{}'"),
+        ("deployments", "correlation_data_refreshed_at", "DATETIME"),
+        ("deployments", "session_realized_pnl", "REAL DEFAULT 0.0"),
+        ("deployments", "daily_loss_lockout_triggered", "INTEGER DEFAULT 0"),
+        ("deployments", "halt_trigger", "TEXT"),
+        ("deployments", "halt_at", "DATETIME"),
+        ("deployments", "last_governor_tick_at", "DATETIME"),
+        # TradingProgram universe fields
+        ("trading_programs", "universe_mode", "TEXT DEFAULT 'snapshot'"),
+        ("trading_programs", "watchlist_subscriptions", "TEXT DEFAULT '[]'"),
+        ("trading_programs", "watchlist_combination_rule", "TEXT DEFAULT 'union'"),
+        ("trading_programs", "live_universe_deny_list", "TEXT DEFAULT '[]'"),
+        ("trading_programs", "live_universe_top_n", "INTEGER"),
+        ("trading_programs", "live_universe_resolved_symbols", "TEXT DEFAULT '[]'"),
+        ("trading_programs", "live_universe_resolved_at", "DATETIME"),
+        ("trading_programs", "universe_poll_override_seconds", "INTEGER"),
+        # AccountAllocation governor link
+        ("account_allocations", "governor_id", "TEXT"),
+        # Golden templates for watchlists and risk profiles
+        ("watchlists", "is_golden", "BOOLEAN DEFAULT 0"),
+        ("watchlists", "tags", "TEXT DEFAULT '[]'"),
+        ("risk_profiles", "is_golden", "BOOLEAN DEFAULT 0"),
+        ("risk_profiles", "tags", "TEXT DEFAULT '[]'"),
+        # AI default flag on data_services
+        ("data_services", "is_default_ai", "BOOLEAN DEFAULT 0"),
+        # Five-component architecture — new FK columns on trading_programs
+        ("trading_programs", "strategy_governor_id", "TEXT"),
+        ("trading_programs", "execution_style_id",   "TEXT"),
+        ("trading_programs", "risk_profile_id",       "TEXT"),
+        ("trading_programs", "notes", "TEXT"),
+        # Execution style — persist breakeven-stop flag and stop progression config
+        ("execution_styles", "move_stop_to_be_after_t1", "BOOLEAN DEFAULT 0"),
+        ("execution_styles", "stop_progression_targets", "JSON DEFAULT '[]'"),
+        ("execution_styles", "breakeven_atr_pad", "REAL DEFAULT 0.1"),
+        # Execution style v2 — breakeven trigger level + final runner config
+        ("execution_styles", "breakeven_trigger_level", "INTEGER"),
+        ("execution_styles", "breakeven_atr_offset", "REAL DEFAULT 0.0"),
+        ("execution_styles", "final_runner_exit_mode", "TEXT DEFAULT 'internal'"),
+        ("execution_styles", "final_runner_trail_type", "TEXT"),
+        ("execution_styles", "final_runner_trail_value", "REAL"),
+        ("execution_styles", "final_runner_time_in_force", "TEXT"),
+        # Execution style v3 — ATR source override
+        ("execution_styles", "atr_source", "TEXT DEFAULT 'strategy'"),
+        ("execution_styles", "atr_length", "INTEGER"),
+        ("execution_styles", "atr_timeframe", "TEXT"),
+        # DeploymentTrade v2 — stop ownership tracking
+        ("deployment_trades", "stop_control", "TEXT DEFAULT 'internal'"),
+        ("deployment_trades", "alpaca_stop_order_id", "TEXT"),
     ]
 
     async with engine.begin() as conn:
+        # ── Table renames (idempotent) ────────────────────────────────────────
+        table_renames = [
+            # Canonical rename: strategy_governors → strategy_controls (2026-04-22)
+            ("strategy_governors", "strategy_controls"),
+        ]
+        for old_name, new_name in table_renames:
+            try:
+                # Check if old table exists before renaming
+                result = await conn.execute(
+                    text(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{old_name}'")
+                )
+                if result.fetchone():
+                    await conn.execute(text(f"ALTER TABLE {old_name} RENAME TO {new_name}"))
+                    logger.info(f"Migration: renamed table {old_name} → {new_name}")
+                else:
+                    logger.debug(f"Migration skipped: table {old_name} does not exist (already renamed or never created)")
+            except Exception as exc:
+                logger.debug(f"Migration skipped (table rename {old_name} → {new_name}): {exc}")
+
+        # ── Column additions (idempotent) ─────────────────────────────────────
         for table, column, col_type in migrations:
             try:
                 await conn.execute(
@@ -130,6 +214,19 @@ async def _run_schema_migrations() -> None:
                 # Column already exists — this is expected on subsequent startups
                 logger.debug(f"Migration skipped (likely already exists): {table}.{column} - {exc}")
 
+        # ── Data migrations (idempotent) ──────────────────────────────────────
+        data_migrations = [
+            # Migrate move_stop_to_be_after_t1 bool → breakeven_trigger_level int
+            "UPDATE execution_styles SET breakeven_trigger_level = 1 WHERE move_stop_to_be_after_t1 = 1 AND breakeven_trigger_level IS NULL",
+            # Carry over breakeven_atr_pad → breakeven_atr_offset
+            "UPDATE execution_styles SET breakeven_atr_offset = breakeven_atr_pad WHERE (breakeven_atr_offset IS NULL OR breakeven_atr_offset = 0.0) AND breakeven_atr_pad IS NOT NULL AND breakeven_atr_pad != 0.0",
+        ]
+        for sql in data_migrations:
+            try:
+                await conn.execute(text(sql))
+            except Exception as exc:
+                logger.debug(f"Data migration skipped: {exc}")
+
 
 async def lifespan(app: FastAPI):
     # Startup
@@ -138,35 +235,89 @@ async def lifespan(app: FastAPI):
     await seed_default_data()
     await _restore_kill_switch_state()
     from app.services.watchlist_scheduler import start_watchlist_scheduler
+    from app.services.account_governor_loop import start_account_governor_loop, stop_account_governor_loop
+    from app.services.alpaca_account_stream import start_alpaca_account_stream
     start_watchlist_scheduler()
+    start_account_governor_loop()
+    # Start Alpaca account event stream (fills/orders → ws_manager.broadcast)
+    # Runs as a background task; auto-reconnects. Silently skipped if no credentials configured.
+    import asyncio as _asyncio
+    _alpaca_stream_task = _asyncio.create_task(start_alpaca_account_stream())
     yield
     # Shutdown (graceful)
     from app.services.watchlist_scheduler import stop_watchlist_scheduler
     stop_watchlist_scheduler()
+    stop_account_governor_loop()
+    _alpaca_stream_task.cancel()
+    try:
+        await _alpaca_stream_task
+    except _asyncio.CancelledError:
+        pass
 
 
 async def _restore_kill_switch_state():
-    """Reload halted accounts from DB into the in-memory kill switch on startup."""
+    """
+    Reload kill/pause state from DB into the in-memory kill switch on startup.
+
+    Order:
+      a. Global kill — from most recent KillSwitchEvent with scope="global"
+      b. Account kills — from Account.is_killed (already implemented)
+      c. Deployment pauses — from Deployment.status="paused"
+
+    No order submission can occur before this function completes.
+    """
     from app.database import AsyncSessionLocal
     from app.models.account import Account
+    from app.models.deployment import Deployment
+    from app.models.kill_switch import KillSwitchEvent
     from app.core.kill_switch import get_kill_switch
     from sqlalchemy import select
+
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Account).where(Account.is_killed == True))
-        halted = result.scalars().all()
         ks = get_kill_switch()
-        for account in halted:
+
+        # a. Global kill — find last global event; apply if it was a kill with no subsequent resume
+        global_result = await db.execute(
+            select(KillSwitchEvent)
+            .where(KillSwitchEvent.scope == "global")
+            .order_by(KillSwitchEvent.triggered_at.desc())
+            .limit(1)
+        )
+        last_global = global_result.scalar_one_or_none()
+        if last_global and last_global.action == "kill":
+            ks.kill_all(reason=last_global.reason or "restored_on_startup", triggered_by="system")
+            logger.info("Kill switch: global kill restored from DB on startup (reason=%s)", last_global.reason)
+        elif last_global and last_global.action == "resume":
+            # Explicitly ensure clean state after a resume
+            if ks.is_globally_killed:
+                ks.unkill_all(triggered_by="system")
+
+        # b. Account kills
+        acct_result = await db.execute(select(Account).where(Account.is_killed == True))  # noqa: E712
+        halted_accounts = acct_result.scalars().all()
+        for account in halted_accounts:
             ks.kill_account(account.id, account.kill_reason or "restored_on_startup", triggered_by="system")
-        if halted:
-            logger.info("Kill switch: restored %d halted account(s) from DB on startup", len(halted))
+        if halted_accounts:
+            logger.info("Kill switch: restored %d halted account(s) from DB on startup", len(halted_accounts))
+
+        # c. Deployment pauses
+        dep_result = await db.execute(
+            select(Deployment).where(Deployment.status == "paused")
+        )
+        paused_deployments = dep_result.scalars().all()
+        for dep in paused_deployments:
+            ks.pause_deployment(dep.id, triggered_by="system")
+        if paused_deployments:
+            logger.info("Kill switch: restored %d paused deployment(s) from DB on startup", len(paused_deployments))
 
 
 async def seed_default_data():
-    """Create default paper account, seed sample strategies, and seed watchlists on first run."""
+    """Create default paper account, seed sample strategies, watchlists, and golden templates on first run."""
     from app.database import AsyncSessionLocal
     from app.models.account import Account
     from app.models.strategy import Strategy, StrategyVersion
     from app.models.watchlist import Watchlist, WatchlistMembership
+    from app.models.risk_profile import RiskProfile
     from sqlalchemy import select
     import uuid
     import os
@@ -299,6 +450,273 @@ async def seed_default_data():
 
             await db.commit()
 
+        # ── Golden watchlist templates ────────────────────────────────────────
+        import datetime as _dt
+        _now = _dt.datetime.now(_dt.timezone.utc)
+
+        _golden_watchlists = [
+            {
+                "name": "Mag-7 + AI Leaders",
+                "tags": ["large_cap", "momentum"],
+                "symbols": ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", "PLTR", "ARM", "AVGO"],
+            },
+            {
+                "name": "Liquid Mid-Cap Movers",
+                "tags": ["day_trading", "volatile"],
+                "symbols": ["COIN", "MARA", "RIOT", "SMCI", "HOOD", "RBLX", "SOFI", "UPST", "AFRM", "IONQ"],
+            },
+            {
+                "name": "Sector ETFs",
+                "tags": ["swing", "diversified"],
+                "symbols": ["XLK", "XLF", "XLE", "XLV", "XLU", "XLI", "XLRE", "XLC", "XLP", "XLY"],
+            },
+            {
+                "name": "SPY 500 Core",
+                "tags": ["position", "macro"],
+                "symbols": ["SPY", "QQQ", "IWM", "DIA", "VTI", "GLD", "SLV", "TLT", "HYG", "USO"],
+            },
+        ]
+        result = await db.execute(select(Watchlist.name).where(Watchlist.is_golden == True))  # noqa: E712
+        existing_golden_wl = {row[0] for row in result.all()}
+        for spec in _golden_watchlists:
+            if spec["name"] in existing_golden_wl:
+                continue
+            wl = Watchlist(
+                id=str(uuid.uuid4()),
+                name=spec["name"],
+                watchlist_type="manual",
+                is_golden=True,
+                tags=spec["tags"],
+            )
+            db.add(wl)
+            await db.flush()
+            for sym in spec["symbols"]:
+                db.add(WatchlistMembership(
+                    id=str(uuid.uuid4()),
+                    watchlist_id=wl.id,
+                    symbol=sym,
+                    state="active",
+                    resolved_at=_now,
+                    active_since=_now,
+                ))
+            logger.info(f"Seeded golden watchlist: {spec['name']}")
+        await db.commit()
+
+        # ── Golden risk profile templates ─────────────────────────────────────
+        _golden_profiles = [
+            {
+                "name": "Day Trader — Conservative",
+                "description": "Tight intraday risk: max 3 long, 2% daily loss, 5% drawdown lockout.",
+                "tags": ["day_trading"],
+                "max_open_positions_long": 3, "max_open_positions_short": 1,
+                "max_daily_loss_pct": 0.02, "max_drawdown_lockout_pct": 0.05, "max_leverage": 1.0,
+                "max_portfolio_heat_long": 0.04, "max_portfolio_heat_short": 0.02,
+                "max_position_size_pct_long": 0.08, "max_position_size_pct_short": 0.05,
+                "max_correlated_exposure_long": 0.8, "max_correlated_exposure_short": 0.5,
+            },
+            {
+                "name": "Swing Trader — Standard",
+                "description": "Balanced swing: max 5 long / 2 short, 3% daily loss, 10% drawdown lockout.",
+                "tags": ["swing"],
+                "max_open_positions_long": 5, "max_open_positions_short": 2,
+                "max_daily_loss_pct": 0.03, "max_drawdown_lockout_pct": 0.10, "max_leverage": 1.5,
+                "max_portfolio_heat_long": 0.06, "max_portfolio_heat_short": 0.04,
+                "max_position_size_pct_long": 0.10, "max_position_size_pct_short": 0.08,
+                "max_correlated_exposure_long": 1.0, "max_correlated_exposure_short": 0.8,
+            },
+            {
+                "name": "Swing Trader — Aggressive",
+                "description": "Higher exposure swing: max 8 long / 3 short, 5% daily loss, 15% drawdown lockout.",
+                "tags": ["swing"],
+                "max_open_positions_long": 8, "max_open_positions_short": 3,
+                "max_daily_loss_pct": 0.05, "max_drawdown_lockout_pct": 0.15, "max_leverage": 1.5,
+                "max_portfolio_heat_long": 0.08, "max_portfolio_heat_short": 0.05,
+                "max_position_size_pct_long": 0.12, "max_position_size_pct_short": 0.10,
+                "max_correlated_exposure_long": 1.2, "max_correlated_exposure_short": 0.9,
+            },
+            {
+                "name": "Position Trader",
+                "description": "Long-horizon: max 10 long / 3 short, 8% daily loss, 20% drawdown lockout.",
+                "tags": ["position"],
+                "max_open_positions_long": 10, "max_open_positions_short": 3,
+                "max_daily_loss_pct": 0.08, "max_drawdown_lockout_pct": 0.20, "max_leverage": 1.0,
+                "max_portfolio_heat_long": 0.10, "max_portfolio_heat_short": 0.06,
+                "max_position_size_pct_long": 0.15, "max_position_size_pct_short": 0.10,
+                "max_correlated_exposure_long": 1.5, "max_correlated_exposure_short": 1.0,
+            },
+        ]
+        from app.models.strategy_governor import StrategyControls
+        from app.models.execution_style import ExecutionStyle
+
+        # ── Golden strategy controls templates ────────────────────────────────
+        _golden_controls = [
+            {
+                "name": "Day Trade NYSE 5m",
+                "description": "Intraday NYSE session — two entry windows, flat by 15:45.",
+                "tags": ["day_trading"],
+                "timeframe": "5m",
+                "duration_mode": "day",
+                "market_hours": {
+                    "entry_windows": [
+                        {"start": "09:35", "end": "11:00"},
+                        {"start": "13:30", "end": "15:00"},
+                    ],
+                    "force_flat_by": "15:45",
+                    "timezone": "America/New_York",
+                    "skip_first_bar": True,
+                },
+                "pdt": {
+                    "enforce": True,
+                    "max_day_trades_per_window": 3,
+                    "window_sessions": 5,
+                    "equity_threshold": 25000,
+                    "on_limit_reached": "pause_entries",
+                },
+            },
+            {
+                "name": "Swing Daily 1d",
+                "description": "Standard swing-trade controls — daily bars, no session restrictions.",
+                "tags": ["swing"],
+                "timeframe": "1d",
+                "duration_mode": "swing",
+                "market_hours": {},
+            },
+            {
+                "name": "Position Weekly 1d",
+                "description": "Long-horizon controls — daily bars, earnings blackout, weekend positions allowed.",
+                "tags": ["position"],
+                "timeframe": "1d",
+                "duration_mode": "position",
+                "earnings_blackout_enabled": True,
+                "gap_risk": {
+                    "earnings_blackout": True,
+                    "earnings_blackout_days_before": 1,
+                    "weekend_position_allowed": True,
+                },
+            },
+        ]
+        result = await db.execute(select(StrategyControls.name).where(StrategyControls.is_golden == True))  # noqa: E712
+        existing_golden_gov = {row[0] for row in result.all()}
+        for spec in _golden_controls:
+            if spec["name"] in existing_golden_gov:
+                continue
+            db.add(StrategyControls(
+                id=str(uuid.uuid4()),
+                name=spec["name"],
+                description=spec.get("description"),
+                is_golden=True,
+                tags=spec.get("tags", []),
+                timeframe=spec.get("timeframe", "1d"),
+                duration_mode=spec.get("duration_mode", "swing"),
+                market_hours=spec.get("market_hours", {}),
+                pdt=spec.get("pdt", {}),
+                gap_risk=spec.get("gap_risk", {}),
+                regime_filter=spec.get("regime_filter", {}),
+                cooldown_rules=spec.get("cooldown_rules", []),
+                earnings_blackout_enabled=spec.get("earnings_blackout_enabled", False),
+                source_type="manual",
+            ))
+            logger.info(f"Seeded golden strategy controls: {spec['name']}")
+        await db.commit()
+
+        # ── Golden execution style templates ──────────────────────────────────
+        _golden_styles = [
+            {
+                "name": "Bracket Market Entry",
+                "description": "Market entry + bracket order (stop + limit TP). Default fill assumption: next open.",
+                "tags": ["standard"],
+                "entry_order_type": "market",
+                "bracket_mode": "bracket",
+                "stop_order_type": "market",
+                "take_profit_order_type": "limit",
+                "fill_model": "next_open",
+            },
+            {
+                "name": "Limit Pullback Entry",
+                "description": "Limit entry 0.5 ATR below trigger — cancel after 3 bars if unfilled.",
+                "tags": ["limit"],
+                "entry_order_type": "limit",
+                "bracket_mode": "bracket",
+                "entry_limit_offset_method": "atr",
+                "entry_limit_offset_value": 0.5,
+                "entry_cancel_after_bars": 3,
+            },
+            {
+                "name": "Stop-Limit Breakout",
+                "description": "Stop-limit entry for breakout confirmation — 0.1% offset above trigger.",
+                "tags": ["breakout"],
+                "entry_order_type": "stop_limit",
+                "bracket_mode": "bracket",
+                "entry_limit_offset_method": "pct",
+                "entry_limit_offset_value": 0.1,
+            },
+            {
+                "name": "Trailing Stop Exit",
+                "description": "Market entry, trailing stop exit at 2% trail — no fixed TP.",
+                "tags": ["trailing"],
+                "entry_order_type": "market",
+                "bracket_mode": "trailing_stop",
+                "trailing_stop_type": "percent",
+                "trailing_stop_value": 2.0,
+            },
+        ]
+        result = await db.execute(select(ExecutionStyle.name).where(ExecutionStyle.is_golden == True))  # noqa: E712
+        existing_golden_es = {row[0] for row in result.all()}
+        for spec in _golden_styles:
+            if spec["name"] in existing_golden_es:
+                continue
+            db.add(ExecutionStyle(
+                id=str(uuid.uuid4()),
+                name=spec["name"],
+                description=spec.get("description"),
+                is_golden=True,
+                tags=spec.get("tags", []),
+                entry_order_type=spec.get("entry_order_type", "market"),
+                entry_time_in_force=spec.get("entry_time_in_force", "day"),
+                entry_limit_offset_method=spec.get("entry_limit_offset_method"),
+                entry_limit_offset_value=spec.get("entry_limit_offset_value"),
+                entry_cancel_after_bars=spec.get("entry_cancel_after_bars"),
+                bracket_mode=spec.get("bracket_mode", "bracket"),
+                stop_order_type=spec.get("stop_order_type", "market"),
+                take_profit_order_type=spec.get("take_profit_order_type", "limit"),
+                trailing_stop_type=spec.get("trailing_stop_type"),
+                trailing_stop_value=spec.get("trailing_stop_value"),
+                scale_out=spec.get("scale_out", []),
+                fill_model=spec.get("fill_model", "next_open"),
+                slippage_bps_assumption=spec.get("slippage_bps_assumption", 5.0),
+                commission_per_share=spec.get("commission_per_share", 0.005),
+                source_type="manual",
+            ))
+            logger.info(f"Seeded golden execution style: {spec['name']}")
+        await db.commit()
+
+        result = await db.execute(select(RiskProfile.name).where(RiskProfile.is_golden == True))  # noqa: E712
+        existing_golden_rp = {row[0] for row in result.all()}
+        for spec in _golden_profiles:
+            if spec["name"] in existing_golden_rp:
+                continue
+            db.add(RiskProfile(
+                id=str(uuid.uuid4()),
+                name=spec["name"],
+                description=spec.get("description"),
+                is_golden=True,
+                tags=spec["tags"],
+                max_open_positions_long=spec["max_open_positions_long"],
+                max_open_positions_short=spec["max_open_positions_short"],
+                max_daily_loss_pct=spec["max_daily_loss_pct"],
+                max_drawdown_lockout_pct=spec["max_drawdown_lockout_pct"],
+                max_leverage=spec["max_leverage"],
+                max_portfolio_heat_long=spec["max_portfolio_heat_long"],
+                max_portfolio_heat_short=spec["max_portfolio_heat_short"],
+                max_position_size_pct_long=spec["max_position_size_pct_long"],
+                max_position_size_pct_short=spec["max_position_size_pct_short"],
+                max_correlated_exposure_long=spec["max_correlated_exposure_long"],
+                max_correlated_exposure_short=spec["max_correlated_exposure_short"],
+                source_type="manual",
+            ))
+            logger.info(f"Seeded golden risk profile: {spec['name']}")
+        await db.commit()
+
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
@@ -335,6 +753,11 @@ app.include_router(services_router, prefix="/api/v1")
 app.include_router(programs_router, prefix="/api/v1")
 app.include_router(watchlists_router, prefix="/api/v1")
 app.include_router(simulations_router, prefix="/api/v1")
+app.include_router(risk_profiles_router, prefix="/api/v1")
+app.include_router(strategy_controls_router, prefix="/api/v1")
+app.include_router(execution_styles_router, prefix="/api/v1")
+app.include_router(governor_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 
 # Register simulation WebSocket directly on the app to avoid route collision
 # with the /{simulation_id} catch-all pattern on the REST router.
@@ -346,7 +769,16 @@ app.websocket("/ws/simulation/{simulation_id}")(simulation_websocket)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": settings.APP_VERSION}
+    from app.database import engine
+    from sqlalchemy import text
+    db_ok = False
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+    return {"status": "ok" if db_ok else "degraded", "version": settings.APP_VERSION, "database": "connected" if db_ok else "error"}
 
 
 @app.get("/api/v1/platform/info")

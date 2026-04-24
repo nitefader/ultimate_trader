@@ -69,7 +69,7 @@ def compute_full_metrics(
         max_dd_duration = 0
 
     # ── Sharpe / Sortino / Calmar ──────────────────────────────────────────────
-    returns = equity_series.pct_change().dropna()
+    returns = equity_series.pct_change(fill_method=None).dropna()
     mean_ret = float(returns.mean())
     std_ret = float(returns.std())
     risk_free = 0.0  # assume 0 for simplicity
@@ -194,7 +194,7 @@ def compute_full_metrics(
             # Get the last trading day of each month
             monthly = eq_df["equity"].resample("ME").last()
             # Compute month-over-month returns
-            monthly_pct = monthly.pct_change() * 100
+            monthly_pct = monthly.pct_change(fill_method=None) * 100
             for ts, val in monthly_pct.items():
                 if pd.notna(val):
                     monthly_returns[ts.strftime("%Y-%m")] = round(float(val), 2)

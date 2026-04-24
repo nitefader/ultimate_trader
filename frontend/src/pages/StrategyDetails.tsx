@@ -2,21 +2,11 @@ import React, { useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { strategiesApi } from '../api/strategies'
-import { ConditionBuilder } from '../components/StrategyBuilder/ConditionBuilder'
-import { SelectMenu } from '../components/SelectMenu'
-import { Pencil, Save, X, Plus, Trash2, ChevronDown, ChevronUp, Code, AlertTriangle, TrendingUp } from 'lucide-react'
+import { VersionDiffPanel } from '../components/VersionDiffPanel'
+import { Pencil, Trash2, ChevronDown, ChevronUp, Code, AlertTriangle, TrendingUp, GitCompare } from 'lucide-react'
 import clsx from 'clsx'
-import type { Strategy, StrategyVersion, StrategyConfig, Condition, CooldownRule, ScaleLevel } from '../types'
+import type { Strategy, StrategyVersion, StrategyConfig, Condition } from '../types'
 
-const DRAFT_STATUSES = new Set(['backtest_only'])
-const LIVE_STATUSES = new Set(['paper_approved', 'live_approved'])
-
-const STOP_METHODS = ['fixed_pct', 'fixed_dollar', 'atr_multiple', 'prev_bar_low', 'n_bars_low', 'swing_low', 'fvg_low', 'sr_support', 'chandelier']
-const TARGET_METHODS = ['r_multiple', 'fixed_pct', 'atr_multiple', 'sr_resistance', 'swing_high', 'prev_day_high']
-const SIZING_METHODS = ['risk_pct', 'fixed_shares', 'fixed_dollar', 'fixed_pct_equity', 'atr_risk', 'kelly']
-const REGIMES = ['trending_up', 'trending_down', 'ranging', 'high_volatility', 'low_volatility']
-const COOLDOWN_TRIGGERS = ['loss', 'win', 'stop_out', 'target_hit', 'any_exit', 'consecutive_loss']
-const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '1d', '1wk', '1mo']
 
 function pretty(obj: unknown): string {
   try { return JSON.stringify(obj, null, 2) } catch { return String(obj) }
@@ -93,11 +83,13 @@ function ConfigViewer({ config }: { config: StrategyConfig }) {
       )}
 
       <SectionCard title="Universe & Timeframe">
-        <Row label="Symbols">
-          <div className="flex flex-wrap gap-1">
-            {(config.symbols ?? []).map(s => <Pill key={s} color="sky">{s}</Pill>)}
-            {(!config.symbols || config.symbols.length === 0) && <span className="text-gray-500 text-xs">Not set</span>}
-          </div>
+        <Row label="Watchlist">
+          {config.watchlist_name
+            ? <Pill color="sky">{config.watchlist_name}</Pill>
+            : config.symbols?.length
+              ? <span className="text-xs text-gray-400">{config.symbols.slice(0, 6).join(', ')}{config.symbols.length > 6 ? ` +${config.symbols.length - 6} more` : ''}</span>
+              : <span className="text-gray-500 text-xs">Not set</span>
+          }
         </Row>
         <Row label="Timeframe"><Pill>{config.timeframe ?? '—'}</Pill></Row>
         {config.leverage != null && config.leverage !== 1 && (
@@ -194,316 +186,26 @@ function ConfigViewer({ config }: { config: StrategyConfig }) {
         ) : <div className="text-xs text-gray-500">No risk controls</div>}
       </SectionCard>
 
-      <SectionCard title="Regime Filter" defaultOpen={false}>
-        {config.regime_filter?.allowed && config.regime_filter.allowed.length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {config.regime_filter.allowed.map(r => <Pill key={r} color="amber">{r}</Pill>)}
-          </div>
-        ) : <div className="text-xs text-gray-500">All regimes allowed (no filter)</div>}
-      </SectionCard>
 
-      <SectionCard title="Cooldown Rules" defaultOpen={false}>
-        {config.cooldown_rules && config.cooldown_rules.length > 0 ? (
-          <div className="space-y-1">
-            {config.cooldown_rules.map((r, i) => (
-              <div key={i} className="flex items-center gap-2 rounded bg-gray-800/60 px-3 py-2 text-xs">
-                <Pill>{r.trigger}</Pill>
-                {r.duration_minutes != null && <span className="text-gray-300">{r.duration_minutes} min</span>}
-                {r.duration_bars != null && <span className="text-gray-300">{r.duration_bars} bars</span>}
-                {r.session_reset && <Pill color="amber">session reset</Pill>}
-                {r.symbol_level && <Pill color="sky">symbol-level</Pill>}
-              </div>
-            ))}
-          </div>
-        ) : <div className="text-xs text-gray-500">No cooldown rules</div>}
-      </SectionCard>
-
-      {(config.scale_out?.levels && config.scale_out.levels.length > 0) && (
-        <SectionCard title="Scale Out" defaultOpen={false}>
-          <div className="space-y-1">
-            {config.scale_out.levels.map((l, i) => (
-              <div key={i} className="text-xs text-gray-300 rounded bg-gray-800/60 px-3 py-2">
-                Level {i + 1}: exit {l.pct}%
-              </div>
-            ))}
-          </div>
-          {config.scale_out.move_stop_to_be_after_t1 && (
-            <div className="text-xs text-gray-400 mt-1">Move stop to breakeven after T1</div>
-          )}
-        </SectionCard>
-      )}
     </div>
   )
 }
 
-/* ── Edit mode config editor ──────────────────────────── */
-
-function ConfigEditor({ config, onChange }: { config: StrategyConfig; onChange: (c: StrategyConfig) => void }) {
-  const set = <K extends keyof StrategyConfig>(key: K, value: StrategyConfig[K]) => onChange({ ...config, [key]: value })
-
-  return (
-    <div className="space-y-4">
-      <SectionCard title="Hypothesis">
-        <textarea
-          className="input w-full resize-none"
-          rows={2}
-          value={config.hypothesis ?? ''}
-          onChange={e => set('hypothesis', e.target.value)}
-          placeholder="What is your trading edge?"
-        />
-      </SectionCard>
-
-      <SectionCard title="Universe & Timeframe">
-        <Field label="Symbols (comma separated)">
-          <input
-            className="input w-full"
-            value={config.symbols?.join(', ') ?? ''}
-            onChange={e => set('symbols', e.target.value.split(',').map(s => s.trim().toUpperCase()).filter(Boolean))}
-            placeholder="SPY, QQQ, AAPL"
-          />
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Timeframe">
-            <SelectMenu
-              value={config.timeframe ?? '1d'}
-              onChange={v => set('timeframe', v)}
-              options={TIMEFRAMES.map(tf => ({ value: tf, label: tf }))}
-            />
-          </Field>
-          <Field label="Leverage">
-            <input type="number" step="0.1" min="1" className="input w-full" value={config.leverage ?? 1} onChange={e => set('leverage', parseFloat(e.target.value))} />
-          </Field>
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Entry Rules">
-        <Field label="Directions">
-          <div className="flex gap-3">
-            {['long', 'short'].map(dir => (
-              <label key={dir} className="flex items-center gap-1.5 cursor-pointer">
-                <input
-                  type="checkbox" className="accent-sky-500"
-                  checked={config.entry?.directions?.includes(dir) ?? false}
-                  onChange={e => {
-                    const dirs = config.entry?.directions ?? []
-                    set('entry', { ...config.entry, directions: e.target.checked ? [...dirs, dir] : dirs.filter(d => d !== dir) })
-                  }}
-                />
-                <span className="text-sm capitalize">{dir}</span>
-              </label>
-            ))}
-          </div>
-        </Field>
-        <ConditionBuilder
-          conditions={config.entry?.conditions ?? []}
-          onChange={conds => set('entry', { ...config.entry, conditions: conds })}
-          logic={config.entry?.logic ?? 'all_of'}
-          onLogicChange={logic => set('entry', { ...config.entry, logic, long_logic: logic })}
-          label="Long Conditions"
-        />
-        <ConditionBuilder
-          conditions={config.entry?.short_conditions ?? []}
-          onChange={conds => set('entry', { ...config.entry, short_conditions: conds })}
-          logic={config.entry?.short_logic ?? config.entry?.logic ?? 'all_of'}
-          onLogicChange={logic => set('entry', { ...config.entry, short_logic: logic })}
-          label="Short Conditions"
-        />
-      </SectionCard>
-
-      <SectionCard title="Stop Loss">
-        <div className="grid grid-cols-3 gap-3">
-          <Field label="Method">
-            <SelectMenu
-              value={config.stop_loss?.method ?? 'fixed_pct'}
-              onChange={v => set('stop_loss', { ...config.stop_loss, method: v })}
-              options={STOP_METHODS.map(m => ({ value: m, label: m }))}
-            />
-          </Field>
-          {(config.stop_loss?.method === 'fixed_pct' || config.stop_loss?.method === 'fixed_dollar') && (
-            <Field label="Value">
-              <input type="number" className="input w-full" value={config.stop_loss?.value ?? 2} onChange={e => set('stop_loss', { ...config.stop_loss, method: config.stop_loss?.method ?? 'fixed_pct', value: parseFloat(e.target.value) })} />
-            </Field>
-          )}
-          {config.stop_loss?.method === 'atr_multiple' && (
-            <>
-              <Field label="ATR Period">
-                <input type="number" className="input w-full" value={config.stop_loss?.period ?? 14} onChange={e => set('stop_loss', { ...config.stop_loss, method: 'atr_multiple', period: parseInt(e.target.value) })} />
-              </Field>
-              <Field label="Multiplier">
-                <input type="number" step="0.1" className="input w-full" value={config.stop_loss?.mult ?? 2.0} onChange={e => set('stop_loss', { ...config.stop_loss, method: 'atr_multiple', mult: parseFloat(e.target.value) })} />
-              </Field>
-            </>
-          )}
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Profit Targets">
-        {(config.targets ?? []).map((target, i) => (
-          <div key={i} className="flex items-center gap-2 bg-gray-800 rounded p-2">
-            <span className="text-xs text-gray-500 w-16">Target {i + 1}</span>
-            <SelectMenu
-              value={target.method}
-              onChange={v => {
-                const targets = [...(config.targets ?? [])]; targets[i] = { ...targets[i], method: v }; set('targets', targets)
-              }}
-              options={TARGET_METHODS.map(m => ({ value: m, label: m }))}
-            />
-            {target.method === 'r_multiple' && (
-              <input type="number" step="0.5" className="input text-xs py-1 w-20" value={target.r ?? 2} onChange={e => {
-                const targets = [...(config.targets ?? [])]; targets[i] = { ...targets[i], r: parseFloat(e.target.value) }; set('targets', targets)
-              }} />
-            )}
-            <button className="ml-auto text-gray-500 hover:text-red-400" onClick={() => set('targets', (config.targets ?? []).filter((_, idx) => idx !== i))}>
-              <Trash2 size={12} />
-            </button>
-          </div>
-        ))}
-        <button className="btn-ghost text-xs flex items-center gap-1" onClick={() => set('targets', [...(config.targets ?? []), { method: 'r_multiple', r: 2.0 }])}>
-          <Plus size={12} /> Add Target
-        </button>
-      </SectionCard>
-
-      <SectionCard title="Position Sizing">
-        <div className="grid grid-cols-3 gap-3">
-          <Field label="Method">
-            <SelectMenu
-              value={config.position_sizing?.method ?? 'risk_pct'}
-              onChange={v => set('position_sizing', { ...config.position_sizing, method: v })}
-              options={SIZING_METHODS.map(m => ({ value: m, label: m }))}
-            />
-          </Field>
-          {config.position_sizing?.method === 'risk_pct' && (
-            <Field label="Risk % per trade">
-              <input type="number" step="0.1" className="input w-full" value={config.position_sizing?.risk_pct ?? 1.0} onChange={e => set('position_sizing', { ...config.position_sizing, method: 'risk_pct', risk_pct: parseFloat(e.target.value) })} />
-            </Field>
-          )}
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Risk Controls">
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          <Field label="Max Position Size %">
-            <input type="number" step="0.01" className="input w-full" value={(config.risk?.max_position_size_pct ?? 0.10) * 100} onChange={e => set('risk', { ...config.risk, max_position_size_pct: parseFloat(e.target.value) / 100 })} />
-          </Field>
-          <Field label="Max Daily Loss %">
-            <input type="number" step="0.01" className="input w-full" value={(config.risk?.max_daily_loss_pct ?? 0.03) * 100} onChange={e => set('risk', { ...config.risk, max_daily_loss_pct: parseFloat(e.target.value) / 100 })} />
-          </Field>
-          <Field label="Max Open Positions">
-            <input type="number" className="input w-full" value={config.risk?.max_open_positions ?? 10} onChange={e => set('risk', { ...config.risk, max_open_positions: parseInt(e.target.value) })} />
-          </Field>
-        </div>
-      </SectionCard>
-
-      <SectionCard title="Regime Filter" defaultOpen={false}>
-        <Field label="Allowed Regimes (leave empty = all)">
-          <div className="flex flex-wrap gap-2">
-            {REGIMES.map(r => (
-              <label key={r} className="flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" className="accent-sky-500"
-                  checked={config.regime_filter?.allowed?.includes(r) ?? false}
-                  onChange={e => {
-                    const allowed = config.regime_filter?.allowed ?? []
-                    set('regime_filter', { allowed: e.target.checked ? [...allowed, r] : allowed.filter(a => a !== r) })
-                  }}
-                />
-                <span className="text-sm">{r}</span>
-              </label>
-            ))}
-          </div>
-        </Field>
-      </SectionCard>
-
-      <SectionCard title="Cooldown Rules" defaultOpen={false}>
-        {(config.cooldown_rules ?? []).map((rule, i) => (
-          <div key={i} className="flex items-center gap-2 bg-gray-800 rounded p-2">
-            <SelectMenu
-              value={rule.trigger}
-              onChange={v => {
-                const rules = [...(config.cooldown_rules ?? [])]; rules[i] = { ...rules[i], trigger: v }; set('cooldown_rules', rules)
-              }}
-              options={COOLDOWN_TRIGGERS.map(t => ({ value: t, label: t }))}
-            />
-            <input type="number" className="input text-xs py-1 w-24" placeholder="Minutes" value={rule.duration_minutes ?? ''} onChange={e => {
-              const rules = [...(config.cooldown_rules ?? [])]; rules[i] = { ...rules[i], duration_minutes: parseInt(e.target.value) || undefined }; set('cooldown_rules', rules)
-            }} />
-            <button className="ml-auto text-gray-500 hover:text-red-400" onClick={() => set('cooldown_rules', (config.cooldown_rules ?? []).filter((_, idx) => idx !== i))}>
-              <Trash2 size={12} />
-            </button>
-          </div>
-        ))}
-        <button className="btn-ghost text-xs flex items-center gap-1" onClick={() => set('cooldown_rules', [...(config.cooldown_rules ?? []), { trigger: 'loss', duration_minutes: 30 }])}>
-          <Plus size={12} /> Add Cooldown Rule
-        </button>
-      </SectionCard>
-    </div>
-  )
-}
 
 export function StrategyDetails() {
   const { strategyId } = useParams<{ strategyId: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null)
-  const [newVersionNotes, setNewVersionNotes] = useState('')
-  const [ackCloneLatest, setAckCloneLatest] = useState(false)
-  const [creating, setCreating] = useState(false)
-  const [editing, setEditing] = useState(false)
-  const [editConfig, setEditConfig] = useState<StrategyConfig | null>(null)
-  const [editNotes, setEditNotes] = useState('')
   const [showRawJson, setShowRawJson] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deletingVersionId, setDeletingVersionId] = useState<string | null>(null)
+  const [diffBaseVersionId, setDiffBaseVersionId] = useState<string | null>(null)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['strategy', strategyId],
     queryFn: () => strategiesApi.get(strategyId!),
     enabled: !!strategyId,
-  })
-
-  const createVersionMutation = useMutation({
-    mutationFn: async () => {
-      if (!data) throw new Error('Strategy not loaded')
-      const notes = newVersionNotes.trim()
-      if (!notes) throw new Error('Notes are required')
-      if (!ackCloneLatest) throw new Error('Please confirm you are cloning the latest config')
-      const latest = (data.versions ?? [])[0]
-      const baseConfig: StrategyConfig = (latest?.config ?? {}) as any
-      return strategiesApi.createVersion(data.id, { config: baseConfig, notes })
-    },
-    onSuccess: () => {
-      setNewVersionNotes('')
-      setAckCloneLatest(false)
-      setCreating(false)
-      qc.invalidateQueries({ queryKey: ['strategy', strategyId] })
-    },
-  })
-
-  const patchVersionMutation = useMutation({
-    mutationFn: async () => {
-      if (!data || !editConfig || !selected) throw new Error('No config to save')
-      return strategiesApi.patchVersion(data.id, selected.id, { config: editConfig, notes: editNotes.trim() || undefined })
-    },
-    onSuccess: () => {
-      setEditing(false)
-      setEditConfig(null)
-      setEditNotes('')
-      qc.invalidateQueries({ queryKey: ['strategy', strategyId] })
-    },
-  })
-
-  const saveEditMutation = useMutation({
-    mutationFn: async () => {
-      if (!data || !editConfig) throw new Error('No config to save')
-      const notes = editNotes.trim()
-      if (!notes) throw new Error('Notes are required for a new version')
-      return strategiesApi.createVersion(data.id, { config: editConfig, notes })
-    },
-    onSuccess: () => {
-      setEditing(false)
-      setEditConfig(null)
-      setEditNotes('')
-      qc.invalidateQueries({ queryKey: ['strategy', strategyId] })
-    },
   })
 
   const deleteMutation = useMutation({
@@ -538,27 +240,6 @@ export function StrategyDetails() {
   const versions: StrategyVersion[] = data.versions ?? []
   const selected = versions.find(v => v.id === (selectedVersionId ?? versions[0]?.id)) ?? versions[0]
 
-  // A version can be edited in-place only when it has no runs, no deployments,
-  // and has never been promoted. The backend enforces the same rules — this just
-  // drives the UI label and save path.
-  const canEditInPlace = Boolean(
-    selected &&
-    (selected.promotion_status == null || selected.promotion_status === 'backtest_only') &&
-    !(selected as any).has_runs  // optimistic — backend is authoritative
-  )
-
-  const startEditing = () => {
-    setEditConfig(JSON.parse(JSON.stringify(selected?.config ?? {})))
-    setEditNotes('')
-    setEditing(true)
-  }
-
-  const cancelEditing = () => {
-    setEditing(false)
-    setEditConfig(null)
-    setEditNotes('')
-  }
-
   return (
     <div className="space-y-4 max-w-5xl">
       <div className="flex items-start justify-between">
@@ -576,12 +257,9 @@ export function StrategyDetails() {
 
         <div className="flex items-center gap-2">
           <Link to="/backtest" className="btn-primary text-sm">Run Backtest</Link>
-          <button
-            className="btn-ghost text-sm"
-            onClick={() => setCreating(s => !s)}
-          >
+          <Link to={`/strategies/${strategyId}/new-version`} className="btn-ghost text-sm">
             + New Version
-          </button>
+          </Link>
           <button
             className="btn-ghost text-sm text-red-400 hover:text-red-300"
             onClick={() => setShowDeleteConfirm(s => !s)}
@@ -630,45 +308,6 @@ export function StrategyDetails() {
         </div>
       )}
 
-      {creating && (
-        <div className="card space-y-3 border border-indigo-900/50">
-          <div className="text-sm font-semibold text-indigo-300">Create New Version</div>
-          <div className="text-xs text-gray-500">
-            This clones the latest version’s config as a starting point.
-          </div>
-          <div>
-            <label className="label">Notes</label>
-            <input
-              className="input w-full"
-              value={newVersionNotes}
-              onChange={e => setNewVersionNotes(e.target.value)}
-              placeholder="What changed in this version?"
-            />
-          </div>
-          <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
-            <input
-              type="checkbox"
-              className="accent-indigo-500"
-              checked={ackCloneLatest}
-              onChange={e => setAckCloneLatest(e.target.checked)}
-            />
-            I understand this creates a new version by cloning the latest config
-          </label>
-          <div className="flex items-center gap-2">
-            <button
-              className="btn-primary text-sm"
-              disabled={createVersionMutation.isPending || !newVersionNotes.trim() || !ackCloneLatest}
-              onClick={() => createVersionMutation.mutate()}
-            >
-              {createVersionMutation.isPending ? 'Creating…' : 'Create Version'}
-            </button>
-            <button className="btn-ghost text-sm" onClick={() => setCreating(false)}>Cancel</button>
-            {createVersionMutation.isError && (
-              <span className="text-xs text-red-400 ml-auto">{(createVersionMutation.error as Error).message}</span>
-            )}
-          </div>
-        </div>
-      )}
 
       <div className="grid md:grid-cols-5 gap-4">
         <div className="card md:col-span-2">
@@ -718,6 +357,24 @@ export function StrategyDetails() {
                       >
                         <TrendingUp size={11} />
                       </Link>
+                      {versions.length > 1 && selected && selected.id !== v.id && (
+                        <button
+                          type="button"
+                          onClick={e => {
+                            e.stopPropagation()
+                            setDiffBaseVersionId(v.id === diffBaseVersionId ? null : v.id)
+                          }}
+                          title={`Diff v${selected.version} → v${v.version}`}
+                          className={clsx(
+                            'p-1 rounded transition',
+                            diffBaseVersionId === v.id
+                              ? 'text-sky-400 bg-sky-950/30'
+                              : 'text-gray-600 hover:text-sky-400 hover:bg-sky-950/30',
+                          )}
+                        >
+                          <GitCompare size={11} />
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={e => {
@@ -787,10 +444,10 @@ export function StrategyDetails() {
                 {selected && (
                   <span className="badge badge-gray font-mono">v{selected.version}</span>
                 )}
-                {selected && !editing && (
-                  <button className="btn-ghost text-xs flex items-center gap-1" onClick={startEditing}>
+                {selected && (
+                  <Link to={`/strategies/${strategyId}/edit`} className="btn-ghost text-xs flex items-center gap-1">
                     <Pencil size={12} /> Edit
-                  </button>
+                  </Link>
                 )}
               </div>
             </div>
@@ -819,64 +476,7 @@ export function StrategyDetails() {
             )}
           </div>
 
-          {editing && editConfig ? (
-            <div className="space-y-4">
-              <div className="card border border-indigo-900/50 bg-indigo-950/10">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-sm font-semibold" style={{ color: canEditInPlace ? 'var(--color-accent)' : '#818cf8' }}>
-                    {canEditInPlace ? 'Editing in place — no runs yet' : 'Editing — saves as new version'}
-                  </div>
-                  <button className="btn-ghost text-xs flex items-center gap-1" onClick={cancelEditing}>
-                    <X size={12} /> Cancel
-                  </button>
-                </div>
-
-                {canEditInPlace ? (
-                  /* ── In-place path: no notes required, just save ── */
-                  <div className="rounded-lg px-3 py-2 text-xs mb-1" style={{
-                    background: 'color-mix(in srgb, var(--color-accent) 8%, transparent)',
-                    border: '1px solid color-mix(in srgb, var(--color-accent) 30%, transparent)',
-                    color: 'var(--color-text-muted)',
-                  }}>
-                    This version has no backtest runs yet — changes will be saved directly without creating a new version.
-                    Once you run a backtest, future edits will require a new version.
-                  </div>
-                ) : (
-                  /* ── New version path: notes required ── */
-                  <div>
-                    <label className="label">Version notes (required)</label>
-                    <input className="input w-full" value={editNotes} onChange={e => setEditNotes(e.target.value)} placeholder="What changed?" />
-                  </div>
-                )}
-
-                {(patchVersionMutation.isError || saveEditMutation.isError) && (
-                  <div className="text-xs text-red-400 mt-2">
-                    {((patchVersionMutation.error || saveEditMutation.error) as Error)?.message ?? 'Save failed'}
-                  </div>
-                )}
-                <div className="flex items-center gap-2 mt-3">
-                  {canEditInPlace && (
-                    <button
-                      className="btn-primary flex items-center gap-1.5"
-                      disabled={patchVersionMutation.isPending}
-                      onClick={() => patchVersionMutation.mutate()}
-                    >
-                      <Save size={14} /> {patchVersionMutation.isPending ? 'Saving…' : 'Save Changes'}
-                    </button>
-                  )}
-                  <button
-                    className={canEditInPlace ? 'btn-ghost flex items-center gap-1.5 text-xs' : 'btn-primary flex items-center gap-1.5'}
-                    disabled={saveEditMutation.isPending || (!canEditInPlace && !editNotes.trim())}
-                    onClick={() => saveEditMutation.mutate()}
-                  >
-                    <Save size={14} /> {saveEditMutation.isPending ? 'Saving…' : canEditInPlace ? 'Save as New Version instead' : 'Save as New Version'}
-                  </button>
-                </div>
-              </div>
-
-              <ConfigEditor config={editConfig} onChange={setEditConfig} />
-            </div>
-          ) : selected ? (
+          {selected ? (
             <div className="space-y-4">
               <ConfigViewer config={(selected.config ?? {}) as StrategyConfig} />
 
@@ -898,6 +498,16 @@ export function StrategyDetails() {
           ) : null}
         </div>
       </div>
+
+      {/* Version diff panel — shown when a base version is selected for comparison */}
+      {diffBaseVersionId && selected && strategyId && selected.id !== diffBaseVersionId && (
+        <VersionDiffPanel
+          strategyId={strategyId}
+          v1Id={diffBaseVersionId}
+          v2Id={selected.id}
+          onClose={() => setDiffBaseVersionId(null)}
+        />
+      )}
     </div>
   )
 }

@@ -19,6 +19,8 @@ export interface Watchlist {
   refresh_cron: string | null
   min_refresh_interval_minutes: number
   config: Record<string, unknown>
+  is_golden: boolean
+  tags: string[]
   created_at: string | null
   updated_at: string | null
   resolved_at: string | null
@@ -52,4 +54,10 @@ export const watchlistsApi = {
 
   rename: (id: string, name: string) =>
     api.patch(`/watchlists/${id}`, { name }).then((r) => r.data as Watchlist),
+
+  delete: (id: string) =>
+    api.delete(`/watchlists/${id}`).then((r) => r.data),
+
+  duplicate: (id: string): Promise<Watchlist> =>
+    api.post(`/watchlists/${id}/duplicate`).then((r) => r.data),
 }

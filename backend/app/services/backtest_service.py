@@ -18,11 +18,15 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.backtest import BacktestEngine
+from app.features.preview import build_feature_plan_preview
+from app.features.source_contracts import resolve_requested_provider
 from app.models.run import BacktestRun, RunMetrics
 from app.models.validation_evidence import ValidationEvidence
 from app.models.trade import Trade, ScaleEvent
 from app.services.market_data_service import fetch_market_data
 from app.services.reporting import compute_full_metrics
+from app.models.trading_program import TradingProgram
+from app.models.strategy import StrategyVersion
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +115,135 @@ def recommend_data_provider(
         "reason": "Default research mode for EOD workflows",
         "warnings": [],
     }
+
+
+async def resolve_program_to_config(program_id: str, db: AsyncSession) -> tuple[str, dict, list[str]]:
+    """
+    Load a TradingProgram and its components, return (strategy_version_id, flat_config, symbols).
+
+    Overlay order: strategy version config → governor → execution style → risk profile → watchlists.
+    Falls back to the strategy version's embedded values for any missing component.
+    Raises ValueError if the program or its strategy version is not found.
+    """
+    from sqlalchemy.orm import selectinload
+
+    result = await db.execute(
+        __import__("sqlalchemy", fromlist=["select"]).select(TradingProgram)
+        .options(
+            selectinload(TradingProgram.strategy_controls),
+            selectinload(TradingProgram.execution_style),
+            selectinload(TradingProgram.risk_profile),
+        )
+        .where(TradingProgram.id == program_id)
+    )
+    program = result.scalar_one_or_none()
+    if not program:
+        raise ValueError(f"TradingProgram {program_id} not found")
+
+    if not program.strategy_version_id:
+        raise ValueError(f"Program {program_id} has no strategy version attached")
+
+    sv = await db.get(StrategyVersion, program.strategy_version_id)
+    if not sv:
+        raise ValueError(f"StrategyVersion {program.strategy_version_id} not found")
+
+    config = deepcopy(dict(sv.config))
+
+    # Overlay Strategy Controls
+    gov = program.strategy_controls
+    if gov:
+        config["timeframe"] = gov.timeframe
+        config["duration_mode"] = gov.duration_mode
+        if gov.market_hours:
+            config["market_hours"] = gov.market_hours
+        if gov.pdt:
+            config["pdt"] = gov.pdt
+        if gov.gap_risk:
+            config["gap_risk"] = gov.gap_risk
+        if gov.regime_filter:
+            config["regime_filter"] = gov.regime_filter
+        if gov.cooldown_rules:
+            config["cooldown_rules"] = gov.cooldown_rules
+        if gov.max_trades_per_session is not None:
+            config.setdefault("risk", {})["max_trades_per_session"] = gov.max_trades_per_session
+        if gov.min_time_between_entries_min is not None:
+            config.setdefault("risk", {})["min_time_between_entries_min"] = gov.min_time_between_entries_min
+
+    # Overlay Execution Style
+    style = program.execution_style
+    if style:
+        config["entry_module"] = {
+            "order_type": style.entry_order_type,
+            "time_in_force": style.entry_time_in_force,
+            "limit_offset_method": style.entry_limit_offset_method,
+            "limit_offset_value": style.entry_limit_offset_value,
+            "cancel_after_bars": style.entry_cancel_after_bars,
+            "bracket_mode": style.bracket_mode,
+            "stop_order_type": style.stop_order_type,
+            "take_profit_order_type": style.take_profit_order_type,
+            "trailing_stop_type": style.trailing_stop_type,
+            "trailing_stop_value": style.trailing_stop_value,
+        }
+        config["scale_out"] = style.scale_out or []
+        config["fill_model"] = style.fill_model
+        config["slippage_bps_assumption"] = style.slippage_bps_assumption
+        config["commission_per_share"] = style.commission_per_share
+        if style.atr_source == "custom" and style.atr_timeframe:
+            config["_atr_override_config"] = {
+                "source": "custom",
+                "length": style.atr_length or 14,
+                "timeframe": style.atr_timeframe,
+            }
+
+    # Overlay Risk Profile
+    rp = program.risk_profile
+    if rp:
+        config["position_sizing"] = {
+            "method": "risk_pct",
+            "risk_pct": rp.max_position_size_pct_long,
+        }
+        config["leverage"] = rp.max_leverage
+        config.setdefault("risk", {}).update({
+            "max_position_size_pct": rp.max_position_size_pct_long,
+            "max_daily_loss_pct": rp.max_daily_loss_pct,
+            "max_drawdown_lockout_pct": rp.max_drawdown_lockout_pct,
+            "max_open_positions": rp.max_open_positions_long,
+            "max_portfolio_heat": rp.max_portfolio_heat_long,
+        })
+
+    # Resolve symbols from watchlist subscriptions
+    symbols: list[str] = []
+    watchlist_ids: list[str] = program.watchlist_subscriptions or []
+    if watchlist_ids:
+        from app.models.watchlist import Watchlist, WatchlistMembership
+        from sqlalchemy import select as _select
+        from sqlalchemy.orm import selectinload as _selectinload
+        wl_result = await db.execute(
+            _select(Watchlist)
+            .options(_selectinload(Watchlist.memberships))
+            .where(Watchlist.id.in_(watchlist_ids))
+        )
+        watchlists = wl_result.scalars().all()
+        rule = program.watchlist_combination_rule or "union"
+
+        def _active_symbols(wl: Watchlist) -> list[str]:
+            return [m.symbol for m in wl.memberships if m.state == "active"]
+
+        if rule == "intersection" and watchlists:
+            sets = [set(_active_symbols(wl)) for wl in watchlists]
+            symbols = sorted(sets[0].intersection(*sets[1:]))
+        else:
+            seen: set[str] = set()
+            for wl in watchlists:
+                for s in _active_symbols(wl):
+                    if s not in seen:
+                        symbols.append(s)
+                        seen.add(s)
+
+    if not symbols:
+        symbols = config.get("symbols", [])
+
+    return program.strategy_version_id, config, symbols
 
 
 def _json_serializable(obj: Any) -> Any:
@@ -1042,7 +1175,11 @@ async def launch_backtest(
             has_alpaca_credentials=has_alpaca_credentials,
         )
 
-        selected_provider = provider_decision["provider"] if data_provider == "auto" else data_provider
+        selected_provider = resolve_requested_provider(
+            requested_provider=provider_decision["provider"] if data_provider == "auto" else data_provider,
+            runtime_mode="research",
+            alpaca_credentials_configured=has_alpaca_credentials,
+        )
         if selected_provider == "alpaca" and not has_alpaca_credentials:
             raise ValueError("Alpaca selected but credentials are missing")
 
@@ -1076,6 +1213,12 @@ async def launch_backtest(
             "data_provider_requested": data_provider,
             "data_provider_used": selected_provider,
             "data_provider_recommendation": provider_decision,
+            "feature_plan_preview": build_feature_plan_preview(
+                strategy_config,
+                duration_mode=strategy_config.get("duration_mode"),
+                symbols=list(run.symbols or []),
+                timeframe=str(run.timeframe),
+            ),
         }
 
         allow_partial_symbols = bool(run_config.get("allow_partial_symbols", False))
@@ -1085,6 +1228,87 @@ async def launch_backtest(
 
         if not data:
             raise ValueError("No data loaded for any symbol")
+
+        # Fetch separate ATR timeframe bars when execution style requests a custom ATR source
+        atr_cfg = strategy_config.get("_atr_override_config")
+        if atr_cfg and atr_cfg.get("timeframe") and atr_cfg["timeframe"] != str(run.timeframe):
+            atr_override_data: dict = {}
+            for symbol in list(data.keys()):
+                atr_df = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda sym=symbol: fetch_market_data(
+                        symbol=sym,
+                        timeframe=atr_cfg["timeframe"],
+                        start=run.start_date,
+                        end=run.end_date,
+                        provider=selected_provider,
+                        adjusted=True,
+                        force_download=False,
+                        api_key=alpaca_api_key,
+                        secret_key=alpaca_secret_key,
+                    ),
+                )
+                if atr_df is not None and len(atr_df) > 0:
+                    atr_override_data[symbol] = atr_df
+                else:
+                    logger.warning("ATR override: no %s bars for %s — falling back to trade-TF ATR", atr_cfg["timeframe"], symbol)
+            if atr_override_data:
+                strategy_config["_atr_override_data"] = atr_override_data
+
+        # Fetch per-indicator alternate timeframe bars (Phase 2 multi-TF conditions)
+        # Also collects stop/target configs that carry a "timeframe" ATR override.
+        _extra_tf_refs: dict[str, set[str]] = {}
+
+        def _walk_for_tf_refs(node: Any) -> None:
+            if isinstance(node, dict):
+                # Condition ValueSpec: {indicator, timeframe}
+                if "indicator" in node and "timeframe" in node and node.get("timeframe"):
+                    _extra_tf_refs.setdefault(node["timeframe"], set()).add(node["indicator"])
+                # Stop/target ATR timeframe: {method: "atr_multiple"|"chandelier", timeframe}
+                if node.get("method") in ("atr_multiple", "chandelier") and node.get("timeframe"):
+                    # We need OHLCV bars for that TF so the engine can compute ATR on-the-fly.
+                    # Register with a sentinel so the TF is fetched even if no indicator names.
+                    _extra_tf_refs.setdefault(node["timeframe"], set())
+                for v in node.values():
+                    _walk_for_tf_refs(v)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk_for_tf_refs(item)
+
+        _walk_for_tf_refs(strategy_config)
+
+        trade_tf = str(run.timeframe)
+        required_extra_tfs = {tf for tf in _extra_tf_refs if tf != trade_tf}
+        if required_extra_tfs:
+            extra_tf_data: dict[str, dict[str, pd.DataFrame]] = {}
+            for tf in required_extra_tfs:
+                extra_tf_data[tf] = {}
+                for symbol in list(data.keys()):
+                    try:
+                        alt_df = await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            lambda sym=symbol, _tf=tf: fetch_market_data(
+                                symbol=sym,
+                                timeframe=_tf,
+                                start=run.start_date,
+                                end=run.end_date,
+                                provider=selected_provider,
+                                adjusted=True,
+                                force_download=False,
+                                api_key=alpaca_api_key,
+                                secret_key=alpaca_secret_key,
+                            ),
+                        )
+                        if alt_df is not None and len(alt_df) > 0:
+                            # Compute indicators so the referenced names are available
+                            temp_engine = BacktestEngine(dict(strategy_config), {})
+                            extra_tf_data[tf][symbol] = temp_engine._compute_indicators(alt_df, symbol=symbol)
+                        else:
+                            logger.warning("Multi-TF: no %s bars for %s — skipping alt TF indicators", tf, symbol)
+                    except Exception as exc:
+                        logger.warning("Multi-TF: failed to fetch %s bars for %s: %s", tf, symbol, exc)
+            if extra_tf_data:
+                strategy_config["_extra_tf_data"] = extra_tf_data
 
         # Run backtest
         engine = BacktestEngine(strategy_config, run_config)

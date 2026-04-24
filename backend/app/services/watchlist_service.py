@@ -246,6 +246,8 @@ def serialize_watchlist(watchlist: Watchlist) -> dict[str, Any]:
         "refresh_cron": watchlist.refresh_cron,
         "min_refresh_interval_minutes": watchlist.min_refresh_interval_minutes,
         "config": watchlist.config,
+        "is_golden": bool(getattr(watchlist, "is_golden", False)),
+        "tags": getattr(watchlist, "tags", []) or [],
         "created_at": _serialize_timestamp(watchlist.created_at),
         "updated_at": _serialize_timestamp(watchlist.updated_at),
         "resolved_at": _serialize_timestamp(latest_resolved_at),

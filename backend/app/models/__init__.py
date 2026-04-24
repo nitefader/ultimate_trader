@@ -15,6 +15,10 @@ from app.models.program_backlog import ProgramBacklogItem
 from app.models.validation_evidence import ValidationEvidence
 from app.models.watchlist import Watchlist, WatchlistMembership
 from app.models.trading_program import TradingProgram, AccountAllocation
+from app.models.risk_profile import RiskProfile  # noqa: F401
+from app.models.strategy_governor import StrategyControls  # noqa: F401
+from app.models.execution_style import ExecutionStyle  # noqa: F401
+from app.models.governor_event import GovernorEvent  # noqa: F401
 
 __all__ = [
     "Account",
@@ -44,4 +48,8 @@ __all__ = [
     "ProgramBacklogItem",
     "TradingProgram",
     "AccountAllocation",
+    "RiskProfile",
+    "StrategyControls",
+    "ExecutionStyle",
+    "GovernorEvent",
 ]

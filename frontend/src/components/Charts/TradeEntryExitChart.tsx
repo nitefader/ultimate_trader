@@ -11,6 +11,7 @@ import {
   YAxis,
 } from 'recharts'
 import type { Trade } from '../../types'
+import { normalizeSymbol, eqSym } from '../../lib/symbol'
 
 type Props = {
   trades: Trade[]
@@ -46,8 +47,8 @@ function fmtPnl(v: number | undefined): string {
 
 export function TradeEntryExitChart({ trades, symbol }: Props) {
   const filteredTrades = useMemo(() => {
-    if (!symbol || symbol === 'ALL') return trades
-    return trades.filter(t => t.symbol === symbol)
+    if (!symbol || normalizeSymbol(symbol) === 'ALL') return trades
+    return trades.filter(t => eqSym(t.symbol, symbol))
   }, [trades, symbol])
 
   const points = useMemo<ChartPoint[]>(() => {

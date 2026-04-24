@@ -1,9 +1,11 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { monitorApi, type LiveRun, type RunDetail, type LivePosition, type LiveOrder } from '../api/monitor'
 import { usePollingGate } from '../hooks/usePollingGate'
+import { useWebSocket } from '../hooks/useWebSocket'
 import clsx from 'clsx'
-import { RefreshCw, X, AlertTriangle, TrendingUp, TrendingDown, Minus } from 'lucide-react'
+import { RefreshCw, X, AlertTriangle, TrendingUp, TrendingDown, Minus, Wifi, WifiOff } from 'lucide-react'
+import { PageHelp } from '../components/PageHelp'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -21,6 +23,33 @@ function fmtPct(n: number | null | undefined, decimals = 2): string {
 function pnlClass(n: number | null | undefined): string {
   if (n == null) return 'text-gray-400'
   return n >= 0 ? 'text-green-400' : 'text-red-400'
+}
+
+function formatMonitorTimestamp(timestamp?: string | null): string {
+  if (!timestamp) return 'Unknown'
+  const parsed = new Date(timestamp)
+  if (Number.isNaN(parsed.getTime())) return 'Unknown'
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    month: 'short',
+    day: '2-digit',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).format(parsed)
+}
+
+function formatMonitorAge(timestamp?: string | null): string {
+  if (!timestamp) return 'No event received yet'
+  const parsed = new Date(timestamp)
+  const ageMs = Date.now() - parsed.getTime()
+  if (Number.isNaN(parsed.getTime()) || ageMs < 0) return 'No event received yet'
+  const ageSec = Math.floor(ageMs / 1000)
+  if (ageSec < 60) return `${ageSec}s ago`
+  const ageMin = Math.floor(ageSec / 60)
+  if (ageMin < 60) return `${ageMin}m ago`
+  const ageHr = Math.floor(ageMin / 60)
+  return `${ageHr}h ago`
 }
 
 function PnlArrow({ value }: { value: number | null | undefined }) {
@@ -211,7 +240,7 @@ function StatPill({ label, value, sub }: { label: string; value: string; sub?: s
 
 // ── Run panel (content for one tab) ──────────────────────────────────────────
 
-function RunPanel({ run }: { run: LiveRun }) {
+function RunPanel({ run, isConnected, isStale }: { run: LiveRun; isConnected: boolean; isStale: boolean }) {
   const qc = useQueryClient()
   const pausePolling = usePollingGate()
 
@@ -250,13 +279,19 @@ function RunPanel({ run }: { run: LiveRun }) {
 
   const totalUnrPnl = positions.reduce((sum, p) => sum + (p.unrealized_pl ?? 0), 0)
   const totalMktValue = positions.reduce((sum, p) => sum + (p.market_value ?? 0), 0)
+  const partialFillOrders = orders.filter((order) => order.status === 'partially_filled').length
+  const latestOrderTimestamp = orders
+    .map((order) => order.filled_at ?? order.created_at)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+  const lastOrderTimestamp = latestOrderTimestamp.length > 0 ? latestOrderTimestamp[latestOrderTimestamp.length - 1] : null
 
   return (
-    <div className="space-y-4">
+    <div className="mx-auto w-full max-w-7xl space-y-4">
       {/* Account stats row */}
       <div className="flex flex-wrap gap-3">
-        <StatPill label="Equity" value={fmt$(acct?.equity)} />
-        <StatPill label="Cash" value={fmt$(acct?.cash)} />
+        <StatPill label={run.mode === 'live' ? 'Live Equity' : 'Paper Equity'} value={fmt$(acct?.equity)} sub={run.account_name} />
+        <StatPill label={run.mode === 'live' ? 'Live Cash' : 'Paper Cash'} value={fmt$(acct?.cash)} />
         <StatPill label="Portfolio Value" value={fmt$(acct?.portfolio_value)} />
         <StatPill
           label="Open P&L"
@@ -264,11 +299,46 @@ function RunPanel({ run }: { run: LiveRun }) {
           sub={`${positions.length} position${positions.length !== 1 ? 's' : ''}`}
         />
         <StatPill label="Mkt Exposure" value={fmt$(totalMktValue)} />
+        <StatPill
+          label="Open Orders"
+          value={String(orders.length)}
+          sub={partialFillOrders > 0 ? `${partialFillOrders} partial fill${partialFillOrders !== 1 ? 's' : ''}` : 'No partial fills'}
+        />
         {acct?.simulated && (
           <div className="flex items-center gap-1 text-xs text-blue-400 border border-blue-800 rounded px-3 py-2 self-start">
             Simulated paper account
           </div>
         )}
+      </div>
+
+      <div className={clsx(
+        'rounded border p-3 text-sm',
+        detailQuery.isError || positionsQuery.isError
+          ? 'border-red-800 bg-red-950/30 text-red-200'
+          : isConnected && !isStale
+            ? 'border-emerald-800 bg-emerald-950/20 text-emerald-200'
+            : 'border-amber-800 bg-amber-950/20 text-amber-200',
+      )}>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            {isConnected && !isStale ? <Wifi size={14} className="text-emerald-300" /> : <WifiOff size={14} className="text-amber-300" />}
+            <span>
+              {detailQuery.isError || positionsQuery.isError
+                ? `Monitor refresh failed for this ${run.mode} run. Review the last good snapshot and retry before acting.`
+                : isConnected && !isStale
+                  ? `Realtime websocket updates are current for this ${run.mode} run.`
+                  : `Realtime websocket is stale or disconnected. Polling is backing this ${run.mode} run right now.`}
+            </span>
+          </div>
+          <div className="text-xs text-gray-400">
+            Last order activity {formatMonitorAge(lastOrderTimestamp)}
+          </div>
+        </div>
+        <div className="mt-2 grid gap-2 text-xs text-gray-400 sm:grid-cols-3">
+          <div>Mode: <span className="text-gray-200 font-medium">{run.mode.toUpperCase()}</span></div>
+          <div>Account: <span className="text-gray-200 font-medium">{run.account_name}</span></div>
+          <div>Latest order timestamp: <span className="text-gray-200 font-medium">{formatMonitorTimestamp(lastOrderTimestamp)}</span></div>
+        </div>
       </div>
 
       {/* Positions */}
@@ -283,7 +353,7 @@ function RunPanel({ run }: { run: LiveRun }) {
               <button
                 type="button"
                 onClick={() => {
-                  if (window.confirm('Close ALL positions for this run?')) {
+                  if (window.confirm(`Close all currently open positions for this ${run.mode.toUpperCase()} run on ${run.account_name}? Existing positions will be liquidated; this is not a pause-only action.`)) {
                     closeAllMutation.mutate()
                   }
                 }}
@@ -299,7 +369,7 @@ function RunPanel({ run }: { run: LiveRun }) {
           positions={positions}
           deploymentId={run.id}
           onClosePosition={(sym) => {
-            if (window.confirm(`Close position in ${sym}?`)) {
+            if (window.confirm(`Close the ${sym} position for this ${run.mode.toUpperCase()} run on ${run.account_name}?`)) {
               closePositionMutation.mutate(sym)
             }
           }}
@@ -309,7 +379,12 @@ function RunPanel({ run }: { run: LiveRun }) {
       {/* Open orders */}
       <div className="card p-4">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-gray-200 text-sm">Open Orders</h3>
+          <div>
+            <h3 className="font-semibold text-gray-200 text-sm">Open Orders</h3>
+            <div className="text-xs text-gray-500 mt-1">
+              Review order state carefully: partial fills may leave remaining quantity open while protective orders are still working.
+            </div>
+          </div>
           {detailQuery.isFetching && <RefreshCw size={13} className="text-gray-500 animate-spin" />}
         </div>
         <OrdersTable orders={orders} />
@@ -332,6 +407,22 @@ export function LiveMonitor() {
   const pausePolling = usePollingGate()
   const [openTabs, setOpenTabs] = useState<string[]>([])
   const [activeTab, setActiveTab] = useState<string | null>(null)
+  const qc = useQueryClient()
+  const { lastEvent, isConnected, isStale } = useWebSocket()
+
+  // Invalidate relevant queries when WS pushes an event
+  useEffect(() => {
+    if (!lastEvent) return
+    const { type } = lastEvent
+    if (type === 'position_update') {
+      qc.invalidateQueries({ queryKey: ['monitor-positions'] })
+    } else if (type === 'order_fill') {
+      qc.invalidateQueries({ queryKey: ['monitor-detail'] })
+      qc.invalidateQueries({ queryKey: ['monitor-positions'] })
+    } else if (type === 'kill_switch' || type === 'governor_event') {
+      qc.invalidateQueries({ queryKey: ['monitor-runs'] })
+    }
+  }, [lastEvent, qc])
 
   const runsQuery = useQuery({
     queryKey: ['monitor-runs'],
@@ -361,12 +452,29 @@ export function LiveMonitor() {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-xl font-bold">Live Monitor</h1>
+          <h1 className="flex flex-wrap items-center gap-2 text-xl font-bold">
+            Live Monitor
+            <PageHelp page="monitor" />
+            <span className={clsx(
+              'flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-normal',
+              isConnected && !isStale
+                ? 'border-green-700 bg-green-950/40 text-green-400'
+                : 'border-yellow-700 bg-yellow-950/40 text-yellow-400',
+            )}>
+              {isConnected && !isStale
+                ? <><Wifi size={11} /> Live</>
+                : <><WifiOff size={11} /> Polling</>}
+            </span>
+          </h1>
           <p className="text-sm text-gray-500">
-            Track all active paper and live runs simultaneously.
+            Track all active paper and live runs simultaneously, with explicit mode, freshness, and order-state visibility.
           </p>
+          {/* Expose last WS event for e2e tests */}
+          <div data-testid="ws-last-event" className="mt-2 text-xs text-gray-400">
+            {lastEvent ? JSON.stringify(lastEvent) : ''}
+          </div>
         </div>
         <button
           type="button"
@@ -379,7 +487,7 @@ export function LiveMonitor() {
       </div>
 
       {/* Active runs grid (always visible) */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {runs.length === 0 && !runsQuery.isFetching && (
           <div className="col-span-full text-sm text-gray-500 py-6 text-center card p-6">
             No active paper or live runs found. Deploy a strategy first.
@@ -407,7 +515,7 @@ export function LiveMonitor() {
               </span>
             </div>
             <div className="text-xs text-gray-500 mb-3 truncate">{run.account_name}</div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div>
                 <div className="text-xs text-gray-600">Equity</div>
                 <div className="text-sm font-mono text-gray-200">{fmt$(run.account_equity)}</div>
@@ -456,7 +564,7 @@ export function LiveMonitor() {
           {/* Tab content */}
           <div className="p-4">
             {activeRun ? (
-              <RunPanel run={activeRun} />
+              <RunPanel run={activeRun} isConnected={isConnected} isStale={isStale} />
             ) : (
               <div className="text-sm text-gray-500 py-4 text-center">
                 This run is no longer active.

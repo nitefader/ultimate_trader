@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -40,6 +40,32 @@ class Deployment(Base):
     # Promotion source
     promoted_from_deployment_id: Mapped[str | None] = mapped_column(String(36))  # paper deployment that promoted to live
     promoted_from_run_id: Mapped[str | None] = mapped_column(String(36))
+
+    # Governor identity
+    governor_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    governor_status: Mapped[str] = mapped_column(String(32), default="active")
+    # active | initializing | paused | halted
+
+    # Risk profile link
+    risk_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
+    # Governor poll configuration
+    poll_config: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # Collision + correlation state (ephemeral snapshot for UI)
+    collision_state_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    correlation_data_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Daily accounting
+    session_realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    daily_loss_lockout_triggered: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Halt info
+    halt_trigger: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    halt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Observability
+    last_governor_tick_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     strategy: Mapped["Strategy"] = relationship("Strategy", back_populates="deployments")
     account: Mapped["Account"] = relationship("Account", back_populates="deployments")

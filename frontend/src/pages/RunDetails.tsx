@@ -8,6 +8,7 @@ import { DrawdownChart } from '../components/Charts/DrawdownChart'
 import { MonthlyHeatmap } from '../components/Charts/MonthlyHeatmap'
 import { TradeEntryExitChart } from '../components/Charts/TradeEntryExitChart'
 import { ModeIndicator } from '../components/ModeIndicator'
+import { TradeReplayPanel } from '../components/TradeReplayPanel'
 import { SelectMenu } from '../components/SelectMenu'
 import clsx from 'clsx'
 import type { Account, BacktestRun, CompareRunsResponse } from '../types'
@@ -45,6 +46,18 @@ function fmtDT(iso: string | undefined | null): string {
   return iso.replace('T', ' ').slice(0, 16)
 }
 
+function summarizeFeature(feature: {
+  kind: string
+  params: Record<string, unknown>
+}): string {
+  const paramEntries = Object.entries(feature.params)
+  if (paramEntries.length === 0) return feature.kind
+  const params = paramEntries
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(', ')
+  return `${feature.kind} (${params})`
+}
+
 const EXIT_REASON_COLOR: Record<string, string> = {
   stop_loss:      'text-red-400',
   trailing_stop:  'text-orange-400',
@@ -60,7 +73,7 @@ const EXIT_REASON_COLOR: Record<string, string> = {
 }
 
 /** Expandable trade row — click to see MAE/MFE, initial stop/target, conditions fired, scale events */
-function TradeRow({ t }: { t: Trade }) {
+function TradeRow({ t, onReplay }: { t: Trade; onReplay?: (id: string) => void }) {
   const [open, setOpen] = useState(false)
   const exitColor = EXIT_REASON_COLOR[t.exit_reason ?? ''] ?? 'text-gray-400'
   const pnlColor = (t.net_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
@@ -183,6 +196,15 @@ function TradeRow({ t }: { t: Trade }) {
                 ) : (
                   <span className="text-gray-600 italic">No scale events</span>
                 )}
+                {onReplay && (
+                  <button
+                    type="button"
+                    onClick={() => onReplay(t.id)}
+                    className="mt-2 text-xs text-sky-400 hover:text-sky-200 border border-sky-800 hover:border-sky-500 rounded px-2 py-1 transition"
+                  >
+                    ▶ Replay this trade
+                  </button>
+                )}
               </div>
             </div>
           </td>
@@ -205,6 +227,7 @@ export function RunDetails() {
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [promoteNotes, setPromoteNotes] = useState('')
   const [promoteSuccess, setPromoteSuccess] = useState<string | null>(null)
+  const [replayTradeId, setReplayTradeId] = useState<string | null>(null)
   const [promoteError, setPromoteError] = useState<string | null>(null)
 
   const { data: run, isLoading, error: runError } = useQuery<BacktestRun>({
@@ -254,6 +277,18 @@ export function RunDetails() {
     enabled: !!compareRunId,
   })
 
+  const { data: regimeData } = useQuery({
+    queryKey: ['regime-analysis', runId],
+    queryFn: () => backtestsApi.getRegimeAnalysis(runId!),
+    enabled: !!runId && run?.status === 'completed',
+  })
+
+  const { data: recommendationsData } = useQuery({
+    queryKey: ['recommendations', runId],
+    queryFn: () => backtestsApi.getRecommendations(runId!),
+    enabled: !!runId && run?.status === 'completed',
+  })
+
   const { data: compareEquityCurveData } = useQuery({
     queryKey: ['equity-curve', compareRunId],
     queryFn: () => backtestsApi.getEquityCurve(compareRunId),
@@ -293,6 +328,7 @@ export function RunDetails() {
     (antiBias?.cpcv_primary_guard_passed ?? true),
   )
   const noTrades = run.status === 'completed' && (m?.total_trades ?? 0) === 0
+  const featurePlanPreview = run.feature_plan_preview
 
   const handlePromoteToPaper = async () => {
     if (!selectedAccountId || !run.strategy_version_id) return
@@ -377,15 +413,25 @@ export function RunDetails() {
             <span className="text-xs text-gray-600">Capital ${run.initial_capital.toLocaleString()}</span>
           </div>
         </div>
-        {(run.status === 'running' || run.status === 'pending') && (
-          <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-full" style={{ backgroundColor: 'var(--color-bg-hover)', color: 'var(--color-accent)', border: '1px solid var(--color-accent)' }}>
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: 'var(--color-accent)' }} />
-              <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: 'var(--color-accent)' }} />
-            </span>
-            {run.status === 'pending' ? 'Queued…' : 'Running…'}
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {run.status === 'completed' && (run as any).strategy_version_id && (
+            <Link
+              to={`/programs?strategy_version_id=${(run as any).strategy_version_id}&run_id=${run.id}`}
+              className="btn-primary text-xs flex items-center gap-1.5"
+            >
+              ＋ Create Program
+            </Link>
+          )}
+          {(run.status === 'running' || run.status === 'pending') && (
+            <div className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-full" style={{ backgroundColor: 'var(--color-bg-hover)', color: 'var(--color-accent)', border: '1px solid var(--color-accent)' }}>
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: 'var(--color-accent)' }} />
+                <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: 'var(--color-accent)' }} />
+              </span>
+              {run.status === 'pending' ? 'Queued…' : 'Running…'}
+            </div>
+          )}
+        </div>
       </div>
 
       {run.error_message && (
@@ -512,6 +558,100 @@ export function RunDetails() {
       {/* Overview tab */}
       {tab === 'overview' && (
         <div className="space-y-4">
+          {featurePlanPreview && (
+            <section className="rounded-xl border border-sky-900/60 bg-sky-950/20 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.22em] text-sky-200/70">Feature Engine</div>
+                  <h3 className="mt-1 text-sm font-semibold text-sky-100">Execution Feature Plan</h3>
+                  <p className="mt-1 max-w-2xl text-xs text-sky-100/70">
+                    Canonical feature demand captured at launch so runtime warm-up, timeframe needs, and session-aware studies stay inspectable from the run itself.
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div className="rounded-lg border border-sky-900/60 bg-gray-950/50 px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-sky-200/60">Features</div>
+                    <div className="text-lg font-semibold text-white">{featurePlanPreview.features.length}</div>
+                  </div>
+                  <div className="rounded-lg border border-sky-900/60 bg-gray-950/50 px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-sky-200/60">Keys</div>
+                    <div className="text-lg font-semibold text-white">{featurePlanPreview.feature_keys.length}</div>
+                  </div>
+                  <div className="rounded-lg border border-sky-900/60 bg-gray-950/50 px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-sky-200/60">Frames</div>
+                    <div className="text-lg font-semibold text-white">{featurePlanPreview.timeframes.join(', ') || '—'}</div>
+                  </div>
+                  <div className="rounded-lg border border-sky-900/60 bg-gray-950/50 px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-sky-200/60">Warm-Up</div>
+                    <div className="text-lg font-semibold text-white">
+                      {Object.values(featurePlanPreview.warmup_bars_by_timeframe).reduce((total, bars) => total + bars, 0) || '—'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 xl:grid-cols-[1.4fr_1fr]">
+                <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Planned Features</div>
+                  <div className="space-y-2">
+                    {featurePlanPreview.features.length === 0 ? (
+                      <div className="text-xs text-gray-500">No canonical feature demand was captured on this run.</div>
+                    ) : (
+                      featurePlanPreview.features.map((feature, index) => (
+                        <div key={`${feature.kind}-${index}`} className="rounded-md border border-gray-800 bg-gray-900/60 px-3 py-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-sm font-medium text-gray-100">{summarizeFeature(feature)}</div>
+                            <div className="text-[11px] uppercase tracking-wide text-sky-300">{feature.timeframe}</div>
+                          </div>
+                          <div className="mt-1 text-xs text-gray-400">
+                            Source: <span className="text-gray-200">{feature.source}</span>
+                            {' · '}
+                            Runtime columns: <span className="text-gray-200">{feature.runtime_columns.join(', ')}</span>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Warm-Up by Frame</div>
+                    <div className="space-y-2">
+                      {Object.keys(featurePlanPreview.warmup_bars_by_timeframe).length === 0 ? (
+                        <div className="text-xs text-gray-500">No warm-up requirements were captured.</div>
+                      ) : (
+                        Object.entries(featurePlanPreview.warmup_bars_by_timeframe).map(([timeframe, bars]) => (
+                          <div key={timeframe} className="flex items-center justify-between rounded-md border border-gray-800 bg-gray-900/60 px-3 py-2 text-xs">
+                            <span className="text-gray-300">{timeframe}</span>
+                            <span className="font-semibold text-white">{bars} bars</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/60 p-3">
+                    <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-400">Demand Scope</div>
+                    <div className="space-y-1 text-xs text-gray-300">
+                      <div>
+                        Symbols:{' '}
+                        <span className="text-white">
+                          {featurePlanPreview.symbols.length
+                            ? featurePlanPreview.symbols.join(', ')
+                            : 'Inherited or resolved at execution time'}
+                        </span>
+                      </div>
+                      <div>
+                        Feature keys:{' '}
+                        <span className="text-white">{featurePlanPreview.feature_keys.length}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* Walk-forward summary banner — only shown when WF was run AND there are trades */}
           {wf && !noTrades && (
@@ -647,6 +787,68 @@ export function RunDetails() {
               </div>
             </div>
           )}
+
+          {/* Regime suitability */}
+          {regimeData && regimeData.regimes.length > 0 && (
+            <div className="card">
+              <h3 className="text-sm font-semibold mb-3">Regime Suitability</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-gray-800 text-gray-500 text-left">
+                      <th className="pb-2 pr-4 font-medium">Regime</th>
+                      <th className="pb-2 pr-4 font-medium text-right">Trades</th>
+                      <th className="pb-2 pr-4 font-medium text-right">Win Rate</th>
+                      <th className="pb-2 pr-4 font-medium text-right">Avg P&L</th>
+                      <th className="pb-2 font-medium">Suitability</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/50">
+                    {regimeData.regimes.map(r => (
+                      <tr key={r.regime}>
+                        <td className="py-1.5 pr-4 text-gray-300 font-mono">{r.regime}</td>
+                        <td className="py-1.5 pr-4 text-right text-gray-400">{r.trade_count}</td>
+                        <td className="py-1.5 pr-4 text-right text-gray-300">{(r.win_rate * 100).toFixed(0)}%</td>
+                        <td className={clsx('py-1.5 pr-4 text-right', r.avg_pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                          {r.avg_pnl >= 0 ? '+' : ''}${r.avg_pnl.toFixed(0)}
+                        </td>
+                        <td className="py-1.5">
+                          <span className={clsx('px-1.5 py-0.5 rounded text-xs font-medium', {
+                            'bg-emerald-900/60 text-emerald-300': r.suitability === 'recommended',
+                            'bg-gray-800 text-gray-400': r.suitability === 'neutral',
+                            'bg-red-900/60 text-red-400': r.suitability === 'avoid',
+                          })}>
+                            {r.suitability}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Strategy diagnostics */}
+          {recommendationsData && recommendationsData.recommendations.length > 0 && (
+            <div className="card">
+              <h3 className="text-sm font-semibold mb-3">Strategy Diagnostics</h3>
+              <div className="space-y-2">
+                {recommendationsData.recommendations.map((rec, i) => (
+                  <div key={i} className={clsx('flex items-start gap-2.5 rounded px-3 py-2 text-xs', {
+                    'bg-sky-950/30 border border-sky-800/40 text-sky-300': rec.severity === 'info',
+                    'bg-amber-950/30 border border-amber-800/40 text-amber-300': rec.severity === 'warning',
+                    'bg-red-950/30 border border-red-800/40 text-red-300': rec.severity === 'danger',
+                  })}>
+                    <span className="flex-shrink-0 mt-0.5">
+                      {rec.severity === 'info' ? 'ℹ' : rec.severity === 'warning' ? '⚠' : '✕'}
+                    </span>
+                    <span>{rec.message}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -758,12 +960,21 @@ export function RunDetails() {
                 </thead>
                 <tbody>
                   {sortedTrades.map((t: Trade) => (
-                    <TradeRow key={t.id} t={t} />
+                    <TradeRow key={t.id} t={t} onReplay={setReplayTradeId} />
                   ))}
                 </tbody>
               </table>
             </div>
           </div>
+
+          {/* Replay panel — shown below the table when a trade is selected */}
+          {replayTradeId && runId && (
+            <TradeReplayPanel
+              runId={runId}
+              tradeId={replayTradeId}
+              onClose={() => setReplayTradeId(null)}
+            />
+          )}
         </div>
       )}
 

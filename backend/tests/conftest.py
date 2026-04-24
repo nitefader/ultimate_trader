@@ -18,7 +18,7 @@ from app.main import app
 from app.database import AsyncSessionLocal
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session")
 def event_loop():
     loop = asyncio.new_event_loop()
     yield loop

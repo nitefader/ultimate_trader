@@ -25,6 +25,7 @@ import {
 import { Activity, ChevronDown, ChevronUp, Settings, X } from 'lucide-react'
 import api from '../api/client'
 import { strategiesApi } from '../api/strategies'
+import { normalizeSymbol, eqSym, includesSym } from '../lib/symbol'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -199,6 +200,7 @@ function CandlestickLayer(props: any) {
           if (typeof px === 'number' && !isNaN(px)) cx = px
         }
         if (cx == null) cx = xOffset + (i + 0.5) * slotWidth
+        const cxN = cx as number
 
         const yH = yScale(high)
         const yL = yScale(low)
@@ -210,9 +212,9 @@ function CandlestickLayer(props: any) {
 
         return (
           <g key={i}>
-            <line x1={cx} x2={cx} y1={yH} y2={yL} stroke={color} strokeWidth={1} />
+            <line x1={cxN} x2={cxN} y1={yH} y2={yL} stroke={color} strokeWidth={1} />
             <rect
-              x={cx - bw / 2}
+              x={cxN - bw / 2}
               y={bodyTop}
               width={bw}
               height={bodyH}
@@ -375,11 +377,11 @@ export function ChartLab() {
 
   const timeframesForSymbol = useMemo(() => {
     if (!selectedSymbol) return []
-    return [...new Set((inventory ?? []).filter(i => i.symbol === selectedSymbol).map(i => i.timeframe))]
+    return [...new Set((inventory ?? []).filter(i => eqSym(i.symbol, selectedSymbol)).map(i => i.timeframe))]
   }, [inventory, selectedSymbol])
 
   const selectedItem = useMemo(() =>
-    (inventory ?? []).find(i => i.symbol === selectedSymbol && i.timeframe === selectedTf),
+    (inventory ?? []).find(i => eqSym(i.symbol, selectedSymbol) && i.timeframe === selectedTf),
   [inventory, selectedSymbol, selectedTf])
 
   // Reset zoom when symbol/timeframe/limit changes

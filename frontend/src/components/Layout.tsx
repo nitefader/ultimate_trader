@@ -1,14 +1,15 @@
 import React, { memo, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useOutlet, Link } from 'react-router-dom'
 import {
-  BarChart2, Database, Layers,
+  BarChart2, Database, List, Layers,
   Monitor, Shield, TrendingUp, Zap, Calendar,
   Activity, Key, Radio, Server, Target, FlaskConical, Palette, CandlestickChart, PlayCircle,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, ShieldCheck, HardDriveDownload, Clock, Play, Menu, X,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { KillSwitch } from './KillSwitch'
 import { WatchlistToastRail } from './WatchlistToastRail'
+import { PreMarketChecklist } from './PreMarketChecklist'
 import { deploymentsApi } from '../api/accounts'
 import { backtestsApi } from '../api/backtests'
 import { usePollingGate } from '../hooks/usePollingGate'
@@ -26,33 +27,48 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    group: 'Research',
+    group: 'Build',
     items: [
       { to: '/strategies', label: 'Strategies', icon: Layers },
-      { to: '/backtest', label: 'Backtest', icon: TrendingUp },
-      { to: '/runs', label: 'Run History', icon: BarChart2 },
-      { to: '/lab', label: 'Optim. Lab', icon: FlaskConical },
-      { to: '/charts', label: 'Chart Lab', icon: CandlestickChart },
-      { to: '/simulation', label: 'Sim Lab', icon: PlayCircle },
-      { to: '/watchlists', label: 'Watchlists', icon: Layers },
+      { to: '/watchlists', label: 'Watchlists', icon: List },
+      { to: '/risk-profiles', label: 'Risk Profiles', icon: ShieldCheck },
+      { to: '/strategy-controls', label: 'Strategy Controls', icon: Clock },
+      { to: '/execution-styles', label: 'Execution Styles', icon: Play },
     ],
   },
   {
-    group: 'Live Trading',
+    group: 'Test & Validate',
     items: [
-      { to: '/monitor', label: 'Live Monitor', icon: Radio },
-      { to: '/deployments', label: 'Deploy', icon: Zap },
-      { to: '/accounts', label: 'Accounts', icon: Shield },
+      { to: '/simulation', label: 'Sim Lab', icon: PlayCircle },
+      { to: '/backtest', label: 'Backtest', icon: TrendingUp },
+      { to: '/runs', label: 'Run History', icon: BarChart2 },
+      { to: '/charts', label: 'Chart Lab', icon: CandlestickChart },
+    ],
+  },
+  {
+    group: 'Optimize',
+    items: [
+      { to: '/lab', label: 'Optim. Lab', icon: FlaskConical },
+    ],
+  },
+  {
+    group: 'Deploy & Monitor',
+    items: [
       { to: '/programs', label: 'Programs', icon: Target },
+      { to: '/deployments', label: 'Deployments', icon: Zap },
+      { to: '/monitor', label: 'Live Monitor', icon: Radio },
+      { to: '/portfolio-governors', label: 'Portfolio Governor', icon: ShieldCheck },
+      { to: '/broker-accounts', label: 'Broker Accounts', icon: Shield },
     ],
   },
   {
     group: 'System',
     items: [
-      { to: '/services', label: 'Services', icon: Server },
+      { to: '/services/data', label: 'Services', icon: Server },
       { to: '/security', label: 'Credentials', icon: Key },
       { to: '/data', label: 'Data', icon: Database },
       { to: '/events', label: 'Events', icon: Calendar },
+      { to: '/backup', label: 'Backup', icon: HardDriveDownload },
       { to: '/logs', label: 'Logs', icon: Activity },
     ],
   },
@@ -60,13 +76,29 @@ const NAV_GROUPS: NavGroup[] = [
 
 export function Layout() {
   const [showKillSwitchWarning, setShowKillSwitchWarning] = React.useState(false)
+  const [isMobileNav, setIsMobileNav] = useState<boolean>(() => typeof window !== 'undefined' && window.innerWidth < 1024)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
-      return typeof window !== 'undefined' && localStorage.getItem('ultratrader.sidebar_collapsed') === '1'
+      const saved = localStorage.getItem('ultratrader.sidebar_collapsed')
+      if (saved !== null) return saved === '1'
+      return typeof window !== 'undefined' && window.innerWidth < 1200
     } catch {
       return false
     }
   })
+
+  useEffect(() => {
+    function onResize() {
+      const nextIsMobileNav = window.innerWidth < 1024
+      setIsMobileNav(nextIsMobileNav)
+      if (window.innerWidth < 1200) setCollapsed(true)
+      if (!nextIsMobileNav) setMobileNavOpen(false)
+    }
+    onResize()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   useEffect(() => {
     const wasKilled = localStorage.getItem('ultratrader.kill_switch_active') === '1'
@@ -75,7 +107,6 @@ export function Layout() {
     }
   }, [])
 
-  // Persist collapsed state
   useEffect(() => {
     try {
       localStorage.setItem('ultratrader.sidebar_collapsed', collapsed ? '1' : '0')
@@ -101,40 +132,55 @@ export function Layout() {
           </div>
         </div>
       )}
+      <PreMarketChecklist />
 
-      {/* Sidebar */}
+      {isMobileNav && mobileNavOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation menu"
+          className="fixed inset-0 z-30 bg-black/60 lg:hidden"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
+
       <aside
-        className={clsx(collapsed ? 'w-14' : 'w-56', 'flex-shrink-0 flex flex-col')}
-        style={{ backgroundColor: 'var(--color-bg-card)', borderRight: '1px solid var(--color-border)', transition: 'width 180ms ease' }}
+        className={clsx(
+          'flex flex-col',
+          isMobileNav
+            ? clsx(
+                'fixed inset-y-0 left-0 z-40 w-72 max-w-[86vw] shadow-2xl transition-transform duration-200',
+                mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
+              )
+            : clsx(collapsed ? 'w-12' : 'w-48', 'flex-shrink-0')
+        )}
+        style={{ backgroundColor: 'var(--color-bg-card)', borderRight: '1px solid var(--color-border)', transition: isMobileNav ? undefined : 'width 180ms ease' }}
       >
-        {/* Logo */}
         <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: '1px solid var(--color-border)' }}>
           <div className="flex items-center gap-2">
-            <div className="font-bold tracking-tight" style={{ color: 'var(--color-accent)', fontSize: collapsed ? 16 : undefined }}>
-              {collapsed ? 'UT' : 'UltraTrader'}
+            <div className="font-bold tracking-tight" style={{ color: 'var(--color-accent)', fontSize: !isMobileNav && collapsed ? 16 : undefined }}>
+              {!isMobileNav && collapsed ? 'UT' : 'UltraTrader'}
             </div>
-            {!collapsed && (
+            {(isMobileNav || !collapsed) && (
               <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>2026 Edition</div>
             )}
           </div>
           <div>
             <button
-              onClick={() => setCollapsed(c => !c)}
-              aria-pressed={collapsed}
-              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              onClick={() => isMobileNav ? setMobileNavOpen(false) : setCollapsed((current) => !current)}
+              aria-pressed={isMobileNav ? mobileNavOpen : collapsed}
+              aria-label={isMobileNav ? 'Close sidebar' : collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
               className="p-1 rounded hover:bg-gray-800/30"
-              title={collapsed ? 'Expand' : 'Collapse'}
+              title={isMobileNav ? 'Close' : collapsed ? 'Expand' : 'Collapse'}
             >
-              {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+              {isMobileNav ? <X size={16} /> : collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
             </button>
           </div>
         </div>
 
-        {/* Nav */}
         <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-4">
           {NAV_GROUPS.map(({ group, items }) => (
             <div key={group}>
-              {group && !collapsed && (
+              {group && (isMobileNav || !collapsed) && (
                 <div className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest select-none" style={{ color: 'var(--color-text-faint)' }}>
                   {group}
                 </div>
@@ -145,18 +191,21 @@ export function Layout() {
                     key={to}
                     to={to}
                     end={end}
-                    title={collapsed ? label : undefined}
+                    title={!isMobileNav && collapsed ? label : undefined}
                     aria-label={label}
+                    onClick={() => {
+                      if (isMobileNav) setMobileNavOpen(false)
+                    }}
                     className={({ isActive }) =>
                       clsx(
                         'flex items-center gap-2.5 py-1.5 rounded text-sm transition-colors',
                         isActive ? 'nav-active' : 'nav-idle',
-                        collapsed ? 'justify-center px-0' : 'px-3'
+                        !isMobileNav && collapsed ? 'justify-center px-0' : 'px-3'
                       )
                     }
                   >
-                    <Icon size={collapsed ? 18 : 15} />
-                    {!collapsed && label}
+                    <Icon size={!isMobileNav && collapsed ? 18 : 15} />
+                    {(isMobileNav || !collapsed) && label}
                   </NavLink>
                 ))}
               </div>
@@ -164,30 +213,36 @@ export function Layout() {
           ))}
         </nav>
 
-        {/* Theme picker */}
-        <ThemePicker collapsed={collapsed} />
+        <ThemePicker collapsed={!isMobileNav && collapsed} />
 
         <div className="px-3 pb-3 pt-2" style={{ borderTop: '1px solid var(--color-border)' }}>
-          <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>{collapsed ? 'v1' : 'v1.0.0'}</div>
+          <div className="text-xs" style={{ color: 'var(--color-text-faint)' }}>{!isMobileNav && collapsed ? 'v1' : 'v1.0.0'}</div>
         </div>
       </aside>
 
       <WatchlistToastRail />
 
-      {/* Main */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Header */}
-        <header className="h-12 flex items-center justify-between px-4 flex-shrink-0" style={{ backgroundColor: 'var(--color-bg-card)', borderBottom: '1px solid var(--color-border)' }}>
-          <div className="flex items-center gap-3">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex min-h-12 flex-shrink-0 flex-wrap items-center justify-between gap-2 px-3 py-2 sm:px-4" style={{ backgroundColor: 'var(--color-bg-card)', borderBottom: '1px solid var(--color-border)' }}>
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            {isMobileNav && (
+              <button
+                type="button"
+                onClick={() => setMobileNavOpen(true)}
+                className="rounded p-1.5 hover:bg-gray-800/30"
+                aria-label="Open navigation menu"
+              >
+                <Menu size={18} />
+              </button>
+            )}
             <HeaderDeploymentStatus />
             <BacktestRunningIndicator />
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             <KillSwitch />
           </div>
         </header>
 
-        {/* Content */}
         <StableOutlet />
       </div>
     </div>
@@ -209,13 +264,13 @@ const HeaderDeploymentStatus = memo(function HeaderDeploymentStatus() {
     notifyOnChangeProps: ['data'],
   })
 
-  const paperActive = deployments.filter(d => d.status === 'running' && d.mode === 'paper').length
-  const liveActive = deployments.filter(d => d.status === 'running' && d.mode === 'live').length
+  const paperActive = deployments.filter((deployment) => deployment.status === 'running' && deployment.mode === 'paper').length
+  const liveActive = deployments.filter((deployment) => deployment.status === 'running' && deployment.mode === 'live').length
 
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex min-w-0 items-center gap-3">
       {(paperActive > 0 || liveActive > 0) ? (
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           {paperActive > 0 && (
             <span className="flex items-center gap-1.5 px-2 py-1 rounded bg-indigo-900/60 text-indigo-300 ring-1 ring-indigo-700 font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
@@ -243,19 +298,19 @@ const BacktestRunningIndicator = memo(function BacktestRunningIndicator() {
     queryFn: () => backtestsApi.list(undefined, 20),
     refetchInterval: pausePolling ? false : 4_000,
     notifyOnChangeProps: ['data'],
-    select: (data) => data.filter((r: any) => r.status === 'running' || r.status === 'pending'),
+    select: (data) => data.filter((run: any) => run.status === 'running' || run.status === 'pending'),
   })
 
   if (!runs.length) return null
 
   const run = runs[0]
   const label = run.status === 'pending' ? 'Queued' : 'Running'
-  const symbols = (run.symbols as string[] | undefined)?.join(', ') ?? '…'
+  const symbols = (run.symbols as string[] | undefined)?.join(', ') ?? '...'
 
   return (
     <Link
       to={`/runs/${run.id}`}
-      className="flex items-center gap-2 text-xs px-2.5 py-1 rounded-full transition-opacity hover:opacity-80"
+      className="flex max-w-full items-center gap-2 rounded-full px-2.5 py-1 text-xs transition-opacity hover:opacity-80"
       style={{ backgroundColor: 'color-mix(in srgb, var(--color-accent) 15%, transparent)', color: 'var(--color-accent)', border: '1px solid var(--color-accent)', textDecoration: 'none' }}
       title="Click to view backtest progress"
     >
@@ -263,7 +318,7 @@ const BacktestRunningIndicator = memo(function BacktestRunningIndicator() {
         <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: 'var(--color-accent)' }} />
         <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: 'var(--color-accent)' }} />
       </span>
-      Backtest {label} · {symbols}
+      <span className="truncate">Backtest {label} - {symbols}</span>
       {runs.length > 1 && <span className="ml-1 opacity-70">+{runs.length - 1}</span>}
     </Link>
   )
@@ -272,7 +327,7 @@ const BacktestRunningIndicator = memo(function BacktestRunningIndicator() {
 const StableOutlet = memo(function StableOutlet() {
   const outlet = useOutlet()
 
-  return <main className="flex-1 overflow-y-auto p-4 min-h-0" style={{ backgroundColor: 'var(--color-bg-page)' }}>{outlet}</main>
+  return <main className="flex-1 min-h-0 overflow-x-hidden overflow-y-auto p-2 sm:p-3 lg:p-4" style={{ backgroundColor: 'var(--color-bg-page)' }}>{outlet}</main>
 })
 
 function ThemePicker({ collapsed = false }: { collapsed?: boolean }) {
@@ -291,7 +346,7 @@ function ThemePicker({ collapsed = false }: { collapsed?: boolean }) {
   return (
     <div ref={ref} className="relative px-3 pb-2" style={{ borderTop: '1px solid var(--color-border)', paddingTop: '0.5rem' }}>
       <button
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setOpen((current) => !current)}
         className="flex items-center gap-2 w-full px-2 py-1.5 rounded text-xs transition-colors"
         style={{ color: 'var(--color-text-muted)' }}
         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--color-bg-hover)')}
@@ -314,24 +369,24 @@ function ThemePicker({ collapsed = false }: { collapsed?: boolean }) {
           }}
         >
           <div className="text-[10px] uppercase tracking-widest px-2 pb-1" style={{ color: 'var(--color-text-faint)' }}>Themes</div>
-          {THEMES.map((t) => (
+          {THEMES.map((themeOption) => (
             <button
-              key={t.value}
-              onClick={() => { setTheme(t.value); setOpen(false) }}
+              key={themeOption.value}
+              onClick={() => { setTheme(themeOption.value); setOpen(false) }}
               className="flex items-center gap-2.5 w-full px-2 py-1.5 rounded text-xs transition-colors"
               style={{
-                color: theme === t.value ? 'var(--color-accent)' : 'var(--color-text-muted)',
-                backgroundColor: theme === t.value ? 'var(--color-accent-dim)' : 'transparent',
+                color: theme === themeOption.value ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                backgroundColor: theme === themeOption.value ? 'var(--color-accent-dim)' : 'transparent',
               }}
-              onMouseEnter={(e) => { if (theme !== t.value) e.currentTarget.style.backgroundColor = 'var(--color-bg-hover)' }}
-              onMouseLeave={(e) => { if (theme !== t.value) e.currentTarget.style.backgroundColor = 'transparent' }}
+              onMouseEnter={(e) => { if (theme !== themeOption.value) e.currentTarget.style.backgroundColor = 'var(--color-bg-hover)' }}
+              onMouseLeave={(e) => { if (theme !== themeOption.value) e.currentTarget.style.backgroundColor = 'transparent' }}
             >
               <span
                 className="w-3 h-3 rounded-full border"
-                style={{ backgroundColor: t.preview, borderColor: 'var(--color-border)' }}
+                style={{ backgroundColor: themeOption.preview, borderColor: 'var(--color-border)' }}
               />
-              {t.label}
-              {theme === t.value && <span className="ml-auto text-[10px]">✓</span>}
+              {themeOption.label}
+              {theme === themeOption.value && <span className="ml-auto text-[10px]">OK</span>}
             </button>
           ))}
         </div>

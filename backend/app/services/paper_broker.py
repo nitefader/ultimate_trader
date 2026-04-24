@@ -149,17 +149,74 @@ async def _process_deployment(
     stop_config = config.get("stop_loss", {"method": "fixed_pct", "value": 2.0})
     sizing_config = config.get("position_sizing", {"method": "risk_pct", "risk_pct": 1.0})
 
+    # Resolve ATR override bars if deployment's execution style uses a custom ATR timeframe
+    atr_override_config: dict = {}
+    atr_override_bars: dict[str, pd.DataFrame] = {}
+    atr_cfg_from_config = config.get("_atr_override_config")
+    if atr_cfg_from_config and atr_cfg_from_config.get("source") == "custom" and atr_cfg_from_config.get("timeframe"):
+        atr_override_config = atr_cfg_from_config
+        for sym in symbols:
+            bars = _load_bars(sym, atr_cfg_from_config["timeframe"])
+            if bars is not None:
+                atr_override_bars[sym] = bars
+
+    # Collect per-indicator alternate timeframe requirements from strategy conditions
+    _alt_tf_refs: dict[str, set[str]] = {}
+
+    def _walk_for_tf(node: object) -> None:
+        if isinstance(node, dict):
+            if "indicator" in node and "timeframe" in node and node.get("timeframe"):
+                _alt_tf_refs.setdefault(node["timeframe"], set()).add(node["indicator"])
+            for v in node.values():
+                _walk_for_tf(v)
+        elif isinstance(node, list):
+            for item in node:
+                _walk_for_tf(item)
+
+    _walk_for_tf(config)
+
+    # Load cached bars for each required alternate timeframe (all symbols up front)
+    # Structure: {symbol: {timeframe: indicator_df}}
+    alt_tf_bars: dict[str, dict[str, pd.DataFrame]] = {}
+    for alt_tf in _alt_tf_refs:
+        if alt_tf == timeframe:
+            continue
+        for sym in symbols:
+            raw = _load_bars(sym, alt_tf)
+            if raw is not None:
+                try:
+                    computed = _build_indicators(raw, config)
+                    alt_tf_bars.setdefault(sym, {})[alt_tf] = computed
+                except Exception:
+                    pass
+
     for symbol in symbols:
         df = _load_bars(symbol, timeframe)
         if df is None or len(df) < 30:
             logger.debug("Paper broker: no/insufficient cached data for %s/%s", symbol, timeframe)
             continue
 
+        # Try Cerebro indicator cache first (compute-once-serve-many)
+        idf = None
         try:
-            idf = _build_indicators(df, config)
-        except Exception as exc:
-            logger.warning("Paper broker: indicator build failed for %s: %s", symbol, exc)
-            continue
+            from app.cerebro.engine import _cerebro  # direct singleton access
+            if _cerebro is not None:
+                frame = _cerebro.get_indicator_frame(symbol, timeframe)
+                if frame and frame.is_warm and len(frame.bars) > 0:
+                    combined = frame.bars.copy()
+                    for col in frame.indicators.columns:
+                        if col not in combined.columns:
+                            combined[col] = frame.indicators[col]
+                    idf = combined
+        except Exception:
+            pass
+
+        if idf is None:
+            try:
+                idf = _build_indicators(df, config)
+            except Exception as exc:
+                logger.warning("Paper broker: indicator build failed for %s: %s", symbol, exc)
+                continue
 
         bar_index = len(idf) - 1
         bar = idf.iloc[bar_index]
@@ -180,6 +237,15 @@ async def _process_deployment(
         has_position = open_trade is not None
         position_size = float(open_trade.quantity) if open_trade else 0.0
 
+        # Build alternate-TF bar slices: only completed bars up to current timestamp
+        extra_bars_sym: dict[str, pd.DataFrame] = {}
+        extra_bar_idx_sym: dict[str, int] = {}
+        for alt_tf, alt_df in alt_tf_bars.get(symbol, {}).items():
+            completed = alt_df[alt_df.index <= current_ts]
+            if len(completed) > 0:
+                extra_bars_sym[alt_tf] = completed
+                extra_bar_idx_sym[alt_tf] = len(completed) - 1
+
         ctx = EvalContext(
             bar=bar,
             bar_index=bar_index,
@@ -191,6 +257,8 @@ async def _process_deployment(
             sr_zones=[],
             swing_highs=[],
             swing_lows=[],
+            extra_bars=extra_bars_sym,
+            extra_bar_index=extra_bar_idx_sym,
         )
 
         # ── EXIT processing ──────────────────────────────────────────────
@@ -256,9 +324,12 @@ async def _process_deployment(
                 if evaluate_conditions(entry_conditions, ctx, entry_logic):
                     entry_price = price
 
+                    from app.strategies.stops import resolve_atr_override
+                    atr_override = resolve_atr_override(atr_override_config, atr_override_bars.get(symbol, pd.DataFrame()), current_ts) if atr_override_config else None
                     stop_price = calculate_stop(
                         stop_config, entry_price, direction, bar, idf, bar_index,
                         fvgs=[], sr_zones=[], swing_lows=[], swing_highs=[],
+                        atr_override=atr_override,
                     )
 
                     if sizing_config.get("method") == "rolling_kelly":
@@ -397,6 +468,15 @@ async def paper_broker_loop() -> None:
             logger.exception("Paper broker executor error: %s", exc)
 
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+def get_cerebro() -> "CerebroEngine | None":
+    """Return the active Cerebro engine instance if available."""
+    try:
+        from app.cerebro.engine import _cerebro
+        return _cerebro
+    except Exception:
+        return None
 
 
 _loop_task: asyncio.Task | None = None

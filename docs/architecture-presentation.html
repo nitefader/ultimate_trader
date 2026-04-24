@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>UltraTrader 2026 — Architecture Plan</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #030712;
+    color: #f1f5f9;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  .deck { width: 100vw; height: 100vh; position: relative; }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 60px 80px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.35s ease;
+  }
+  .slide.active { opacity: 1; pointer-events: all; }
+
+  /* ── background variants ── */
+  .slide.hero {
+    background: radial-gradient(ellipse at 20% 40%, rgba(56,189,248,0.18) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 60%, rgba(99,102,241,0.14) 0%, transparent 55%),
+                linear-gradient(135deg, #0f172a 0%, #030712 100%);
+  }
+  .slide.dark { background: #0f172a; }
+  .slide.darker { background: #030712; }
+  .slide.accent {
+    background: radial-gradient(ellipse at 30% 30%, rgba(99,102,241,0.22) 0%, transparent 60%),
+                #0f172a;
+  }
+
+  /* ── typography ── */
+  .eyebrow {
+    font-size: 11px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: #38bdf8;
+    margin-bottom: 14px;
+  }
+  h1 { font-size: 52px; font-weight: 800; line-height: 1.1; text-align: center; }
+  h2 { font-size: 36px; font-weight: 700; margin-bottom: 6px; }
+  h3 { font-size: 22px; font-weight: 600; color: #38bdf8; margin-bottom: 16px; }
+  .subtitle { font-size: 18px; color: #94a3b8; margin-top: 16px; text-align: center; max-width: 640px; }
+  .dim { color: #64748b; font-size: 13px; margin-top: 10px; }
+
+  /* ── layout helpers ── */
+  .cols { display: flex; gap: 24px; width: 100%; }
+  .col { flex: 1; }
+  .center { text-align: center; }
+
+  /* ── cards ── */
+  .card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    padding: 24px 28px;
+    margin-bottom: 16px;
+  }
+  .card-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 8px; }
+  .card-body { font-size: 14px; color: #94a3b8; line-height: 1.6; }
+
+  /* ── component pills ── */
+  .pill-row { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin: 24px 0; }
+  .pill {
+    display: flex; flex-direction: column; align-items: center;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    padding: 18px 22px;
+    min-width: 140px;
+    gap: 8px;
+  }
+  .pill-icon { font-size: 26px; }
+  .pill-name { font-size: 13px; font-weight: 700; text-align: center; }
+  .pill-desc { font-size: 11px; color: #64748b; text-align: center; line-height: 1.4; }
+
+  .pill.sky   { border-color: rgba(56,189,248,0.35);  background: rgba(56,189,248,0.08); }
+  .pill.indigo{ border-color: rgba(99,102,241,0.35);  background: rgba(99,102,241,0.08); }
+  .pill.emerald{border-color: rgba(52,211,153,0.35);  background: rgba(52,211,153,0.08); }
+  .pill.amber { border-color: rgba(251,191,36,0.35);  background: rgba(251,191,36,0.08); }
+  .pill.fuchsia{border-color: rgba(232,121,249,0.35); background: rgba(232,121,249,0.08);}
+  .pill.rose  { border-color: rgba(251,113,133,0.35); background: rgba(251,113,133,0.08);}
+
+  /* ── tables ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; color: #38bdf8; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; border-bottom: 1px solid rgba(255,255,255,0.08); }
+  td { padding: 9px 12px; color: #cbd5e1; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+  .tag.new    { background: rgba(52,211,153,0.15); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+  .tag.exists { background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.3); }
+  .tag.update { background: rgba(251,191,36,0.15); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); }
+
+  /* ── arrows / flow ── */
+  .flow { display: flex; align-items: center; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 20px 0; }
+  .flow-box {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 12px 20px;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+  }
+  .flow-arrow { color: #475569; font-size: 20px; }
+
+  /* ── bullets ── */
+  ul.clean { list-style: none; }
+  ul.clean li { padding: 6px 0; font-size: 14px; color: #cbd5e1; padding-left: 20px; position: relative; }
+  ul.clean li::before { content: "→"; position: absolute; left: 0; color: #38bdf8; }
+
+  /* ── progress bar ── */
+  .progress {
+    position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 6px; z-index: 100;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: rgba(255,255,255,0.15);
+    transition: background 0.3s;
+    cursor: pointer;
+  }
+  .dot.active { background: #38bdf8; }
+
+  /* ── nav hint ── */
+  .nav-hint {
+    position: fixed; bottom: 28px; right: 40px;
+    font-size: 11px; color: #374151; letter-spacing: 0.08em;
+  }
+
+  /* ── slide number ── */
+  .slide-num {
+    position: fixed; top: 28px; right: 40px;
+    font-size: 11px; color: #374151;
+  }
+
+  /* ── phase badge ── */
+  .phase-badge {
+    display: inline-block;
+    background: rgba(99,102,241,0.2);
+    border: 1px solid rgba(99,102,241,0.4);
+    color: #818cf8;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 4px 12px;
+    border-radius: 99px;
+    margin-bottom: 16px;
+  }
+
+  /* ── highlight text ── */
+  .hl-sky { color: #38bdf8; }
+  .hl-emerald { color: #34d399; }
+  .hl-amber { color: #fbbf24; }
+  .hl-indigo { color: #818cf8; }
+
+  .section-header {
+    width: 100%;
+    margin-bottom: 24px;
+  }
+
+  .divider {
+    width: 48px; height: 3px;
+    background: linear-gradient(90deg, #38bdf8, #6366f1);
+    border-radius: 2px;
+    margin: 12px 0 20px;
+  }
+</style>
+</head>
+<body>
+
+<div class="deck" id="deck">
+
+  <!-- ─── SLIDE 1: Title ──────────────────────────────────────────────── -->
+  <div class="slide hero active">
+    <div class="eyebrow">UltraTrader 2026 · Architecture Redesign</div>
+    <h1>Five-Component<br/><span class="hl-sky">Program Architecture</span></h1>
+    <p class="subtitle">A clean separation of concerns — from monolithic strategy configs to modular, reusable, composable trading programs.</p>
+    <p class="dim" style="margin-top:40px;">Use ← → arrow keys or click dots to navigate</p>
+  </div>
+
+  <!-- ─── SLIDE 2: The Problem ─────────────────────────────────────────── -->
+  <div class="slide dark">
+    <div class="section-header">
+      <div class="eyebrow">The Problem</div>
+      <h2>Everything is in one blob</h2>
+      <div class="divider"></div>
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#f87171;">Current StrategyConfig</div>
+          <div class="card-body">
+            Entry conditions + Stop + Target<br/>
+            + Timeframe + Session windows<br/>
+            + PDT rules + Gap risk<br/>
+            + Position sizing + Leverage<br/>
+            + Risk caps + Regime filter<br/>
+            + Cooldown rules + Order type<br/>
+            + Slippage model + Commission<br/>
+            <strong style="color:#f87171;">= 60+ fields, impossible to reuse</strong>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="color:#f87171;">The Result</div>
+          <div class="card-body">Every strategy is unique. Nothing is reusable. Creating a new strategy means filling out the same session hours, sizing rules, and order mechanics from scratch every time.</div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">The Vision</div>
+          <div class="card-body">
+            A <strong style="color:#fff;">Strategy</strong> is just a signal.<br/><br/>
+            "Fast EMA crosses above slow EMA → go long. Stop at swing low. Target at 2R."<br/><br/>
+            Everything else — <em>when to fire</em>, <em>how to order</em>, <em>how much to risk</em>, <em>which symbols</em> — lives in separate reusable components that snap into a <strong style="color:#fff;">Program</strong>.
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">The Result</div>
+          <div class="card-body">Build a strategy once. Attach different governors, execution styles, risk profiles, and watchlists to create unlimited programs. Backtest the program, not the strategy.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 3: The Five Components ────────────────────────────────── -->
+  <div class="slide accent">
+    <div class="section-header center">
+      <div class="eyebrow">Architecture</div>
+      <h2 class="center">Five Standalone Components</h2>
+      <div class="divider" style="margin: 12px auto 0;"></div>
+    </div>
+    <div class="pill-row">
+      <div class="pill sky">
+        <div class="pill-icon">📈</div>
+        <div class="pill-name">Strategy</div>
+        <div class="pill-desc">Entry condition<br/>Stop definition<br/>Target definition<br/>Logical exits</div>
+      </div>
+      <div class="pill indigo">
+        <div class="pill-icon">🕐</div>
+        <div class="pill-name">Strategy<br/>Governor</div>
+        <div class="pill-desc">Timeframe<br/>Session windows<br/>Regime filter<br/>Cooldown rules</div>
+      </div>
+      <div class="pill emerald">
+        <div class="pill-icon">⚡</div>
+        <div class="pill-name">Execution<br/>Style</div>
+        <div class="pill-desc">Alpaca order type<br/>Bracket / OCO<br/>Limit pullback<br/>Trailing stop</div>
+      </div>
+      <div class="pill amber">
+        <div class="pill-icon">🛡️</div>
+        <div class="pill-name">Risk<br/>Profile</div>
+        <div class="pill-desc">Risk % per trade<br/>→ position sizing<br/>Loss limits<br/>Position caps</div>
+      </div>
+      <div class="pill fuchsia">
+        <div class="pill-icon">📋</div>
+        <div class="pill-name">Watchlist</div>
+        <div class="pill-desc">Symbols to trade<br/>Union / intersect<br/>Multiple lists<br/>Already built</div>
+      </div>
+    </div>
+    <div class="flow" style="margin-top:8px;">
+      <div class="flow-box" style="border-color:rgba(56,189,248,0.4);color:#38bdf8;">Program</div>
+      <div class="flow-arrow">=</div>
+      <div class="flow-box">Strategy</div>
+      <div class="flow-arrow">+</div>
+      <div class="flow-box">Governor</div>
+      <div class="flow-arrow">+</div>
+      <div class="flow-box">Exec Style</div>
+      <div class="flow-arrow">+</div>
+      <div class="flow-box">Risk Profile</div>
+      <div class="flow-arrow">+</div>
+      <div class="flow-box">Watchlist(s)</div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 4: Strategy ────────────────────────────────────────────── -->
+  <div class="slide dark">
+    <div class="section-header">
+      <div class="eyebrow">Component 1</div>
+      <h2><span class="hl-sky">Strategy</span> — Pure Signal Logic</h2>
+      <div class="divider"></div>
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#38bdf8;">What it contains</div>
+          <div class="card-body">
+            <ul class="clean">
+              <li>Entry conditions (indicators, price action)</li>
+              <li>Stop definition (swing low, ATR multiple, fixed %)</li>
+              <li>Target definition (R-multiple, ATR, resistance)</li>
+              <li>Logical exit conditions (exit when RSI does X)</li>
+              <li>Hypothesis — the edge in plain language</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#f87171;">What it does NOT contain</div>
+          <div class="card-body">
+            <ul class="clean" style="">
+              <li style="color:#64748b;">❌ Timeframe</li>
+              <li style="color:#64748b;">❌ Session windows or PDT rules</li>
+              <li style="color:#64748b;">❌ Position sizing or leverage</li>
+              <li style="color:#64748b;">❌ Risk caps or portfolio limits</li>
+              <li style="color:#64748b;">❌ Alpaca order type or bracket logic</li>
+              <li style="color:#64748b;">❌ Watchlist or symbols</li>
+            </ul>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">Result</div>
+          <div class="card-body">A strategy is portable. One EMA crossover strategy can power a day-trading program on 5m bars AND a swing program on daily bars. No duplication.</div>
+        </div>
+      </div>
+    </div>
+    <p class="dim center">Strategy Builder form → 3 tabs only: Core (identity) · Signals (entry/exit conditions) · Advanced</p>
+  </div>
+
+  <!-- ─── SLIDE 5: Strategy Governor ──────────────────────────────────── -->
+  <div class="slide dark">
+    <div class="section-header">
+      <div class="eyebrow">Component 2</div>
+      <h2><span class="hl-indigo">Strategy Governor</span> — When to Fire</h2>
+      <div class="divider"></div>
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#818cf8;">What it controls</div>
+          <div class="card-body">
+            <ul class="clean">
+              <li>Timeframe (5m, 1h, 1d, etc.)</li>
+              <li>Duration mode (day / swing / position)</li>
+              <li>Session windows — only fire 9:35–11:00 ET</li>
+              <li>Force-flat by time (e.g. 15:45 close)</li>
+              <li>Regime filter — only in trending_up</li>
+              <li>Cooldown rules — wait 60 min after stop-out</li>
+              <li>Max trades per session cap</li>
+              <li>Earnings blackout — close before earnings</li>
+              <li>PDT protection rules</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#818cf8;">Golden templates</div>
+          <div class="card-body">
+            <strong>Day Trade NYSE 5m</strong><br/>5m · day · 9:35–11:00 + 13:30–15:00 · flat by 15:45<br/><br/>
+            <strong>Swing Daily 1d</strong><br/>1d · swing · no session restrictions<br/><br/>
+            <strong>Position Weekly 1d</strong><br/>1d · position · earnings blackout · weekend allowed
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">Why separate?</div>
+          <div class="card-body">An ORB strategy at 2pm is not a valid ORB signal. The time filter IS part of signal validity — but it's reusable. The same governor can be attached to multiple strategies.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 6: Execution Style ────────────────────────────────────── -->
+  <div class="slide dark">
+    <div class="section-header">
+      <div class="eyebrow">Component 3</div>
+      <h2><span class="hl-emerald">Execution Style</span> — Alpaca Order Mechanics</h2>
+      <div class="divider"></div>
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">The key insight</div>
+          <div class="card-body">The strategy says <strong>"entry here, stop here, target here."</strong><br/><br/>The Execution Style answers: <strong>HOW</strong> does Alpaca actually place that?<br/><br/>It reads the strategy's prices and translates them into Alpaca's native order types.</div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">Fields</div>
+          <div class="card-body">
+            Entry order type: market / limit / stop / stop_limit<br/>
+            Time-in-force: day / gtc / ioc / opg<br/>
+            Bracket mode: bracket / OCO / trailing_stop / none<br/>
+            Limit offset method: ATR × N or % pullback<br/>
+            Cancel after N bars if unfilled<br/>
+            Scale-out: close 50% at T1, trail the rest
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">Golden templates</div>
+          <div class="card-body">
+            <strong>Bracket Market Entry</strong><br/>Enter market → auto-attach OCO bracket (TP + SL linked)<br/><br/>
+            <strong>Limit Pullback Entry</strong><br/>Enter limit at close − 0.5×ATR · cancel after 3 bars<br/><br/>
+            <strong>Stop-Limit Breakout</strong><br/>Trigger at breakout level, fill at limit or better<br/><br/>
+            <strong>Trailing Stop Exit</strong><br/>Enter market · trail exit at 2% below highest close
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">Backtest assumptions</div>
+          <div class="card-body">Fill model (next_open / bar_close) · Slippage BPS · Commission per share — absorbed from old execution_policy blob.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 7: Risk Profile ────────────────────────────────────────── -->
+  <div class="slide dark">
+    <div class="section-header">
+      <div class="eyebrow">Component 4</div>
+      <h2><span class="hl-amber">Risk Profile</span> — Sizing + Caps</h2>
+      <div class="divider"></div>
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#fbbf24;">What it contains</div>
+          <div class="card-body">
+            <ul class="clean">
+              <li>Max risk % per trade — <em>this implies position sizing</em></li>
+              <li>Shares = dollar_risk ÷ (entry − stop)</li>
+              <li>Max concurrent positions (long + short separately)</li>
+              <li>Max daily loss %</li>
+              <li>Max portfolio heat %</li>
+              <li>Max drawdown lockout %</li>
+              <li>Max correlated exposure %</li>
+              <li>Max leverage</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#fbbf24;">Two attachment points</div>
+          <div class="card-body">
+            <strong>Program level</strong> — risk rules for this specific program while it's running.<br/><br/>
+            <strong>Account Governor level</strong> — account-wide hard caps that override everything. The kill switch layer.<br/><br/>
+            Same Risk Profile object. Different attachment points.
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title" style="color:#fbbf24;">Already exists</div>
+          <div class="card-body">RiskProfile model is production-ready in the backend. Only change: add risk_profile_id FK to TradingProgram so it can be attached at program level too.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 8: Account Governor ───────────────────────────────────── -->
+  <div class="slide dark">
+    <div class="section-header">
+      <div class="eyebrow">Above the Programs</div>
+      <h2><span class="hl-sky">Account Governor</span></h2>
+      <div class="divider"></div>
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#38bdf8;">Purpose-built accounts</div>
+          <div class="card-body">
+            One account per trading style eliminates cross-style complexity:<br/><br/>
+            📅 <strong>Day trading account</strong> — intraday only, PDT governed<br/>
+            📈 <strong>Swing trading account</strong> — 1–10 day holds<br/>
+            🏔️ <strong>Position trading account</strong> — multi-week, gap risk controls<br/><br/>
+            Each account runs only programs matching its style.
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#38bdf8;">Governor responsibilities</div>
+          <div class="card-body">
+            <ul class="clean">
+              <li>Receives signals from all programs on this account</li>
+              <li>Resolves conflicts: Program A buys TQQQ, Program B shorts TQQQ → Governor decides (already built: ConflictResolver)</li>
+              <li>Tracks positions by Alpaca client_order_id (already built)</li>
+              <li>Enforces account-wide kill switch</li>
+              <li>Controls capital allocation per program</li>
+              <li>Has its own Risk Profile (account-wide hard caps)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:0;">
+      <div class="card-body center">
+        Alpaca does not allow long and short on the same symbol in one account. The Account Governor is the single point that enforces this — before anything hits Alpaca.
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 9: What Exists vs What's New ──────────────────────────── -->
+  <div class="slide darker">
+    <div class="section-header">
+      <div class="eyebrow">Implementation</div>
+      <h2>What Exists vs What's New</h2>
+      <div class="divider"></div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Status</th>
+          <th>Work Required</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Strategy</strong> (model + API)</td>
+          <td><span class="tag update">Update</span></td>
+          <td>Strip Builder form to 3 tabs. JSON format unchanged.</td>
+        </tr>
+        <tr>
+          <td><strong>Strategy Governor</strong></td>
+          <td><span class="tag new">Build New</span></td>
+          <td>New DB model, CRUD API, library page, golden templates.</td>
+        </tr>
+        <tr>
+          <td><strong>Execution Style</strong></td>
+          <td><span class="tag new">Build New</span></td>
+          <td>New DB model, CRUD API, library page, golden templates.</td>
+        </tr>
+        <tr>
+          <td><strong>Risk Profile</strong></td>
+          <td><span class="tag update">Update</span></td>
+          <td>Model exists. Add risk_profile_id FK to TradingProgram.</td>
+        </tr>
+        <tr>
+          <td><strong>Watchlist</strong></td>
+          <td><span class="tag exists">Ready</span></td>
+          <td>No changes. Already production-ready.</td>
+        </tr>
+        <tr>
+          <td><strong>TradingProgram</strong></td>
+          <td><span class="tag update">Update</span></td>
+          <td>Add 3 FK columns (governor, exec style, risk profile). Update CARDS UI.</td>
+        </tr>
+        <tr>
+          <td><strong>ConflictResolver</strong></td>
+          <td><span class="tag exists">Ready</span></td>
+          <td>Symbol conflict detection already built.</td>
+        </tr>
+        <tr>
+          <td><strong>Alpaca order ID tracking</strong></td>
+          <td><span class="tag exists">Ready</span></td>
+          <td>build_program_client_order_id() already built.</td>
+        </tr>
+        <tr>
+          <td><strong>Backtest → Program resolver</strong></td>
+          <td><span class="tag new">Build New</span></td>
+          <td>resolve_program_to_config() merges all components into flat config.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ─── SLIDE 10: Program Assembly ──────────────────────────────────── -->
+  <div class="slide accent">
+    <div class="section-header center">
+      <div class="eyebrow">How it Works</div>
+      <h2 class="center">Composing a Program</h2>
+      <div class="divider" style="margin: 12px auto 20px;"></div>
+    </div>
+    <div class="cols" style="align-items:flex-start;">
+      <div class="col">
+        <div class="card">
+          <div class="card-title">Step 1 — Build components</div>
+          <div class="card-body">
+            Create a Strategy: "EMA cross, stop at swing low, target 2R"<br/><br/>
+            Create a Governor: "Day Trade NYSE 5m — fire 9:35–11:00 only"<br/><br/>
+            Create an Exec Style: "Bracket Market Entry — enter market, auto-attach OCO bracket"<br/><br/>
+            Pick a Risk Profile: "Conservative — 1% risk per trade, max 5 positions"<br/><br/>
+            Pick a Watchlist: "S&P 500 High Momentum"
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title">Step 2 — Compose the Program</div>
+          <div class="card-body">Snap all five together in the Program builder. Each slot shows a picker modal. Programs are frozen before deployment — all component refs locked.</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Step 3 — Backtest the Program</div>
+          <div class="card-body">The backtest engine resolves all components into one flat config dict — same format it's always consumed. No breaking changes.</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Step 4 — Deploy to Account</div>
+          <div class="card-body">Frozen program deployed to purpose-built account. Account Governor receives all signals, resolves conflicts, enforces hard caps.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 11: Backtest Flow ──────────────────────────────────────── -->
+  <div class="slide dark">
+    <div class="section-header">
+      <div class="eyebrow">Backtesting</div>
+      <h2>Backtest Programs, Not Strategies</h2>
+      <div class="divider"></div>
+    </div>
+    <div class="flow" style="flex-direction:column; align-items:flex-start; gap:16px; max-width:700px; margin:0 auto;">
+      <div class="flow" style="margin:0; gap:10px;">
+        <div class="flow-box" style="border-color:rgba(56,189,248,0.4);">Program</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-box" style="min-width:300px;">resolve_program_to_config()<br/><span style="font-size:11px;color:#64748b;">loads all 5 components, merges to flat dict</span></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-box" style="border-color:rgba(52,211,153,0.4);">BacktestEngine</div>
+      </div>
+      <div style="font-size:13px;color:#64748b;padding-left:12px;">
+        Strategy config (base) + Governor fields (timeframe, windows, regime) + Exec fields (entry_module) + Risk fields (sizing, caps) + Watchlist symbols
+        = one flat dict the engine already knows how to read
+      </div>
+    </div>
+    <div class="cols" style="margin-top:24px;">
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">Backward compatible</div>
+          <div class="card-body">BacktestLauncher keeps its "Strategy Version" mode. Existing saved strategies continue to work unchanged. New path: select a frozen Program instead.</div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title" style="color:#34d399;">What backtest recommends</div>
+          <div class="card-body">Walk-forward and optimization produce program recommendations — best Governor config, best Risk Profile settings. "Generate Program" button creates a draft from the results.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 12: Implementation Phases ─────────────────────────────── -->
+  <div class="slide darker">
+    <div class="section-header">
+      <div class="eyebrow">Execution Plan</div>
+      <h2>Four Implementation Phases</h2>
+      <div class="divider"></div>
+    </div>
+    <div class="cols">
+      <div class="col">
+        <div class="card">
+          <div class="phase-badge">Phase 1</div>
+          <div class="card-title">Backend Models + Migrations</div>
+          <div class="card-body">
+            Create StrategyGovernor model<br/>
+            Create ExecutionStyle model<br/>
+            Add 3 FK columns to TradingProgram<br/>
+            Register new API routers<br/>
+            Seed golden templates<br/>
+            Add resolve_program_to_config()
+          </div>
+        </div>
+        <div class="card">
+          <div class="phase-badge">Phase 2</div>
+          <div class="card-title">Frontend Types + API</div>
+          <div class="card-body">
+            Add StrategyGovernor + ExecutionStyle interfaces<br/>
+            Create strategyGovernors.ts API<br/>
+            Create executionStyles.ts API<br/>
+            Update programs.ts with new FK fields
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="phase-badge">Phase 3</div>
+          <div class="card-title">Frontend Pages</div>
+          <div class="card-body">
+            Build StrategyGovernors library page<br/>
+            Build ExecutionStyles library page<br/>
+            Update TradingPrograms CARDS (5 slots)<br/>
+            Add routes + navigation links
+          </div>
+        </div>
+        <div class="card">
+          <div class="phase-badge">Phase 4</div>
+          <div class="card-title">Strategy Builder Cleanup</div>
+          <div class="card-body">
+            Strip CoreTab to identity only<br/>
+            Remove Risk tab from Strategy Creator<br/>
+            Add "use a Governor instead" banner to Advanced tab<br/>
+            Update blueprint checks in useStrategyForm
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SLIDE 13: Summary ────────────────────────────────────────────── -->
+  <div class="slide hero">
+    <div class="eyebrow">Summary</div>
+    <h1 style="font-size:40px;">Clean. Modular. Reusable.</h1>
+    <div class="pill-row" style="margin-top:32px;">
+      <div class="pill sky"><div class="pill-icon">📈</div><div class="pill-name">Strategy</div><div class="pill-desc">Signal only</div></div>
+      <div class="pill indigo"><div class="pill-icon">🕐</div><div class="pill-name">Governor</div><div class="pill-desc">When to fire</div></div>
+      <div class="pill emerald"><div class="pill-icon">⚡</div><div class="pill-name">Exec Style</div><div class="pill-desc">How to order</div></div>
+      <div class="pill amber"><div class="pill-icon">🛡️</div><div class="pill-name">Risk Profile</div><div class="pill-desc">Caps + sizing</div></div>
+      <div class="pill fuchsia"><div class="pill-icon">📋</div><div class="pill-name">Watchlist</div><div class="pill-desc">Which symbols</div></div>
+    </div>
+    <div class="flow" style="margin-top:16px;">
+      <div class="flow-box" style="border-color:rgba(56,189,248,0.5);color:#38bdf8;font-size:16px;padding:16px 32px;">Program = all five composed</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box" style="font-size:16px;padding:16px 32px;">Backtest</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box" style="font-size:16px;padding:16px 32px;">Deploy to Account</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box" style="border-color:rgba(52,211,153,0.5);color:#34d399;font-size:16px;padding:16px 32px;">Account Governor</div>
+    </div>
+    <p class="subtitle" style="margin-top:24px;">Build components once. Compose programs instantly. Backtest programs. Deploy to purpose-built accounts.</p>
+  </div>
+
+</div>
+
+<!-- Progress dots -->
+<div class="progress" id="progress"></div>
+<div class="nav-hint">← → to navigate</div>
+<div class="slide-num" id="slide-num"></div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  const progress = document.getElementById('progress');
+  const slideNum = document.getElementById('slide-num');
+  let current = 0;
+
+  // Build dots
+  slides.forEach((_, i) => {
+    const dot = document.createElement('div');
+    dot.className = 'dot' + (i === 0 ? ' active' : '');
+    dot.onclick = () => goTo(i);
+    progress.appendChild(dot);
+  });
+
+  function goTo(n) {
+    slides[current].classList.remove('active');
+    document.querySelectorAll('.dot')[current].classList.remove('active');
+    current = Math.max(0, Math.min(slides.length - 1, n));
+    slides[current].classList.add('active');
+    document.querySelectorAll('.dot')[current].classList.add('active');
+    slideNum.textContent = (current + 1) + ' / ' + slides.length;
+  }
+
+  goTo(0);
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') goTo(current + 1);
+    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')                    goTo(current - 1);
+  });
+</script>
+</body>
+</html>

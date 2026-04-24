@@ -53,6 +53,12 @@ class DeploymentTrade(Base):
     unrealized_pnl: Mapped[float | None] = mapped_column(Float)
     current_stop: Mapped[float | None] = mapped_column(Float)
 
+    # Stop ownership: "internal" = engine manages via replace_order;
+    # "broker" = Alpaca trailing stop is live, engine must not submit competing stops
+    stop_control: Mapped[str] = mapped_column(String(16), default="internal")
+    # Alpaca order ID of the active stop/trailing-stop leg (None = no live stop order yet)
+    alpaca_stop_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Context
     regime_at_entry: Mapped[str | None] = mapped_column(String(64))
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)

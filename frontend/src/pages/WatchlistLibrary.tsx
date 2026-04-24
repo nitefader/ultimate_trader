@@ -6,8 +6,10 @@ import { SelectMenu } from '../components/SelectMenu'
 import clsx from 'clsx'
 import {
   Plus, RefreshCw, ChevronRight, X, Search, BookOpen,
-  Clock, Layers, Zap, Calendar, BarChart2, Trash2, Pencil, Check,
+  Clock, Layers, Zap, Calendar, BarChart2, Trash2, Pencil, Check, Crown, Copy,
 } from 'lucide-react'
+import { PageHelp } from '../components/PageHelp'
+import { normalizeSymbol, eqSym, includesSym } from '../lib/symbol'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -156,11 +158,12 @@ function AddSymbolsPanel({ watchlistId, onDone }: { watchlistId: string; onDone:
 
 // ─── Membership Row ───────────────────────────────────────────────────────────
 
-function MemberRow({ m, watchlistId, selected, onToggleSelect }: {
+function MemberRow({ m, watchlistId, selected, onToggleSelect, readOnly = false }: {
   m: WatchlistMembership
   watchlistId: string
   selected: boolean
   onToggleSelect: () => void
+  readOnly?: boolean
 }) {
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -198,42 +201,44 @@ function MemberRow({ m, watchlistId, selected, onToggleSelect }: {
           {new Date(m.active_since).toLocaleDateString()}
         </span>
       )}
-      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        {m.state !== 'suspended' && m.state !== 'inactive' && (
-          <button
-            onClick={() => suspend.mutate()}
-            disabled={suspend.isPending}
-            className="text-xs text-gray-600 hover:text-amber-400 px-1.5 py-0.5 rounded hover:bg-amber-950/30"
-          >
-            suspend
-          </button>
-        )}
-        {confirmDelete ? (
-          <>
+      {!readOnly && (
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {m.state !== 'suspended' && m.state !== 'inactive' && (
             <button
-              onClick={() => remove.mutate()}
-              disabled={remove.isPending}
-              className="text-xs text-red-400 px-1.5 py-0.5 rounded bg-red-950/40 hover:bg-red-900/50"
+              onClick={() => suspend.mutate()}
+              disabled={suspend.isPending}
+              className="text-xs text-gray-600 hover:text-amber-400 px-1.5 py-0.5 rounded hover:bg-amber-950/30"
             >
-              {remove.isPending ? '…' : 'confirm'}
+              suspend
             </button>
+          )}
+          {confirmDelete ? (
+            <>
+              <button
+                onClick={() => remove.mutate()}
+                disabled={remove.isPending}
+                className="text-xs text-red-400 px-1.5 py-0.5 rounded bg-red-950/40 hover:bg-red-900/50"
+              >
+                {remove.isPending ? '…' : 'confirm'}
+              </button>
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="text-xs text-gray-500 hover:text-gray-300"
+              >
+                cancel
+              </button>
+            </>
+          ) : (
             <button
-              onClick={() => setConfirmDelete(false)}
-              className="text-xs text-gray-500 hover:text-gray-300"
+              onClick={() => setConfirmDelete(true)}
+              className="text-gray-600 hover:text-red-400 p-0.5 rounded hover:bg-red-950/30"
+              title="Remove from watchlist"
             >
-              cancel
+              <Trash2 size={10} />
             </button>
-          </>
-        ) : (
-          <button
-            onClick={() => setConfirmDelete(true)}
-            className="text-gray-600 hover:text-red-400 p-0.5 rounded hover:bg-red-950/30"
-            title="Remove from watchlist"
-          >
-            <Trash2 size={10} />
-          </button>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -291,7 +296,7 @@ function WatchlistDetail({ watchlist, onBack }: { watchlist: Watchlist; onBack: 
   })
 
   const filtered = liveWl.memberships.filter(m =>
-    search ? m.symbol.includes(search.toUpperCase()) : true
+    search ? includesSym(m.symbol, search) : true
   )
   const sorted = [...filtered].sort((a, b) => {
     const order = { active: 0, candidate: 1, pending_removal: 2, inactive: 3, suspended: 4 }
@@ -302,14 +307,15 @@ function WatchlistDetail({ watchlist, onBack }: { watchlist: Watchlist; onBack: 
   const candidate = liveWl.memberships.filter(m => m.state === 'candidate')
   const pendingRemoval = liveWl.memberships.filter(m => m.state === 'pending_removal')
   const suspended = liveWl.memberships.filter(m => m.state === 'suspended')
-  const allSymbols = sorted.map(m => m.symbol)
+  const allSymbols = sorted.map(m => normalizeSymbol(m.symbol))
   const allSelected = allSymbols.length > 0 && allSymbols.every(s => selectedSymbols.has(s))
 
   const toggleSymbol = (sym: string) => {
+    const ns = normalizeSymbol(sym)
     setSelectedSymbols(prev => {
       const next = new Set(prev)
-      if (next.has(sym)) next.delete(sym)
-      else next.add(sym)
+      if (next.has(ns)) next.delete(ns)
+      else next.add(ns)
       return next
     })
   }
@@ -346,15 +352,19 @@ function WatchlistDetail({ watchlist, onBack }: { watchlist: Watchlist; onBack: 
             </div>
           ) : (
             <div className="flex items-center gap-2 flex-wrap">
+              {liveWl.is_golden && <Crown size={12} className="text-amber-400 flex-shrink-0" />}
               <span className="text-sm font-semibold text-gray-200">{liveWl.name}</span>
-              <button
-                onClick={() => { setRenameValue(liveWl.name); setRenaming(true) }}
-                className="text-gray-600 hover:text-gray-400"
-                title="Rename watchlist"
-              >
-                <Pencil size={11} />
-              </button>
+              {!liveWl.is_golden && (
+                <button
+                  onClick={() => { setRenameValue(liveWl.name); setRenaming(true) }}
+                  className="text-gray-600 hover:text-gray-400"
+                  title="Rename watchlist"
+                >
+                  <Pencil size={11} />
+                </button>
+              )}
               <TypeBadge type={liveWl.watchlist_type} />
+              {liveWl.is_golden && <span className="text-xs text-amber-500/70">Golden template — read-only</span>}
             </div>
           )}
           <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
@@ -369,16 +379,18 @@ function WatchlistDetail({ watchlist, onBack }: { watchlist: Watchlist; onBack: 
             )}
           </div>
         </div>
-        <button
-          onClick={() => setShowAdd(!showAdd)}
-          className="text-xs flex items-center gap-1 text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-gray-700 hover:border-gray-600"
-        >
-          <Plus size={12} />
-          Add Symbols
-        </button>
+        {!liveWl.is_golden && (
+          <button
+            onClick={() => setShowAdd(!showAdd)}
+            className="text-xs flex items-center gap-1 text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-gray-700 hover:border-gray-600"
+          >
+            <Plus size={12} />
+            Add Symbols
+          </button>
+        )}
       </div>
 
-      {showAdd && (
+      {showAdd && !liveWl.is_golden && (
         <AddSymbolsPanel watchlistId={liveWl.id} onDone={() => setShowAdd(false)} />
       )}
 
@@ -398,7 +410,7 @@ function WatchlistDetail({ watchlist, onBack }: { watchlist: Watchlist; onBack: 
       )}
 
       {/* Bulk action bar */}
-      {selectedSymbols.size > 0 && (
+      {selectedSymbols.size > 0 && !liveWl.is_golden && (
         <div className="flex items-center gap-3 rounded border border-sky-800 bg-sky-950/30 px-3 py-2">
           <span className="text-xs text-sky-300 font-medium">{selectedSymbols.size} selected</span>
           <div className="flex items-center gap-2 ml-auto">
@@ -462,8 +474,9 @@ function WatchlistDetail({ watchlist, onBack }: { watchlist: Watchlist; onBack: 
               key={m.symbol}
               m={m}
               watchlistId={liveWl.id}
-              selected={selectedSymbols.has(m.symbol)}
+              selected={selectedSymbols.has(normalizeSymbol(m.symbol))}
               onToggleSelect={() => toggleSymbol(m.symbol)}
+              readOnly={liveWl.is_golden}
             />
           ))}
         </div>
@@ -474,26 +487,52 @@ function WatchlistDetail({ watchlist, onBack }: { watchlist: Watchlist; onBack: 
 
 // ─── Watchlist Card ───────────────────────────────────────────────────────────
 
-function WatchlistCard({ wl, onClick }: { wl: Watchlist; onClick: () => void }) {
+function WatchlistCard({ wl, onClick, onDelete, onDuplicate }: {
+  wl: Watchlist
+  onClick: () => void
+  onDelete: () => void
+  onDuplicate: () => void
+}) {
   const active = activeCount(wl)
   const total = totalCount(wl)
 
   return (
-    <button
-      onClick={onClick}
-      className="w-full text-left rounded border border-gray-800 bg-gray-900/50 hover:border-gray-700 hover:bg-gray-900 px-4 py-3 transition-colors space-y-1.5"
-    >
+    <div className={clsx(
+      'rounded border px-4 py-3 transition-colors space-y-1.5',
+      wl.is_golden ? 'border-amber-800/60 bg-amber-950/10 hover:border-amber-700' : 'border-gray-800 bg-gray-900/50 hover:border-gray-700 hover:bg-gray-900'
+    )}>
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-sm font-medium text-gray-200">{wl.name}</span>
-        <TypeBadge type={wl.watchlist_type} />
-        {/* Source pill — how programs reference this */}
-        <span className="text-xs text-sky-400/80 border border-sky-800/50 px-1.5 py-0.5 rounded font-mono">
-          {wl.name.slice(0, 10).replace(/\s+/g, '_').toUpperCase()} ↗
-        </span>
+        <button onClick={onClick} className="flex items-center gap-2 flex-1 text-left min-w-0">
+          {wl.is_golden && <Crown size={12} className="text-amber-400 flex-shrink-0" />}
+          <span className="text-sm font-medium text-gray-200">{wl.name}</span>
+          <TypeBadge type={wl.watchlist_type} />
+          {wl.tags?.map(tag => (
+            <span key={tag} className="text-xs px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">{tag}</span>
+          ))}
+        </button>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <button
+            onClick={(e) => { e.stopPropagation(); onDuplicate() }}
+            className="p-1 rounded text-gray-600 hover:text-sky-400 hover:bg-sky-950/30 transition-colors"
+            title="Duplicate"
+          >
+            <Copy size={12} />
+          </button>
+          {!wl.is_golden && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete() }}
+              className="p-1 rounded text-gray-600 hover:text-red-400 hover:bg-red-950/30 transition-colors"
+              title="Delete"
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex items-center gap-3 text-xs text-gray-500">
         <span className="text-emerald-400 font-medium">{active}</span>
         <span className="text-gray-600">/ {total} symbols</span>
+        {wl.is_golden && <span className="text-amber-500/80">Golden template — read-only</span>}
         {wl.refresh_cron && (
           <span className="flex items-center gap-1 text-gray-600">
             <Clock size={10} /> {wl.refresh_cron}
@@ -503,7 +542,7 @@ function WatchlistCard({ wl, onClick }: { wl: Watchlist; onClick: () => void }) 
           <span className="text-gray-700">updated {new Date(wl.resolved_at).toLocaleDateString()}</span>
         )}
       </div>
-    </button>
+    </div>
   )
 }
 
@@ -519,6 +558,17 @@ export function WatchlistLibrary() {
     queryKey: ['watchlists'],
     queryFn: () => watchlistsApi.list(),
     refetchInterval: pausePolling ? false : 30_000,
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => watchlistsApi.delete(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['watchlists'] }),
+    onError: (e: Error) => alert(e.message),
+  })
+
+  const duplicateMutation = useMutation({
+    mutationFn: (id: string) => watchlistsApi.duplicate(id),
+    onSuccess: (wl) => { qc.invalidateQueries({ queryKey: ['watchlists'] }); setSelected(wl) },
   })
 
   const handleCreated = (wl: Watchlist) => {
@@ -540,7 +590,7 @@ export function WatchlistLibrary() {
       {showCreate && <CreateModal onClose={() => setShowCreate(false)} onCreated={handleCreated} />}
 
       <div className="flex items-center justify-between">
-        <h1 className="text-sm font-semibold text-gray-200">Watchlist Library</h1>
+        <h1 className="text-sm font-semibold text-gray-200 flex items-center">Watchlist Library<PageHelp page="watchlists" /></h1>
         <button
           onClick={() => setShowCreate(true)}
           className="btn-primary text-xs flex items-center gap-1.5"
@@ -570,9 +620,28 @@ export function WatchlistLibrary() {
         </div>
       )}
 
+      {watchlists.some(wl => wl.is_golden) && (
+        <div className="text-xs font-semibold text-amber-600/80 uppercase tracking-wide flex items-center gap-1.5">
+          <Crown size={11} /> Golden Templates
+        </div>
+      )}
       <div className="space-y-2">
-        {watchlists.map(wl => (
-          <WatchlistCard key={wl.id} wl={wl} onClick={() => setSelected(wl)} />
+        {watchlists.filter(wl => wl.is_golden).map(wl => (
+          <WatchlistCard
+            key={wl.id} wl={wl} onClick={() => setSelected(wl)}
+            onDelete={() => { if (confirm(`Delete "${wl.name}"?`)) deleteMutation.mutate(wl.id) }}
+            onDuplicate={() => duplicateMutation.mutate(wl.id)}
+          />
+        ))}
+        {watchlists.some(wl => wl.is_golden) && watchlists.some(wl => !wl.is_golden) && (
+          <div className="text-xs font-semibold text-gray-600 uppercase tracking-wide pt-1">Your Watchlists</div>
+        )}
+        {watchlists.filter(wl => !wl.is_golden).map(wl => (
+          <WatchlistCard
+            key={wl.id} wl={wl} onClick={() => setSelected(wl)}
+            onDelete={() => { if (confirm(`Delete "${wl.name}"?`)) deleteMutation.mutate(wl.id) }}
+            onDuplicate={() => duplicateMutation.mutate(wl.id)}
+          />
         ))}
       </div>
     </div>

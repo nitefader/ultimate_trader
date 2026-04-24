@@ -64,6 +64,12 @@ export const deploymentsApi = {
   pause: (id: string) => api.post(`/deployments/${id}/pause`).then(r => r.data),
   stop: (id: string, reason?: string) => api.post(`/deployments/${id}/stop`, { reason }).then(r => r.data),
   getPositions: (id: string) => api.get(`/deployments/${id}/positions`).then(r => r.data),
+  scaleOut: (id: string, symbol: string, exitPct: number) =>
+    api.post(`/deployments/${id}/positions/${symbol}/scale-out`, { exit_pct: exitPct }).then(r => r.data),
+  replaceStop: (id: string, symbol: string, orderId: string, stopPrice: number, qty?: number) =>
+    api.post(`/deployments/${id}/positions/${symbol}/replace-stop`, { order_id: orderId, stop_price: stopPrice, qty }).then(r => r.data),
+  moveStopToBreakeven: (id: string, symbol: string, orderId: string, entryPrice: number, currentAtr: number, qty?: number, bePad?: number) =>
+    api.post(`/deployments/${id}/positions/${symbol}/move-stop-be`, { order_id: orderId, entry_price: entryPrice, current_atr: currentAtr, qty, breakeven_atr_pad: bePad }).then(r => r.data),
   getTrades: (id: string, openOnly = false) =>
     api.get<{
       trades: DeploymentTradeRow[]
@@ -71,14 +77,65 @@ export const deploymentsApi = {
     }>(`/deployments/${id}/trades`, { params: { open_only: openOnly } }).then(r => r.data),
 }
 
+export interface OrderAuditEntry {
+  order_id: string
+  client_order_id: string | null
+  symbol: string
+  side: string
+  qty: number
+  intent: string
+  reason: string
+  deployment_id: string | null
+}
+
+export interface SweepResult {
+  scope: string
+  dry_run: boolean
+  orders_canceled: OrderAuditEntry[]
+  orders_skipped_protective: OrderAuditEntry[]
+  orders_skipped_has_position: OrderAuditEntry[]
+  orders_skipped_unknown: OrderAuditEntry[]
+  errors: string[]
+  kill_state_fetch_failed: boolean
+  account_id?: string
+}
+
+export interface KillAllResponse {
+  action: string
+  scope: string
+  scope_id: string | null
+  status: string
+  reason: string
+  kill_switch: KillSwitchStatus
+  sweep: SweepResult[]
+}
+
+export interface DeploymentPauseResponse {
+  action: string
+  scope: string
+  scope_id: string
+  status: string
+  kill_state_fetch_failed: boolean
+  orders_canceled: OrderAuditEntry[]
+  orders_skipped_protective: OrderAuditEntry[]
+  orders_skipped_has_position: OrderAuditEntry[]
+  orders_skipped_unknown: OrderAuditEntry[]
+  errors: string[]
+}
+
 export const controlApi = {
   status: () => api.get<{ kill_switch: KillSwitchStatus; platform_mode: string }>('/control/status').then(r => r.data),
-  killAll: (reason: string) => api.post('/control/kill-all', { reason }).then(r => r.data),
+  killAll: (reason: string, dryRun = false) =>
+    api.post<KillAllResponse>('/control/kill-all', { reason, dry_run: dryRun }).then(r => r.data),
   resumeAll: () => api.post('/control/resume-all', {}).then(r => r.data),
   killStrategy: (id: string, reason: string) =>
     api.post(`/control/kill-strategy/${id}`, { reason }).then(r => r.data),
   pauseStrategy: (id: string) => api.post(`/control/pause-strategy/${id}`).then(r => r.data),
   resumeStrategy: (id: string) => api.post(`/control/resume-strategy/${id}`).then(r => r.data),
+  pauseDeployment: (id: string, dryRun = false) =>
+    api.post<DeploymentPauseResponse>(`/control/pause-deployment/${id}`, { dry_run: dryRun }).then(r => r.data),
+  resumeDeployment: (id: string) =>
+    api.post(`/control/resume-deployment/${id}`).then(r => r.data),
   events: (limit?: number) =>
     api.get('/control/kill-events', { params: { limit } }).then(r => r.data),
 }

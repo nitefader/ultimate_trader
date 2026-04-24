@@ -7,10 +7,13 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import get_db
 from app.services import simulation_service
+from app.services.backtest_service import resolve_program_to_config
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +21,8 @@ router = APIRouter(prefix="/simulations", tags=["simulations"])
 
 
 class CreateSimulationRequest(BaseModel):
-    strategy_version_id: str
+    strategy_version_id: str | None = None
+    program_id: str | None = None
     symbols: list[str]
     timeframe: str = "1d"
     start_date: str
@@ -36,11 +40,27 @@ class SkipRequest(BaseModel):
 
 
 @router.post("/create")
-async def create_simulation(req: CreateSimulationRequest):
+async def create_simulation(req: CreateSimulationRequest, db: AsyncSession = Depends(get_db)):
     try:
+        strategy_version_id = req.strategy_version_id
+        strategy_config_override = None
+        symbols = req.symbols
+        if req.program_id:
+            try:
+                strategy_version_id, strategy_config_override, resolved_symbols = await resolve_program_to_config(req.program_id, db)
+            except ValueError as exc:
+                detail = str(exc)
+                if "not found" in detail.lower():
+                    raise HTTPException(status_code=404, detail=detail)
+                raise HTTPException(status_code=400, detail=detail)
+            if not symbols:
+                symbols = resolved_symbols
+        if not strategy_version_id:
+            raise HTTPException(status_code=400, detail="Either strategy_version_id or program_id is required")
         return await simulation_service.create_simulation(
-            strategy_version_id=req.strategy_version_id,
-            symbols=req.symbols, timeframe=req.timeframe,
+            strategy_version_id=strategy_version_id,
+            strategy_config_override=strategy_config_override,
+            symbols=symbols, timeframe=req.timeframe,
             start_date=req.start_date, end_date=req.end_date,
             initial_capital=req.initial_capital,
             commission_per_share=req.commission_per_share,
@@ -49,6 +69,8 @@ async def create_simulation(req: CreateSimulationRequest):
             alpaca_api_key=req.alpaca_api_key,
             alpaca_secret_key=req.alpaca_secret_key,
         )
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import React, { useMemo, useState, useRef } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { strategiesApi } from '../api/strategies'
 import { backtestsApi } from '../api/backtests'
-import { Plus, Search, TrendingUp, Filter } from 'lucide-react'
+import { Plus, Search, TrendingUp, Download, Upload, Sparkles, Loader2, X } from 'lucide-react'
+import { PageHelp } from '../components/PageHelp'
 import clsx from 'clsx'
 import type { Strategy } from '../types'
 
@@ -48,9 +49,99 @@ function TagChip({ tag }: { tag: string }) {
   )
 }
 
+function NewStrategyModal({ onClose }: { onClose: () => void }) {
+  const navigate = useNavigate()
+  const [prompt, setPrompt] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleGenerate = async () => {
+    if (!prompt.trim()) return
+    setLoading(true)
+    setError(null)
+    try {
+      const result = await strategiesApi.generateConditions(prompt.trim(), 'entry')
+      navigate('/strategies/new', { state: { aiPrompt: prompt, aiConditions: result.conditions, aiLogic: result.logic } })
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } }
+      const status = axiosErr?.response?.status
+      const detail = axiosErr?.response?.data?.detail
+      if (status === 424) {
+        setError(`No AI service configured. ${detail ?? 'Go to Services → add a Groq or Gemini key and mark it as Default AI.'}`)
+      } else {
+        setError(detail ?? (err instanceof Error ? err.message : 'Generation failed'))
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-lg rounded-2xl border border-gray-700 bg-gray-950 shadow-2xl p-6 space-y-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-gray-100">New Strategy</h2>
+            <p className="text-xs text-gray-500 mt-0.5">Describe your trading idea and let AI build the signal structure, or start from scratch.</p>
+          </div>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-300 shrink-0 mt-0.5"><X size={16} /></button>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-xs font-medium text-gray-400 uppercase tracking-wide">Describe your strategy</label>
+          <textarea
+            className="w-full rounded-xl border border-gray-700 bg-gray-900 px-3 py-2.5 text-sm text-gray-100 placeholder-gray-600 outline-none focus:border-violet-600 focus:ring-1 focus:ring-violet-600/40 resize-none"
+            rows={4}
+            placeholder="e.g. Buy when RSI crosses above 30 and price is above the 20-period EMA. Exit when RSI crosses above 70."
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleGenerate() }}
+            disabled={loading}
+            autoFocus
+          />
+          <p className="text-[10px] text-gray-600">Ctrl+Enter to generate</p>
+        </div>
+
+        {error && (
+          <div className="rounded-lg border border-red-800/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+            {error}
+          </div>
+        )}
+
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={loading || !prompt.trim()}
+            className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-semibold text-white transition-colors"
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+            {loading ? 'Generating…' : 'Generate with AI'}
+          </button>
+          <Link
+            to="/strategies/new"
+            className="px-4 py-2.5 text-sm text-gray-400 hover:text-gray-200 transition-colors"
+            onClick={onClose}
+          >
+            Build Manually
+          </Link>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function Strategies() {
   const [search, setSearch] = useState('')
   const [catFilter, setCatFilter] = useState('all')
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importSuccess, setImportSuccess] = useState<string | null>(null)
+  const [exporting, setExporting] = useState<string | null>(null)
+  const [showNewModal, setShowNewModal] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const qc = useQueryClient()
+  const navigate = useNavigate()
 
   const { data: strategies = [], isLoading } = useQuery({
     queryKey: ['strategies'],
@@ -103,18 +194,67 @@ export function Strategies() {
 
   return (
     <div className="space-y-5">
+      {showNewModal && <NewStrategyModal onClose={() => setShowNewModal(false)} />}
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-gray-100">Strategies</h1>
+          <h1 className="text-xl font-bold text-gray-100 flex items-center">Strategies<PageHelp page="strategies" /></h1>
           <p className="text-xs text-gray-500 mt-0.5">
             {strategies.length} strat{strategies.length !== 1 ? 'egies' : 'egy'} · click to view versions, config &amp; runs
           </p>
         </div>
-        <Link to="/strategies/new" className="btn-primary flex items-center gap-1.5 text-sm shrink-0">
-          <Plus size={14} /> New Strategy
-        </Link>
+        <div className="flex items-center gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={async (e) => {
+              const file = e.target.files?.[0]
+              if (!file) return
+              setImportError(null)
+              setImportSuccess(null)
+              try {
+                const text = await file.text()
+                const payload = JSON.parse(text)
+                const result = await strategiesApi.import(payload)
+                setImportSuccess(`Imported "${result.strategy_name}" (${result.versions_imported} version${result.versions_imported !== 1 ? 's' : ''})`)
+                qc.invalidateQueries({ queryKey: ['strategies'] })
+                setTimeout(() => navigate(`/strategies/${result.strategy_id}`), 800)
+              } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : 'Import failed'
+                setImportError(msg)
+              }
+              e.target.value = ''
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="btn-secondary flex items-center gap-1.5 text-sm shrink-0"
+          >
+            <Upload size={14} /> Import
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowNewModal(true)}
+            className="btn-primary flex items-center gap-1.5 text-sm shrink-0"
+          >
+            <Plus size={14} /> New Strategy
+          </button>
+        </div>
       </div>
+
+      {importError && (
+        <div className="rounded border border-red-800 bg-red-950/30 px-4 py-2 text-sm text-red-300">
+          Import failed: {importError}
+        </div>
+      )}
+      {importSuccess && (
+        <div className="rounded border border-green-800 bg-green-950/30 px-4 py-2 text-sm text-green-300">
+          {importSuccess}
+        </div>
+      )}
 
       {/* Filters */}
       {!isLoading && strategies.length > 0 && (
@@ -164,9 +304,13 @@ export function Strategies() {
             A strategy defines your entry logic, stop loss, targets, and risk rules.
             Create one here, then launch backtests to validate it.
           </p>
-          <Link to="/strategies/new" className="btn-primary text-sm inline-flex items-center gap-1.5 mt-1">
+          <button
+            type="button"
+            onClick={() => setShowNewModal(true)}
+            className="btn-primary text-sm inline-flex items-center gap-1.5 mt-1"
+          >
             <Plus size={14} /> Create First Strategy
-          </Link>
+          </button>
         </div>
       )}
 
@@ -197,7 +341,25 @@ export function Strategies() {
             <StrategyCard
               key={s.id}
               strategy={s}
-              bestRun={undefined /* per-strategy linkage requires fetching versions — show on detail page */}
+              bestRun={undefined}
+              onExport={async () => {
+                setExporting(s.id)
+                try {
+                  const data = await strategiesApi.export(s.id)
+                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = `strategy_${s.name.replace(/\s+/g, '_')}.json`
+                  a.click()
+                  URL.revokeObjectURL(url)
+                } catch {
+                  // silently ignore — browser download failures are rare
+                } finally {
+                  setExporting(null)
+                }
+              }}
+              isExporting={exporting === s.id}
             />
           )
         })}
@@ -206,52 +368,73 @@ export function Strategies() {
   )
 }
 
-function StrategyCard({ strategy: s }: { strategy: Strategy; bestRun?: { sharpe?: number | null; return_pct?: number | null; total_trades?: number | null } }) {
-  const v = (s as any).versions?.[0]  // if API returns versions inline
+function StrategyCard({
+  strategy: s,
+  onExport,
+  isExporting,
+}: {
+  strategy: Strategy
+  bestRun?: { sharpe?: number | null; return_pct?: number | null; total_trades?: number | null }
+  onExport?: () => void
+  isExporting?: boolean
+}) {
+  const v = (s as any).versions?.[0]
   const durationMode = v?.duration_mode ?? (s as any).duration_mode
 
   return (
-    <Link
-      to={`/strategies/${s.id}`}
-      className="card hover:border-sky-700/60 transition-colors block group relative"
-    >
-      {/* Top row */}
-      <div className="flex items-start justify-between gap-2 mb-2">
-        <span className="font-semibold text-gray-100 group-hover:text-sky-300 transition-colors text-sm leading-snug flex-1 min-w-0">
-          {s.name}
-        </span>
-        <div className="flex items-center gap-1.5 shrink-0">
-          <DurationBadge mode={durationMode} />
-          <CategoryBadge category={s.category} />
+    <div className="card hover:border-sky-700/60 transition-colors relative group">
+      <Link to={`/strategies/${s.id}`} className="block">
+        {/* Top row */}
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <span className="font-semibold text-gray-100 group-hover:text-sky-300 transition-colors text-sm leading-snug flex-1 min-w-0">
+            {s.name}
+          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <DurationBadge mode={durationMode} />
+            <CategoryBadge category={s.category} />
+          </div>
         </div>
-      </div>
 
-      {/* Description */}
-      {s.description && (
-        <p className="text-xs text-gray-500 mb-3 line-clamp-2 leading-relaxed">{s.description}</p>
+        {/* Description */}
+        {s.description && (
+          <p className="text-xs text-gray-500 mb-3 line-clamp-2 leading-relaxed">{s.description}</p>
+        )}
+
+        {/* Tags */}
+        {s.tags && s.tags.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-3">
+            {s.tags.slice(0, 5).map(tag => <TagChip key={tag} tag={tag} />)}
+            {s.tags.length > 5 && <span className="text-[10px] text-gray-600">+{s.tags.length - 5}</span>}
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className="flex items-center justify-between text-xs text-gray-600 pt-2 border-t border-gray-800/60">
+          <span>{s.created_at?.slice(0, 10)}</span>
+          <span className={clsx(
+            'badge text-xs',
+            s.status === 'active' ? 'badge-green' : 'badge-gray'
+          )}>
+            {s.status}
+          </span>
+        </div>
+      </Link>
+
+      {/* Export button */}
+      {onExport && (
+        <button
+          type="button"
+          onClick={e => { e.preventDefault(); onExport() }}
+          disabled={isExporting}
+          className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-xs text-gray-400 hover:text-sky-300 border border-gray-700 hover:border-sky-700 rounded px-1.5 py-0.5 bg-gray-950 flex items-center gap-1"
+          title="Export strategy as JSON"
+        >
+          <Download size={10} />
+          {isExporting ? '…' : 'Export'}
+        </button>
       )}
 
-      {/* Tags */}
-      {s.tags && s.tags.length > 0 && (
-        <div className="flex flex-wrap gap-1 mb-3">
-          {s.tags.slice(0, 5).map(tag => <TagChip key={tag} tag={tag} />)}
-          {s.tags.length > 5 && <span className="text-[10px] text-gray-600">+{s.tags.length - 5}</span>}
-        </div>
-      )}
-
-      {/* Footer */}
-      <div className="flex items-center justify-between text-xs text-gray-600 pt-2 border-t border-gray-800/60">
-        <span>{s.created_at?.slice(0, 10)}</span>
-        <span className={clsx(
-          'badge text-xs',
-          s.status === 'active' ? 'badge-green' : 'badge-gray'
-        )}>
-          {s.status}
-        </span>
-      </div>
-
-      {/* Quick action hint */}
       <div className="absolute inset-x-0 bottom-0 h-0.5 rounded-b bg-sky-700/0 group-hover:bg-sky-700/40 transition-all" />
-    </Link>
+    </div>
   )
 }

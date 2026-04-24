@@ -32,6 +32,10 @@ class EvalContext:
     swing_highs: list = None
     swing_lows: list = None
     extra: dict[str, Any] = None
+    # Alternate-timeframe bar data: timeframe → DataFrame with indicators computed
+    extra_bars: dict[str, pd.DataFrame] = None
+    # Index of the latest completed bar in each extra_bars DataFrame
+    extra_bar_index: dict[str, int] = None
 
     def __post_init__(self):
         self.fvgs = self.fvgs or []
@@ -39,6 +43,8 @@ class EvalContext:
         self.swing_highs = self.swing_highs or []
         self.swing_lows = self.swing_lows or []
         self.extra = self.extra or {}
+        self.extra_bars = self.extra_bars or {}
+        self.extra_bar_index = self.extra_bar_index or {}
 
 
 def _apply_numeric_modifiers(value: float | str | bool, spec: dict[str, Any]) -> float | str | bool:
@@ -81,7 +87,13 @@ def _resolve_value(spec: Any, ctx: EvalContext) -> float | str | bool:
     if "field" in spec:
         value = float(ctx.bar.get(spec["field"], np.nan))
     elif "indicator" in spec:
-        value = float(ctx.bar.get(spec["indicator"], np.nan))
+        tf = spec.get("timeframe")
+        if tf and tf in ctx.extra_bars:
+            alt_df = ctx.extra_bars[tf]
+            alt_idx = ctx.extra_bar_index.get(tf, len(alt_df) - 1)
+            value = float(alt_df.iloc[alt_idx].get(spec["indicator"], np.nan))
+        else:
+            value = float(ctx.bar.get(spec["indicator"], np.nan))
     elif "prev_bar" in spec:
         n = spec.get("n", 1)
         target_idx = ctx.bar_index - n

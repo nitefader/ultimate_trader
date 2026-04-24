@@ -31,6 +31,14 @@ import pandas as pd
 
 from app.core.portfolio import Portfolio, Position
 from app.core.risk import RiskEngine, RiskConfig
+from app.features.computations.session import (
+    compute_opening_range,
+    compute_prev_day_levels,
+    compute_prev_month_levels,
+    compute_prev_week_levels,
+    compute_session_state_features,
+    compute_earnings_blackout_active,
+)
 from app.indicators.fvg import detect_fvgs, update_fvg_state
 from app.indicators.structure import detect_swing_points, classify_structure
 from app.indicators.support_resistance import SupportResistanceEngine
@@ -38,7 +46,7 @@ from app.indicators.regime import classify_regime
 from app.indicators.technical import (
     sma, ema, atr, rsi, macd, bollinger_bands, stochastic, adx,
     pivot_points, chandelier_exit, keltner_channel, swing_highs_lows, vwap_session,
-    hull_ma, ibs, zscore, bt_snipe, thestrat, thestrat_num, parabolic_sar,
+    hull_ma, ibs, zscore, bt_snipe, thestrat, thestrat_num, parabolic_sar, donchian_channel,
 )
 from app.strategies.conditions import EvalContext, evaluate_conditions, evaluate_condition_group
 from app.strategies.stops import calculate_stop, calculate_target, update_trailing_stop
@@ -90,10 +98,33 @@ class BacktestEngine:
         self.portfolio = Portfolio(self.initial_capital, self.commission_per_share)
         self.result = BacktestResult()
 
-        # Session window: built from duration_mode (day/swing/position) or run_config override.
-        # Controls entry cutoff, exit cutoff, and hard liquidation time for each bar.
+        # Session window: built from duration_mode (day/swing/position), then overridden by
+        # market_hours from Strategy Controls (entry_windows, force_flat_by, timezone).
         duration_mode = strategy_config.get("duration_mode") or run_config.get("duration_mode", "swing")
         self.session_window = SessionWindowConfig.from_duration_mode(duration_mode)
+
+        # Apply market_hours overrides from Strategy Controls.
+        # force_flat_by → exit_cutoff + liquidation_time (5 min grace).
+        # entry_windows are stored for multi-window can_enter checks below.
+        mh = strategy_config.get("market_hours") or run_config.get("market_hours", {})
+        if mh:
+            from datetime import time as _time, datetime as _dt, timedelta as _td
+            def _parse_t(s: str | None) -> "_time | None":
+                if not s:
+                    return None
+                h, m = map(int, s.split(":"))
+                return _time(h, m)
+
+            force_flat = _parse_t(mh.get("force_flat_by"))
+            if force_flat:
+                # force_flat_by overrides exit_cutoff; hard liquidation = force_flat + 5 min
+                self.session_window.exit_cutoff = force_flat
+                _liq_dt = _dt(2000, 1, 1, force_flat.hour, force_flat.minute) + _td(minutes=5)
+                self.session_window.liquidation_time = _liq_dt.time()
+                self.session_window.allow_overnight = False
+
+        # Store raw entry_windows for multi-window entry gating in _check_entries().
+        self._entry_windows: list[dict] = (mh or {}).get("entry_windows", [])
 
         # Universe schedule: point-in-time constituent snapshots.
         # When present, only symbols active at each bar's date are eligible for entry.
@@ -106,6 +137,23 @@ class BacktestEngine:
         self._sr_engine_cache: dict[str, SupportResistanceEngine] = {}
         self._required_indicator_refs = self._collect_refs("indicator")
         self._required_field_refs = self._collect_refs("field")
+
+        # ATR timeframe override (from execution style atr_source = "custom")
+        # Injected by backtest_service before constructing the engine
+        self._atr_override_data: dict[str, pd.DataFrame] = self.strategy.pop("_atr_override_data", {})
+        self._atr_override_config: dict = self.strategy.pop("_atr_override_config", {})
+
+        # Multi-timeframe indicator bars: symbol → timeframe → DataFrame (with indicators)
+        # Injected by backtest_service as strategy_config["_extra_tf_data"][tf][symbol] DataFrames
+        _raw_extra: dict[str, dict[str, pd.DataFrame]] = self.strategy.pop("_extra_tf_data", {})
+        # Transpose from {tf: {sym: df}} to {sym: {tf: df}}
+        self._extra_bars: dict[str, dict[str, pd.DataFrame]] = {}
+        for tf, sym_map in _raw_extra.items():
+            for sym, df in sym_map.items():
+                self._extra_bars.setdefault(sym, {})[tf] = df
+
+        # Pending limit/stop orders waiting for fill condition
+        self._pending_orders: list[dict] = []
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -123,7 +171,7 @@ class BacktestEngine:
 
         # Precompute indicators for all symbols
         for symbol, df in data.items():
-            self._indicator_cache[symbol] = self._compute_indicators(df)
+            self._indicator_cache[symbol] = self._compute_indicators(df, symbol=symbol)
             self._fvg_cache[symbol] = detect_fvgs(df, min_gap_pct=0.001)
 
         if self._indicator_cache:
@@ -193,7 +241,15 @@ class BacktestEngine:
                 # Get S/R zones (cached, recomputed every N bars)
                 sr_engine = self._get_sr_engine(symbol, df, bar_index)
 
-                # Build eval context
+                # Build eval context — include alternate-timeframe bars (no lookahead)
+                extra_bars_for_sym: dict[str, pd.DataFrame] = {}
+                extra_bar_idx_for_sym: dict[str, int] = {}
+                for alt_tf, alt_df in self._extra_bars.get(symbol, {}).items():
+                    completed = alt_df[alt_df.index <= ts]
+                    if len(completed) > 0:
+                        extra_bars_for_sym[alt_tf] = completed
+                        extra_bar_idx_for_sym[alt_tf] = len(completed) - 1
+
                 ctx = EvalContext(
                     bar=bar,
                     bar_index=bar_index,
@@ -205,6 +261,8 @@ class BacktestEngine:
                     fvgs=self._fvg_cache[symbol],
                     sr_zones=sr_engine.zones if sr_engine else [],
                     swing_highs=[], swing_lows=[],
+                    extra_bars=extra_bars_for_sym,
+                    extra_bar_index=extra_bar_idx_for_sym,
                 )
 
                 # ── Manage existing positions (exits first) ─────────────────
@@ -220,6 +278,7 @@ class BacktestEngine:
                     if active is not None and symbol.upper() not in active:
                         continue
 
+                self._process_pending_orders(symbol, bar, bar_index, ts, df, sr_engine, ctx)
                 self._process_entries(symbol, bar, bar_index, ts, ctx, df, current_regime, sr_engine, current_date)
 
             # Record equity
@@ -236,7 +295,7 @@ class BacktestEngine:
 
     # ── Indicator computation ─────────────────────────────────────────────────
 
-    def _compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _compute_indicators(self, df: pd.DataFrame, symbol: str | None = None) -> pd.DataFrame:
         """Compute all indicators and attach them to the DataFrame."""
         out = df.copy()
         close = df["close"]
@@ -285,6 +344,13 @@ class BacktestEngine:
         bb = bollinger_bands(close)
         out = pd.concat([out, bb], axis=1)
 
+        # Donchian channel
+        donchian_refs = {"donchian", "dc_upper", "dc_mid", "dc_lower"}
+        if indicator_refs.intersection(donchian_refs):
+            period = int(ind_config.get("donchian_period", 20))
+            dc = donchian_channel(high, low, period)
+            out = pd.concat([out, dc], axis=1)
+
         # ADX
         adx_period = int(ind_config.get("adx_period", 14))
         adx_df = adx(high, low, close, adx_period)
@@ -307,8 +373,27 @@ class BacktestEngine:
         if indicator_refs.intersection({"opening_range_high", "opening_range_low"}):
             out = pd.concat([
                 out,
-                self._compute_opening_range(out, int(ind_config.get("opening_range_bars", 6))),
+                compute_opening_range(out, int(ind_config.get("opening_range_bars", 6))),
             ], axis=1)
+
+        session_state_refs = {"market_day_type", "in_regular_session"}
+        if indicator_refs.intersection(session_state_refs):
+            out = pd.concat([out, compute_session_state_features(out)], axis=1)
+
+        prior_day_refs = {"prev_day_high", "prev_day_low", "prev_day_close"}
+        if indicator_refs.intersection(prior_day_refs):
+            out = pd.concat([out, compute_prev_day_levels(out)], axis=1)
+
+        prior_week_refs = {"prev_week_high", "prev_week_low", "prev_week_close"}
+        if indicator_refs.intersection(prior_week_refs):
+            out = pd.concat([out, compute_prev_week_levels(out)], axis=1)
+
+        prior_month_refs = {"prev_month_high", "prev_month_low", "prev_month_close"}
+        if indicator_refs.intersection(prior_month_refs):
+            out = pd.concat([out, compute_prev_month_levels(out)], axis=1)
+
+        if "earnings_blackout_active" in indicator_refs and symbol:
+            out = pd.concat([out, compute_earnings_blackout_active(out, symbol=symbol)], axis=1)
 
         if indicator_refs.intersection({"swing_low", "swing_high"}):
             swing_lookback = int(ind_config.get("swing_lookback", 5))
@@ -427,6 +512,22 @@ class BacktestEngine:
         if not self.session_window.can_enter(ts_et.time()):
             return
 
+        # Multi-window entry gating from Strategy Controls market_hours.entry_windows.
+        # When windows are defined, the bar time must fall within at least one window.
+        if self._entry_windows:
+            from datetime import time as _time
+            def _pt(s: str) -> "_time":
+                h, m = map(int, s.split(":"))
+                return _time(h, m)
+            bar_time = ts_et.time()
+            in_window = any(
+                _pt(w["start"]) <= bar_time < _pt(w["end"])
+                for w in self._entry_windows
+                if w.get("start") and w.get("end")
+            )
+            if not in_window:
+                return
+
         # Earnings exclusion: block new entries within the exclusion window.
         # Open positions are unaffected — exits are always processed.
         if current_date is not None:
@@ -470,7 +571,99 @@ class BacktestEngine:
                 continue
 
             # --- Entry signal confirmed ---
-            # Calculate entry price (next bar open + slippage, or current close if last bar)
+            entry_module = self.strategy.get("entry_module", {})
+            order_type = entry_module.get("order_type", "market")
+            tick_size = float(self.strategy.get("tick_size", 0.01))
+
+            # For limit/stop orders we compute the limit price from the current bar
+            # and queue a pending order; for market we fill at next bar open as before.
+            if order_type in ("limit", "stop"):
+                ref_price = float(bar["close"])
+                atr_val = None
+                if "atr_14" in self._indicator_cache[symbol].columns:
+                    atr_val = float(self._indicator_cache[symbol]["atr_14"].iloc[bar_index])
+
+                limit_offset_atr = entry_module.get("limit_offset_atr")
+                limit_offset_pct = entry_module.get("limit_offset_pct")
+
+                if limit_offset_atr and atr_val and not pd.isna(atr_val):
+                    offset = limit_offset_atr * atr_val
+                elif limit_offset_pct:
+                    offset = limit_offset_pct / 100.0 * ref_price
+                else:
+                    offset = tick_size  # minimal offset if none specified
+
+                # Limit: below current price for long, above for short
+                # Stop breakout: above current price for long, below for short
+                if order_type == "limit":
+                    limit_price = ref_price - offset if direction == "long" else ref_price + offset
+                else:  # stop breakout
+                    limit_price = ref_price + offset if direction == "long" else ref_price - offset
+
+                # Pre-compute stop and targets using estimated limit price
+                stop_config = self.strategy.get("stop_loss", {"method": "fixed_pct", "value": 2.0})
+                est_entry = limit_price
+                _bar_dt = pd.Timestamp(bar.name)
+                stop_price = calculate_stop(
+                    stop_config, est_entry, direction, bar, self._indicator_cache[symbol], bar_index,
+                    fvgs=self._fvg_cache[symbol], sr_zones=sr_engine.zones if sr_engine else [],
+                    swing_lows=ctx.swing_lows, swing_highs=ctx.swing_highs,
+                    atr_override=self._resolve_atr_for_config(
+                        stop_config, symbol, _bar_dt, int(stop_config.get("period", 14))
+                    ),
+                )
+                targets_config = self.strategy.get("targets", [{"method": "r_multiple", "r": 2.0}])
+                target_prices = []
+                for tc in (targets_config if isinstance(targets_config, list) else [targets_config]):
+                    tp = calculate_target(
+                        tc, est_entry, stop_price, direction, bar, self._indicator_cache[symbol], bar_index,
+                        sr_zones=sr_engine.zones if sr_engine else [], swing_highs=ctx.swing_highs, swing_lows=ctx.swing_lows,
+                        atr_override=self._resolve_atr_for_config(
+                            tc, symbol, _bar_dt, int(tc.get("period", 14))
+                        ),
+                    )
+                    if tp:
+                        target_prices.append(tp)
+
+                sizing_config = self.strategy.get("position_sizing", {"method": "risk_pct", "risk_pct": 1.0})
+                quantity = calculate_position_size(
+                    sizing_config, est_entry, stop_price, self.portfolio.equity, direction,
+                    self._indicator_cache[symbol], bar_index, leverage=self.strategy.get("leverage", 1.0),
+                )
+                if quantity < 1e-6:
+                    continue
+
+                scale_in_config = self.strategy.get("scale_in")
+                if scale_in_config:
+                    levels = scale_in_config.get("levels", [])
+                    if levels:
+                        quantity = scale_quantity(quantity, levels, 0)
+                if quantity < 1e-6:
+                    continue
+
+                trade_id = str(uuid.uuid4())
+                cancel_after_bars = entry_module.get("cancel_after_bars")
+                if entry_module.get("time_in_force") == "day":
+                    cancel_after_bars = cancel_after_bars or 78  # ~78 5m bars per session
+
+                self._pending_orders.append({
+                    "symbol": symbol,
+                    "direction": direction,
+                    "order_type": order_type,
+                    "limit_price": limit_price,
+                    "stop_price": stop_price,
+                    "target_prices": target_prices,
+                    "quantity": quantity,
+                    "trade_id": trade_id,
+                    "scale_in_config": scale_in_config,
+                    "regime_at_entry": regime,
+                    "cancel_after_bars": cancel_after_bars,
+                    "bars_pending": 0,
+                })
+                logger.debug(f"Queued pending {order_type} {direction} {symbol} limit_price={limit_price:.4f}")
+                continue
+
+            # Market order: fill at next bar open + slippage (default behavior)
             if bar_index + 1 >= len(df):
                 # Last bar: use current close as fill price (conservative, avoids missing end-of-period reversals)
                 entry_price = float(bar["close"])
@@ -481,17 +674,20 @@ class BacktestEngine:
                 entry_price = float(next_bar["open"])
 
             # Apply slippage
-            tick_size = float(self.strategy.get("tick_size", 0.01))
             entry_price = self._apply_slippage(entry_price, direction, bar, bar_index, symbol, tick_size)
 
             # Calculate stop
             stop_config = self.strategy.get("stop_loss", {"method": "fixed_pct", "value": 2.0})
+            _bar_dt = pd.Timestamp(bar.name)
             stop_price = calculate_stop(
                 stop_config, entry_price, direction, bar, self._indicator_cache[symbol], bar_index,
                 fvgs=self._fvg_cache[symbol],
                 sr_zones=sr_engine.zones if sr_engine else [],
                 swing_lows=ctx.swing_lows,
                 swing_highs=ctx.swing_highs,
+                atr_override=self._resolve_atr_for_config(
+                    stop_config, symbol, _bar_dt, int(stop_config.get("period", 14))
+                ),
             )
 
             # Calculate targets
@@ -503,6 +699,9 @@ class BacktestEngine:
                     sr_zones=sr_engine.zones if sr_engine else [],
                     swing_highs=ctx.swing_highs,
                     swing_lows=ctx.swing_lows,
+                    atr_override=self._resolve_atr_for_config(
+                        tc, symbol, _bar_dt, int(tc.get("period", 14))
+                    ),
                 )
                 if tp:
                     target_prices.append(tp)
@@ -572,6 +771,102 @@ class BacktestEngine:
                 initial_risk=initial_risk,
             )
             logger.debug(f"Opened {direction} {symbol} @ {entry_price:.4f} qty={quantity:.2f} stop={stop_price}")
+
+    def _process_pending_orders(
+        self,
+        symbol: str,
+        bar: pd.Series,
+        bar_index: int,
+        ts,
+        df: pd.DataFrame,
+        sr_engine,
+        ctx: "EvalContext",
+    ) -> None:
+        """Check pending limit/stop orders against current bar's high/low for fill."""
+        still_pending = []
+        for order in self._pending_orders:
+            if order["symbol"] != symbol:
+                still_pending.append(order)
+                continue
+
+            order_type = order["order_type"]
+            direction = order["direction"]
+            limit_price = order["limit_price"]
+            cancel_after_bars = order.get("cancel_after_bars")
+
+            # Tick cancel counter
+            order["bars_pending"] = order.get("bars_pending", 0) + 1
+            if cancel_after_bars and order["bars_pending"] > cancel_after_bars:
+                logger.debug(f"Pending {order_type} order for {symbol} expired after {cancel_after_bars} bars")
+                continue  # expired — do not re-add
+
+            # Determine if filled this bar
+            filled = False
+            fill_price = None
+            bar_low = float(bar["low"])
+            bar_high = float(bar["high"])
+            bar_open = float(bar["open"])
+
+            if order_type == "limit":
+                # Long limit: fill if bar's low <= limit price (price came down to us)
+                # Short limit: fill if bar's high >= limit price (price came up to us)
+                if direction == "long" and bar_low <= limit_price:
+                    fill_price = min(limit_price, bar_open)  # may gap down through limit → fill at open
+                    filled = True
+                elif direction == "short" and bar_high >= limit_price:
+                    fill_price = max(limit_price, bar_open)
+                    filled = True
+            elif order_type == "stop":
+                # Long stop: fill if bar's high >= stop price (breakout above)
+                # Short stop: fill if bar's low <= stop price (breakdown below)
+                if direction == "long" and bar_high >= limit_price:
+                    fill_price = max(limit_price, bar_open)  # gap up → fill at open
+                    filled = True
+                elif direction == "short" and bar_low <= limit_price:
+                    fill_price = min(limit_price, bar_open)
+                    filled = True
+
+            if not filled:
+                still_pending.append(order)
+                continue
+
+            tick_size = float(self.strategy.get("tick_size", 0.01))
+            fill_price = self._apply_slippage(fill_price, direction, bar, bar_index, symbol, tick_size)
+
+            # Now open the position with all the pre-computed params from the signal bar
+            stop_price = order["stop_price"]
+            target_prices = order["target_prices"]
+            quantity = order["quantity"]
+            trade_id = order["trade_id"]
+            scale_in_config = order.get("scale_in_config")
+            regime_at_entry = order.get("regime_at_entry")
+            initial_risk = abs(fill_price - stop_price) * quantity if stop_price is not None else None
+
+            commission = self._calc_commission(quantity, fill_price)
+            approved, reason = self.risk.check_entry(symbol, direction, quantity, fill_price, stop_price, self.portfolio)
+            if not approved:
+                logger.debug(f"Pending order fill rejected for {symbol}: {reason}")
+                continue
+
+            self.portfolio.open_position(
+                symbol=symbol,
+                direction=direction,
+                quantity=quantity,
+                price=fill_price,
+                commission=commission,
+                stop_price=stop_price,
+                target_prices=target_prices,
+                entry_time=pd.Timestamp(bar.name),
+                trailing_stop_config=self.strategy.get("trailing_stop"),
+                scale_config=scale_in_config,
+                regime_at_entry=regime_at_entry,
+                trade_id=trade_id,
+                initial_risk=initial_risk,
+                entry_order_type=order_type,
+            )
+            logger.debug(f"Filled pending {order_type} {direction} {symbol} @ {fill_price:.4f}")
+
+        self._pending_orders = still_pending
 
     def _apply_slippage(self, price: float, direction: str, bar: pd.Series, bar_index: int, symbol: str, tick_size: float) -> float:
         if callable(self.slippage_model):
@@ -831,9 +1126,13 @@ class BacktestEngine:
             return
 
         commission = self._calc_commission(add_qty, add_price)
+        _scale_stop_cfg = self.strategy.get("stop_loss", {"method": "fixed_pct", "value": 2.0})
         new_stop = calculate_stop(
-            self.strategy.get("stop_loss", {"method": "fixed_pct", "value": 2.0}),
+            _scale_stop_cfg,
             add_price, pos.direction, bar, self._indicator_cache[symbol], bar_index,
+            atr_override=self._resolve_atr_for_config(
+                _scale_stop_cfg, symbol, pd.Timestamp(bar.name), int(_scale_stop_cfg.get("period", 14))
+            ),
         )
 
         approved, reason = self.risk.check_entry(symbol, pos.direction, add_qty, add_price, new_stop, self.portfolio)
@@ -851,6 +1150,44 @@ class BacktestEngine:
         })
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _resolve_atr_override(self, symbol: str, bar_dt: pd.Timestamp) -> float | None:
+        """Return custom-timeframe ATR for this bar, or None to use trade-timeframe ATR."""
+        if not self._atr_override_config or not self._atr_override_data:
+            return None
+        atr_df = self._atr_override_data.get(symbol)
+        if atr_df is None:
+            return None
+        from app.strategies.stops import resolve_atr_override
+        return resolve_atr_override(self._atr_override_config, atr_df, bar_dt)
+
+    def _resolve_atr_for_config(
+        self, config: dict, symbol: str, bar_dt: pd.Timestamp, period: int
+    ) -> float | None:
+        """Resolve ATR for a stop/target config that may carry its own `timeframe` override.
+
+        Priority:
+          1. config["timeframe"] — per-stop/target multi-TF ATR (from _extra_bars)
+          2. Global execution-style ATR override (_atr_override_data)
+          3. None → caller uses trade-timeframe ATR inline
+        """
+        tf = config.get("timeframe")
+        if tf:
+            sym_bars = self._extra_bars.get(symbol, {})
+            alt_df = sym_bars.get(tf)
+            if alt_df is not None:
+                from app.indicators.technical import atr as calc_atr
+                import numpy as np
+                completed = alt_df[alt_df.index <= bar_dt]
+                if len(completed) >= period:
+                    atr_series = calc_atr(
+                        completed["high"], completed["low"], completed["close"], period
+                    )
+                    val = float(atr_series.iloc[-1])
+                    if not np.isnan(val):
+                        return val
+            return None  # TF requested but data not available — skip the stop/target
+        return self._resolve_atr_override(symbol, bar_dt)
 
     def _get_sr_engine(self, symbol: str, df: pd.DataFrame, bar_index: int) -> SupportResistanceEngine | None:
         if not self.strategy.get("use_support_resistance", True):
@@ -882,34 +1219,29 @@ class BacktestEngine:
         _walk(self.strategy)
         return refs
 
+    def _collect_timeframe_indicator_refs(self) -> dict[str, set[str]]:
+        """Walk strategy condition tree; return {timeframe: set(indicator_name)} for all
+        ValueSpec entries that specify a non-empty 'timeframe' override."""
+        refs: dict[str, set[str]] = {}
+
+        def _walk(node: Any) -> None:
+            if isinstance(node, dict):
+                if "indicator" in node and "timeframe" in node and node["timeframe"]:
+                    tf = node["timeframe"]
+                    refs.setdefault(tf, set()).add(node["indicator"])
+                for child in node.values():
+                    _walk(child)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk(item)
+
+        _walk(self.strategy)
+        return refs
+
     def _calc_commission(self, quantity: float, price: float) -> float:
         per_share = quantity * self.commission_per_share
         pct_component = quantity * price * (self.commission_pct_per_trade / 100.0)
         return per_share + pct_component
-
-    def _compute_opening_range(self, df: pd.DataFrame, bars: int) -> pd.DataFrame:
-        opening_range_high = pd.Series(np.nan, index=df.index, dtype=float)
-        opening_range_low = pd.Series(np.nan, index=df.index, dtype=float)
-
-        if not isinstance(df.index, pd.DatetimeIndex) or bars <= 0:
-            return pd.DataFrame({
-                "opening_range_high": opening_range_high,
-                "opening_range_low": opening_range_low,
-            })
-
-        for _, session_df in df.groupby(df.index.normalize(), sort=False):
-            if len(session_df) < bars:
-                continue
-            first_window = session_df.iloc[:bars]
-            high_val = float(first_window["high"].max())
-            low_val = float(first_window["low"].min())
-            opening_range_high.loc[session_df.index[bars - 1:]] = high_val
-            opening_range_low.loc[session_df.index[bars - 1:]] = low_val
-
-        return pd.DataFrame({
-            "opening_range_high": opening_range_high,
-            "opening_range_low": opening_range_low,
-        })
 
     def _close_all_positions(self, last_ts, data: dict[str, pd.DataFrame]) -> None:
         for symbol in list(self.portfolio.positions.keys()):

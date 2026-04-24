@@ -12,9 +12,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
 
 
+# Resolve .env and DB path relative to this file, not CWD.
+# This makes the app immune to launch-directory issues (OneDrive, CI, etc).
+_BACKEND_DIR = Path(__file__).parent.parent
+_DEFAULT_DB_URL = f"sqlite+aiosqlite:///{(_BACKEND_DIR / 'ultratrader.db').as_posix()}"
+_ENV_FILE = str(_BACKEND_DIR / ".env")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -30,7 +37,7 @@ class Settings(BaseSettings):
     ENV: Literal["dev", "test", "prod"] = "dev"
 
     # ── Database ───────────────────────────────────────────────────────────────
-    DATABASE_URL: str = "sqlite+aiosqlite:///./ultratrader.db"
+    DATABASE_URL: str = _DEFAULT_DB_URL
     # For PostgreSQL:  postgresql+asyncpg://user:pass@host:5432/ultratrader
 
     # ── Data storage ───────────────────────────────────────────────────────────

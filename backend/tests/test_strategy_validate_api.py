@@ -118,3 +118,36 @@ async def test_strategy_validate_rejects_non_list_symbols(client):
     body = resp.json()
     assert body["valid"] is False
     assert "symbols must be a list of ticker strings" in body["errors"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_validate_returns_canonical_feature_plan_preview(client):
+    resp = await client.post(
+        "/api/v1/strategies/validate",
+        json={
+            "duration_mode": "day",
+            "config": {
+                "timeframe": "5m",
+                "symbols": ["AAPL"],
+                "entry": {
+                    "conditions": [
+                        {"type": "single", "left": {"indicator": "ema_21"}, "op": ">", "right": {"indicator": "prev_month_high"}},
+                        {"type": "single", "left": {"indicator": "market_day_type"}, "op": "==", "right": "regular"},
+                    ],
+                },
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["valid"] is True
+
+    preview = body["feature_plan_preview"]
+    assert preview["symbols"] == ["AAPL"]
+    assert preview["timeframes"] == ["5m"]
+    kinds = {feature["kind"] for feature in preview["features"]}
+    assert {"ema", "prev_month_high", "market_day_type"} <= kinds
+    ema_feature = next(feature for feature in preview["features"] if feature["kind"] == "ema")
+    assert ema_feature["params"] == {"length": 21}
+    assert ema_feature["runtime_columns"] == ["ema_21"]

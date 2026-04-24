@@ -69,6 +69,7 @@ async def create_all_tables() -> None:
             _additive_migrations = [
                 "ALTER TABLE run_metrics ADD COLUMN sqn REAL",
                 "ALTER TABLE data_inventory ADD COLUMN downloaded_at DATETIME",
+                "ALTER TABLE data_services ADD COLUMN model VARCHAR(128)",
             ]
             for stmt in _additive_migrations:
                 try:

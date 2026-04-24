@@ -148,7 +148,7 @@ export function Dashboard() {
   const isNewUser = !accountsLoading && accounts.length === 0 && strategies.length === 0 && recentRuns.length === 0
 
   return (
-    <div className="space-y-6 max-w-6xl">
+    <div className="mx-auto w-full max-w-7xl space-y-6">
 
       {/* Kill switch banner */}
       {ksStatus?.global_killed && (
@@ -168,7 +168,7 @@ export function Dashboard() {
       )}
 
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight" style={{ color: V('--color-text-primary') }}>Dashboard</h1>
           <p className="text-xs mt-1" style={{ color: V('--color-text-faint') }}>
@@ -185,7 +185,7 @@ export function Dashboard() {
             <h2 className="text-sm font-semibold" style={{ color: V('--color-accent') }}>Getting Started with UltraTrader</h2>
             <p className="text-xs mt-1" style={{ color: V('--color-text-muted') }}>Follow these steps to run your first backtest and paper trade.</p>
           </div>
-          <div className="grid md:grid-cols-4 gap-3">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {[
               { step: 1, label: 'Add Credentials', desc: 'Connect Alpaca paper account.', to: '/security', icon: Key, done: false },
               { step: 2, label: 'Create Strategy',  desc: 'Define entry/exit/risk rules.', to: '/strategies/new', icon: Layers, done: strategies.length > 0 },
@@ -223,7 +223,7 @@ export function Dashboard() {
 
       {/* KPI row */}
       {(accountsLoading || deploymentsLoading || runsLoading) ? (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
           {[0,1,2,3,4].map(i => (
             <div key={i} className="card animate-pulse" style={{ height: 88 }}>
               <div className="h-2.5 rounded w-1/2 mb-3" style={{ background: V('--color-bg-hover') }} />
@@ -233,7 +233,7 @@ export function Dashboard() {
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
           {/* Paper equity */}
           <Link
             to="/accounts"
@@ -307,7 +307,7 @@ export function Dashboard() {
       )}
 
       {/* Charts row */}
-      <div className="grid md:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
 
         {/* Return bar chart */}
         <div className="card md:col-span-3">
@@ -425,7 +425,8 @@ export function Dashboard() {
           </div>
         ) : (
           <div className="card overflow-hidden p-0">
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-sm">
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--color-border)', background: 'var(--color-bg-hover)' }}>
                   {['Symbols', 'Strategy', 'TF', 'Period', 'Return', 'Sharpe', 'Trades', 'Status'].map(h => (
@@ -487,6 +488,7 @@ export function Dashboard() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         )}
       </div>

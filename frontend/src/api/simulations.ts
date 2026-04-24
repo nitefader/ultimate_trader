@@ -1,7 +1,9 @@
 import { api } from './client'
+import type { StrategyFeaturePlanPreview } from '../types'
 
 export interface CreateSimulationRequest {
-  strategy_version_id: string
+  strategy_version_id?: string
+  program_id?: string
   symbols: string[]
   timeframe: string
   start_date: string
@@ -26,6 +28,9 @@ export interface SimulationMetadata {
   strategy_name: string
   status?: string
   speed?: number
+  provider?: string
+  date_clamped?: boolean
+  feature_plan_preview?: StrategyFeaturePlanPreview
 }
 
 export interface PositionSnapshot {

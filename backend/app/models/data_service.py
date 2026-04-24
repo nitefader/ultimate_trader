@@ -24,7 +24,10 @@ class DataService(Base):
     api_key_encrypted: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     secret_key_encrypted: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_default_ai: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -61,6 +64,9 @@ class DataService(Base):
         return mask_secret(self.secret_key) if self.secret_key else ""
 
     def has_credentials(self) -> bool:
+        # AI providers only need api_key; data providers need both keys
+        if self.provider in ("gemini", "groq"):
+            return bool(self.api_key)
         return bool(self.api_key) and bool(self.secret_key)
 
     def to_dict(self, unmask: bool = False) -> dict[str, Any]:
@@ -69,10 +75,12 @@ class DataService(Base):
             "name": self.name,
             "provider": self.provider,
             "environment": self.environment,
+            "model": self.model,
             "api_key": self.api_key if unmask else self.api_key_masked,
             "secret_key": self.secret_key if unmask else self.secret_key_masked,
             "has_credentials": self.has_credentials(),
             "is_default": self.is_default,
+            "is_default_ai": self.is_default_ai,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

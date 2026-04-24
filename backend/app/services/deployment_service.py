@@ -14,6 +14,7 @@ from app.models.account import Account
 from app.models.deployment import Deployment, DeploymentApproval
 from app.models.strategy import StrategyVersion
 from app.services.alpaca_stream_manager import get_alpaca_stream_manager
+from app.services import governor_service
 
 
 def _enforce_kill_switch(account_id: str, strategy_id: str) -> None:
@@ -130,7 +131,8 @@ async def promote_to_live(
         )
     _enforce_kill_switch(live_account.id, paper_dep.strategy_id)
 
-    # Safety checklist is mandatory for live promotion
+    # Safety checklist is mandatory for live promotion.
+    # These keys must match what the frontend sends (paper_performance_reviewed, not backtest_reviewed).
     required_checks = [
         "paper_performance_reviewed",
         "risk_limits_confirmed",
@@ -175,6 +177,21 @@ async def promote_to_live(
         sv.promotion_status = "live_approved"
 
     await db.flush()
+
+    # Ensure a governor exists and is active for this live account.
+    existing_gov = await governor_service.get_governor_for_account(db, live_account_id)
+    if existing_gov is None:
+        gov = await governor_service.create_governor(
+            db,
+            account_id=live_account_id,
+            label=f"Governor — {live_account.name}",
+            risk_profile_id=getattr(live_account, "risk_profile_id", None),
+        )
+        await governor_service.activate_governor(db, gov.id)
+    elif existing_gov.governor_status == "initializing":
+        await governor_service.activate_governor(db, existing_gov.id)
+
+    await db.flush()
     return live_deployment
 
 
@@ -200,6 +217,13 @@ async def start_deployment(db: AsyncSession, deployment_id: str) -> Deployment:
     if symbols:
         manager = await get_alpaca_stream_manager()
         await manager.register_runner(dep.id, symbols)
+
+    # For live deployments, ensure governor is active.
+    if dep.mode == "live":
+        gov = await governor_service.get_governor_for_account(db, dep.account_id)
+        if gov is not None and gov.governor_status == "initializing":
+            await governor_service.activate_governor(db, gov.id)
+
     await db.flush()
     return dep
 

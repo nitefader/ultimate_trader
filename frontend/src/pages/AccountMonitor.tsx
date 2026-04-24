@@ -1094,9 +1094,9 @@ export function AccountMonitor() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold">Accounts</h1>
+          <h1 className="text-xl font-bold">Broker Account</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Manage paper and live accounts, then monitor any active deployments below.
+            Manage paper and live Alpaca accounts — balances, buying power, positions, and restrictions.
           </p>
         </div>
         <button className="btn-primary flex items-center gap-1.5 text-sm" onClick={() => setShowCreate(true)}>

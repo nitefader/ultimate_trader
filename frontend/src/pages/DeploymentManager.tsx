@@ -6,7 +6,7 @@ import { mlApi } from '../api/ml'
 import { strategiesApi } from '../api/strategies'
 import { ModeIndicator } from '../components/ModeIndicator'
 import { usePollingGate } from '../hooks/usePollingGate'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, Crosshair, TrendingDown, SlidersHorizontal, X } from 'lucide-react'
 import { SelectMenu } from '../components/SelectMenu'
 import { Tooltip } from '../components/Tooltip'
 import type { Deployment, Account, Strategy } from '../types'
@@ -30,6 +30,161 @@ const LIVE_SAFETY_CHECKS = [
   { key: 'compliance_acknowledged', label: 'I understand this will execute real orders' },
   { key: 'market_conditions_assessed', label: 'Market conditions assessed for current strategy' },
 ]
+
+// ─── Position Actions Panel ───────────────────────────────────────────────────
+
+function PositionActionsPanel({
+  deploymentId,
+  trade,
+  onClose,
+}: {
+  deploymentId: string
+  trade: DeploymentTradeRow
+  onClose: () => void
+}) {
+  const qc = useQueryClient()
+  const [stopOrderId, setStopOrderId] = useState('')
+  const [newStopPrice, setNewStopPrice] = useState('')
+  const [currentAtr, setCurrentAtr] = useState('')
+  const [scaleExitPct, setScaleExitPct] = useState('25')
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
+
+  const showMsg = (text: string, ok: boolean) => {
+    setMsg({ text, ok })
+    setTimeout(() => setMsg(null), 4000)
+  }
+
+  const scaleMutation = useMutation({
+    mutationFn: () => deploymentsApi.scaleOut(deploymentId, trade.symbol, parseFloat(scaleExitPct)),
+    onSuccess: () => { showMsg(`Scaled out ${scaleExitPct}% of ${trade.symbol}`, true); qc.invalidateQueries({ queryKey: ['deployment-trades'] }) },
+    onError: (e: Error) => showMsg(e.message, false),
+  })
+
+  const replaceStopMutation = useMutation({
+    mutationFn: () => deploymentsApi.replaceStop(deploymentId, trade.symbol, stopOrderId, parseFloat(newStopPrice), trade.quantity ?? undefined),
+    onSuccess: () => showMsg(`Stop updated to ${newStopPrice}`, true),
+    onError: (e: Error) => showMsg(e.message, false),
+  })
+
+  const beStopMutation = useMutation({
+    mutationFn: () => deploymentsApi.moveStopToBreakeven(deploymentId, trade.symbol, stopOrderId, trade.entry_price ?? 0, parseFloat(currentAtr), trade.quantity ?? undefined),
+    onSuccess: (r: { breakeven_stop?: number }) => showMsg(`Stop moved to breakeven: ${r?.breakeven_stop?.toFixed(4) ?? ''}`, true),
+    onError: (e: Error) => showMsg(e.message, false),
+  })
+
+  const isPendingAny = scaleMutation.isPending || replaceStopMutation.isPending || beStopMutation.isPending
+
+  return (
+    <div className="rounded border border-sky-800/40 bg-gray-900/80 p-3 space-y-3 text-xs">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-sky-300 font-semibold">
+          <SlidersHorizontal size={12} /> Position Controls — {trade.symbol}
+        </div>
+        <button onClick={onClose} className="text-gray-600 hover:text-gray-300"><X size={12} /></button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-[10px] text-gray-400">
+        <div>Entry: <span className="text-gray-200 font-mono">{trade.entry_price?.toFixed(2) ?? '—'}</span></div>
+        <div>Qty: <span className="text-gray-200 font-mono">{trade.quantity?.toFixed(1) ?? '—'}</span></div>
+        <div>Stop: <span className="text-amber-400 font-mono">{trade.current_stop?.toFixed(2) ?? '—'}</span></div>
+        <div>Side: <span className={trade.direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>{trade.direction}</span></div>
+      </div>
+
+      {/* Stop Order ID — required for replace-stop and move-be */}
+      <div>
+        <label className="label">Stop Order ID (Alpaca)</label>
+        <input
+          className="input w-full font-mono text-[10px]"
+          placeholder="alpaca order ID of stop leg"
+          value={stopOrderId}
+          onChange={e => setStopOrderId(e.target.value)}
+        />
+      </div>
+
+      <div className="space-y-2">
+        {/* Scale out */}
+        <div className="rounded border border-gray-800 bg-gray-800/40 p-2 space-y-1.5">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 flex items-center gap-1">
+            <TrendingDown size={10} /> Scale Out
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              className="input text-xs py-0.5 px-1"
+              value={scaleExitPct}
+              onChange={e => setScaleExitPct(e.target.value)}
+            >
+              {[10, 25, 33, 50, 75, 100].map(p => (
+                <option key={p} value={p}>{p}%</option>
+              ))}
+            </select>
+            <button
+              className="btn-primary text-xs py-0.5 px-2"
+              onClick={() => scaleMutation.mutate()}
+              disabled={isPendingAny}
+            >
+              Exit {scaleExitPct}% now
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-500">Closes {scaleExitPct}% of position at market. Resize your stop order after.</p>
+        </div>
+
+        {/* Move stop to breakeven */}
+        <div className="rounded border border-gray-800 bg-gray-800/40 p-2 space-y-1.5">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 flex items-center gap-1">
+            <Crosshair size={10} /> Move Stop to Breakeven
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              className="input w-24 text-xs"
+              placeholder="ATR value"
+              type="number"
+              step="0.01"
+              value={currentAtr}
+              onChange={e => setCurrentAtr(e.target.value)}
+            />
+            <button
+              className="btn-primary text-xs py-0.5 px-2"
+              onClick={() => beStopMutation.mutate()}
+              disabled={isPendingAny || !stopOrderId || !currentAtr}
+            >
+              Move to BE
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-500">Moves stop to entry + (ATR × 10% pad). Requires stop order ID and current ATR.</p>
+        </div>
+
+        {/* Manual stop update */}
+        <div className="rounded border border-gray-800 bg-gray-800/40 p-2 space-y-1.5">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Update Stop Price</div>
+          <div className="flex items-center gap-2">
+            <input
+              className="input w-28 font-mono text-xs"
+              placeholder="new stop $"
+              type="number"
+              step="0.01"
+              value={newStopPrice}
+              onChange={e => setNewStopPrice(e.target.value)}
+            />
+            <button
+              className="btn-primary text-xs py-0.5 px-2"
+              onClick={() => replaceStopMutation.mutate()}
+              disabled={isPendingAny || !stopOrderId || !newStopPrice}
+            >
+              Update Stop
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-500">Modifies existing stop order in-place (no cancel/resubmit). Requires stop order ID.</p>
+        </div>
+      </div>
+
+      {msg && (
+        <p className={clsx('text-[11px] rounded px-2 py-1', msg.ok ? 'text-emerald-400 bg-emerald-950/30' : 'text-red-400 bg-red-950/30')}>
+          {msg.text}
+        </p>
+      )}
+    </div>
+  )
+}
 
 function DeploymentRow({ dep, onStart, onPause, onStop, onViewTrades, strategyName, accountName, isSelected }: {
   dep: Deployment
@@ -111,6 +266,7 @@ export function DeploymentManager() {
   const [promoteResult, setPromoteResult] = useState<{ success: boolean; message: string } | null>(null)
   const [advice, setAdvice] = useState<any | null>(null)
   const [adviceLoading, setAdviceLoading] = useState(false)
+  const [activePositionTradeId, setActivePositionTradeId] = useState<string | null>(null)
 
   const { data: deployments = [] } = useQuery({
     queryKey: ['deployments'],
@@ -293,11 +449,13 @@ export function DeploymentManager() {
                     <th className="text-right px-2 py-1.5">R</th>
                     <th className="text-left px-2 py-1.5">Exit Reason</th>
                     <th className="text-left px-2 py-1.5">Status</th>
+                    <th className="px-2 py-1.5"></th>
                   </tr>
                 </thead>
                 <tbody>
                   {tradesData.trades.map((t: DeploymentTradeRow) => (
-                    <tr key={t.id} className={clsx('border-b border-gray-800/40', t.is_open ? 'bg-sky-950/10' : '')}>
+                    <React.Fragment key={t.id}>
+                    <tr className={clsx('border-b border-gray-800/40', t.is_open ? 'bg-sky-950/10' : '')}>
                       <td className="px-2 py-1.5 font-mono font-bold text-gray-200">{t.symbol}</td>
                       <td className="px-2 py-1.5">
                         <span className={t.direction === 'long' ? 'text-emerald-400' : 'text-red-400'}>{t.direction}</span>
@@ -316,7 +474,34 @@ export function DeploymentManager() {
                           {t.is_open ? 'open' : 'closed'}
                         </span>
                       </td>
+                      <td className="px-2 py-1.5 text-right">
+                        {t.is_open && (
+                          <button
+                            className={clsx('text-[10px] px-1.5 py-0.5 rounded border transition-colors',
+                              activePositionTradeId === t.id
+                                ? 'border-sky-600 text-sky-400 bg-sky-900/20'
+                                : 'border-gray-700 text-gray-500 hover:border-sky-700 hover:text-sky-400'
+                            )}
+                            onClick={() => setActivePositionTradeId(activePositionTradeId === t.id ? null : t.id)}
+                          >
+                            <SlidersHorizontal size={9} className="inline mr-0.5" />
+                            Actions
+                          </button>
+                        )}
+                      </td>
                     </tr>
+                    {activePositionTradeId === t.id && tradesDepId && (
+                      <tr className="border-b border-gray-800/40 bg-gray-900/30">
+                        <td colSpan={13} className="px-2 py-2">
+                          <PositionActionsPanel
+                            deploymentId={tradesDepId}
+                            trade={t}
+                            onClose={() => setActivePositionTradeId(null)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>

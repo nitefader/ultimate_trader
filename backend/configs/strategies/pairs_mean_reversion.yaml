@@ -23,16 +23,18 @@ entry:
   directions:
     - long
     - short
-  logic: "all_of"
+  # any_of: trigger when spread is stretched in either direction
   conditions:
-    - type: single
-      left: {indicator: "spread_zscore"}
-      op: ">"
-      right: 2.0
-    - type: single
-      left: {indicator: "spread_zscore"}
-      op: "<"
-      right: -2.0
+    - type: any_of
+      conditions:
+        - type: single
+          left: {indicator: "spread_zscore"}
+          op: ">"
+          right: 2.0
+        - type: single
+          left: {indicator: "spread_zscore"}
+          op: "<"
+          right: -2.0
 
 stop_loss:
   method: "combined"

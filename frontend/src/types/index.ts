@@ -56,30 +56,36 @@ export interface ExitConfig {
   max_bars?: number
 }
 
+export interface EntryModuleConfig {
+  order_type?: 'market' | 'limit' | 'stop'
+  limit_offset_atr?: number | null
+  limit_offset_pct?: number | null
+  time_in_force?: 'day' | 'gtc' | 'ioc'
+  cancel_after_bars?: number | null
+}
+
 export interface StrategyConfig {
   hypothesis?: string
   name?: string
   symbols?: string[]
+  watchlist_id?: string
+  watchlist_name?: string
   timeframe?: string
   duration_mode?: DurationMode
   entry?: EntryConfig
   stop_loss?: StopConfig
+  short_stop_loss?: StopConfig
   targets?: TargetConfig[]
+  short_targets?: TargetConfig[]
+  exit_conditions?: { logic?: string; conditions?: Condition[] }
+  short_exit_conditions?: { logic?: string; conditions?: Condition[] }
   position_sizing?: SizingConfig
   risk?: RiskConfig
-  regime_filter?: RegimeFilter
-  cooldown_rules?: CooldownRule[]
   scale_in?: ScaleConfig
-  scale_out?: ScaleConfig
   trailing_stop?: TrailingStopConfig
   leverage?: number
   indicators?: IndicatorConfig
-  // Day-mode specifics
-  market_hours?: MarketHoursConfig
-  pdt?: PDTConfig
-  // Position-mode specifics
-  gap_open_exit?: boolean
-  gap_risk?: GapRiskConfig
+  entry_module?: EntryModuleConfig
   exit?: ExitConfig
 }
 
@@ -109,6 +115,7 @@ export interface ValueSpec {
   prev_bar?: string
   n_bars_back?: number
   period?: number
+  timeframe?: string  // override evaluation timeframe for this indicator (e.g. "15m")
 }
 
 export interface StopConfig {
@@ -116,6 +123,7 @@ export interface StopConfig {
   value?: number
   period?: number
   mult?: number
+  timeframe?: string   // ATR timeframe override (e.g. "1h") — blank = use trade TF
   stops?: StopConfig[]
   rule?: string
 }
@@ -126,6 +134,7 @@ export interface TargetConfig {
   value?: number
   period?: number
   mult?: number
+  timeframe?: string   // ATR timeframe override (e.g. "1h") — blank = use trade TF
 }
 
 export interface SizingConfig {
@@ -227,6 +236,7 @@ export interface BacktestRun {
   error_message?: string
   metrics?: RunMetrics
   validation_evidence?: ValidationEvidence
+  feature_plan_preview?: StrategyFeaturePlanPreview
 }
 
 export interface RunMetrics {
@@ -375,12 +385,63 @@ export interface MonteCarloResult {
   probability_profitable?: number
 }
 
+export interface StrategyFeaturePlanPreviewItem {
+  kind: string
+  timeframe: string
+  source: string
+  params: Record<string, unknown>
+  runtime_columns: string[]
+}
+
+export interface StrategyFeaturePlanPreview {
+  symbols: string[]
+  timeframes: string[]
+  feature_keys: string[]
+  warmup_bars_by_timeframe: Record<string, number>
+  features: StrategyFeaturePlanPreviewItem[]
+}
+
+export interface StrategyValidationResult {
+  valid: boolean
+  errors: string[]
+  warnings: string[]
+  feature_plan_preview?: StrategyFeaturePlanPreview
+}
+
 export interface EquityPoint {
   date: string
   equity: number
   cash: number
   drawdown: number
   regime: string
+}
+
+// User Journey validations (docs-driven)
+export interface UserJourney {
+  id: number
+  domain: string
+  title: string
+  pages_components: string
+  api_routes: string
+  required_steps: string
+  edge_cases: string
+  priority: string
+  status: 'covered' | 'partial' | 'not_covered'
+  raw_status: string
+}
+
+export interface CoverageSummaryRow {
+  domain: string
+  total?: number | null
+  covered?: number | null
+  partial?: number | null
+  not_covered?: number | null
+}
+
+export interface UserJourneyValidationsResponse {
+  journeys: UserJourney[]
+  coverage_summary: CoverageSummaryRow[]
+  raw_markdown: string
 }
 
 export interface ScaleEvent {
@@ -491,6 +552,8 @@ export interface Account {
   data_service_id?: string | null
   broker_config?: Record<string, unknown>
   activity?: AccountActivity
+  risk_profile_id?: string | null
+  risk_profile?: Pick<RiskProfile, 'id' | 'name'> | null
   created_at: string
   updated_at?: string
 }
@@ -543,4 +606,124 @@ export interface KillSwitchStatus {
   global_kill_reason?: string
   killed_accounts: string[]
   killed_strategies: string[]
+}
+
+// ── Risk Profiles ─────────────────────────────────────────────────────────────
+
+export interface RiskProfile {
+  id: string
+  name: string
+  description?: string
+  // Directional long
+  max_open_positions_long: number
+  max_portfolio_heat_long: number
+  max_correlated_exposure_long: number
+  max_position_size_pct_long: number
+  // Directional short
+  max_open_positions_short: number
+  max_portfolio_heat_short: number
+  max_correlated_exposure_short: number
+  max_position_size_pct_short: number
+  // Account-wide
+  max_daily_loss_pct: number
+  max_drawdown_lockout_pct: number
+  max_leverage: number
+  // Provenance
+  source_type: 'manual' | 'backtest' | 'optimizer'
+  source_run_id?: string
+  source_optimization_id?: string
+  is_golden?: boolean
+  tags?: string[]
+  linked_accounts: Array<{ id: string; name: string }>
+  created_at: string
+  updated_at: string
+}
+
+// ── Strategy Controls ─────────────────────────────────────────────────────────
+
+export interface StrategyControls {
+  id: string
+  name: string
+  description: string | null
+  timeframe: string
+  duration_mode: DurationMode
+  market_hours: MarketHoursConfig
+  pdt: PDTConfig
+  gap_risk: GapRiskConfig
+  regime_filter: RegimeFilter
+  cooldown_rules: CooldownRule[]
+  max_trades_per_session: number | null
+  max_trades_per_day: number | null
+  min_time_between_entries_min: number | null
+  earnings_blackout_enabled: boolean
+  is_golden: boolean
+  tags: string[]
+  source_type: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+// ── Execution Style ───────────────────────────────────────────────────────────
+
+export interface ExecutionStyle {
+  id: string
+  name: string
+  description: string | null
+  entry_order_type: 'market' | 'limit' | 'stop' | 'stop_limit'
+  entry_time_in_force: 'day' | 'gtc' | 'ioc' | 'opg' | 'cls'
+  entry_limit_offset_method: 'atr' | 'pct' | 'fixed' | null
+  entry_limit_offset_value: number | null
+  entry_cancel_after_bars: number | null
+  bracket_mode: 'none' | 'bracket' | 'oco' | 'trailing_stop'
+  stop_order_type: 'market' | 'limit'
+  take_profit_order_type: 'market' | 'limit'
+  trailing_stop_type: 'percent' | 'dollar' | null
+  trailing_stop_value: number | null
+  scale_out: ScaleLevel[]
+  stop_progression_targets: number[]
+  atr_source: 'strategy' | 'custom'
+  atr_length: number | null
+  atr_timeframe: string | null
+  breakeven_trigger_level: number | null
+  breakeven_atr_offset: number
+  final_runner_exit_mode: 'internal' | 'alpaca_trailing'
+  final_runner_trail_type: 'percent' | 'price' | 'atr' | null
+  final_runner_trail_value: number | null
+  final_runner_time_in_force: 'day' | 'gtc' | null
+  fill_model: string
+  slippage_bps_assumption: number
+  commission_per_share: number
+  is_golden: boolean
+  tags: string[]
+  source_type: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+// ── Portfolio Governor ────────────────────────────────────────────────────────
+
+export interface PortfolioGovernor {
+  id: string
+  account_id: string
+  governor_label?: string
+  governor_status: 'initializing' | 'active' | 'paused' | 'halted'
+  status: string
+  risk_profile_id?: string
+  poll_config: Record<string, number>
+  session_realized_pnl: number
+  daily_loss_lockout_triggered: boolean
+  halt_trigger?: string
+  halt_at?: string
+  last_governor_tick_at?: string
+  created_at: string
+}
+
+export interface GovernorEvent {
+  id: string
+  governor_id: string
+  allocation_id?: string
+  event_type: string
+  symbol?: string
+  detail: Record<string, unknown>
+  emitted_at: string
 }

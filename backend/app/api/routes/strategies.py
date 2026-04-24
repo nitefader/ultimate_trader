@@ -1,20 +1,29 @@
 """Strategy CRUD and version management endpoints."""
 from __future__ import annotations
 
+import json
 import re
 import uuid
+import os
+import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
+from app.features.catalog import is_supported_feature_ref
+from app.features.preview import build_feature_plan_preview
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.run import BacktestRun
 from app.models.deployment import Deployment
+
+EXPORT_FORMAT_VERSION = "1"
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -56,6 +65,12 @@ VALID_INDICATOR_KINDS = {
     "ichimoku_senkou_a", "ichimoku_senkou_b", "ichimoku_chikou",
     # Opening range
     "opening_range_high", "opening_range_low",
+    # Prior session / calendar reference levels
+    "prev_day_high", "prev_day_low", "prev_day_close",
+    "prev_week_high", "prev_week_low", "prev_week_close",
+    "prev_month_high", "prev_month_low", "prev_month_close",
+    # Session / event context
+    "market_day_type", "in_regular_session", "earnings_blackout_active",
     # Gap
     "open_gap_pct",
     # Parabolic SAR
@@ -65,6 +80,8 @@ VALID_INDICATOR_KINDS = {
     "ibs",
     # Z-score — rolling standardised deviation of close
     "zscore",
+    # Spread z-score — pairs trading: z-score of the price spread between two cointegrated assets
+    "spread_zscore",
     # BT_Snipe — z-score of (close - EMA), momentum exhaustion signal
     "bt_snipe",
     # TheStrat bar classification
@@ -85,16 +102,79 @@ class StrategyCreateRequest(BaseModel):
     notes: str | None = "Initial version"
     duration_mode: str = "swing"
 
+    @model_validator(mode="after")
+    def validate_no_forbidden_fields(self) -> "StrategyCreateRequest":
+        violations = _config_contains_forbidden(self.config)
+        if violations:
+            if os.getenv("ULTRATRADER_ENFORCE_STRATEGY_COMPONENT_SEPARATION", "0") == "1":
+                raise ValueError(f"Strategy config contains fields belonging to other components: {sorted(violations)}")
+            logging.getLogger(__name__).warning(
+                "Strategy config contains fields that belong to other components: %s",
+                sorted(violations),
+            )
+        return self
+
+
+# Forbidden keys that must NOT appear inside a Strategy config (must belong to other components)
+FORBIDDEN_STRATEGY_KEYS = {
+    # Risk profile / sizing
+    "risk_pct", "position_size", "max_position_size_usd", "max_shares",
+    "daily_loss_limit", "daily_loss_limit_usd", "max_drawdown_pct", "max_concurrent_positions",
+    # Strategy Controls / timing
+    "session_start", "session_end", "timeframe", "regime_filter", "vix_threshold",
+    "cooldown_bars", "cooldown_minutes", "pdt_protection", "gap_risk_enabled",
+    # Execution / order mechanics
+    "execution_policy", "order_type", "limit_pullback", "scale_out_pct",
+    "fill_retry_count", "bracket_enabled", "trailing_stop_pct",
+}
+
+
+def _config_contains_forbidden(cfg: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(cfg, dict):
+        for k, v in cfg.items():
+            if k in FORBIDDEN_STRATEGY_KEYS:
+                found.add(k)
+            found |= _config_contains_forbidden(v)
+    elif isinstance(cfg, list):
+        for item in cfg:
+            found |= _config_contains_forbidden(item)
+    return found
+
 
 class StrategyVersionCreateRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
     duration_mode: str | None = None  # if None, inherits from previous version
 
+    @model_validator(mode="after")
+    def validate_no_forbidden_fields(self) -> "StrategyVersionCreateRequest":
+        violations = _config_contains_forbidden(self.config)
+        if violations:
+            if os.getenv("ULTRATRADER_ENFORCE_STRATEGY_COMPONENT_SEPARATION", "0") == "1":
+                raise ValueError(f"Strategy version config contains forbidden fields: {sorted(violations)}")
+            logging.getLogger(__name__).warning(
+                "Strategy version config contains fields that belong to other components: %s",
+                sorted(violations),
+            )
+        return self
+
 
 class StrategyValidateRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     duration_mode: str | None = None
+
+    @model_validator(mode="after")
+    def validate_no_forbidden_fields(self) -> "StrategyValidateRequest":
+        violations = _config_contains_forbidden(self.config)
+        if violations:
+            if os.getenv("ULTRATRADER_ENFORCE_STRATEGY_COMPONENT_SEPARATION", "0") == "1":
+                raise ValueError(f"Strategy validate payload contains forbidden fields: {sorted(violations)}")
+            logging.getLogger(__name__).warning(
+                "Strategy validate payload contains fields that belong to other components: %s",
+                sorted(violations),
+            )
+        return self
 
 
 def _spec_signature(spec: Any) -> tuple | None:
@@ -125,10 +205,34 @@ def _validate_condition_quality(conditions: list[Any], path: str) -> tuple[list[
     errors: list[str] = []
     warnings: list[str] = []
 
-    lower_bounds: dict[tuple, list[tuple[float, bool, str]]] = {}
-    upper_bounds: dict[tuple, list[tuple[float, bool, str]]] = {}
+    def _check_bounds(lower_bounds: dict, upper_bounds: dict, ctx_path: str) -> None:
+        """Check accumulated bounds for contradictions within a single AND scope."""
+        for left_sig, lowers in lower_bounds.items():
+            uppers = upper_bounds.get(left_sig, [])
+            if not uppers:
+                continue
+            max_lower = max(v for v, _, _ in lowers)
+            min_upper = min(v for v, _, _ in uppers)
+            if max_lower > min_upper:
+                errors.append(
+                    f"{ctx_path} contains contradictory bounds on {_spec_signature_to_text(left_sig)}: lower bound {max_lower} exceeds upper bound {min_upper}"
+                )
+            elif max_lower == min_upper:
+                strict_lower = any(v == max_lower and not inclusive for v, inclusive, _ in lowers)
+                strict_upper = any(v == min_upper and not inclusive for v, inclusive, _ in uppers)
+                if strict_lower or strict_upper:
+                    errors.append(
+                        f"{ctx_path} contains impossible bounds on {_spec_signature_to_text(left_sig)} at exactly {max_lower}"
+                    )
 
-    def _walk(cond: Any, cond_path: str) -> None:
+    def _walk(cond: Any, cond_path: str,
+              lower_bounds: dict, upper_bounds: dict) -> None:
+        """
+        Walk a condition tree.
+        lower_bounds/upper_bounds accumulate within AND scopes (all_of / top-level list).
+        any_of branches are validated independently — bounds across OR branches must NOT
+        be compared against each other.
+        """
         if not isinstance(cond, dict):
             errors.append(f"{cond_path} must be an object")
             return
@@ -156,20 +260,40 @@ def _validate_condition_quality(conditions: list[Any], path: str) -> tuple[list[
                     upper_bounds.setdefault(left_sig, []).append((value, op == "<=", cond_path))
             return
 
-        if ctype in {"all_of", "any_of", "n_of_m"}:
+        if ctype == "all_of":
+            # AND scope: accumulate bounds into the parent scope so cross-condition
+            # contradictions are caught.
             sub_conditions = cond.get("conditions", [])
             if not isinstance(sub_conditions, list) or not sub_conditions:
                 errors.append(f"{cond_path}.conditions must be a non-empty list")
                 return
             for i, sub in enumerate(sub_conditions):
-                _walk(sub, f"{cond_path}.conditions[{i}]")
+                _walk(sub, f"{cond_path}.conditions[{i}]", lower_bounds, upper_bounds)
+            return
+
+        if ctype in {"any_of", "n_of_m"}:
+            # OR scope: each branch is independent — validate each branch on its own
+            # but do NOT aggregate bounds across branches.
+            sub_conditions = cond.get("conditions", [])
+            if not isinstance(sub_conditions, list) or not sub_conditions:
+                errors.append(f"{cond_path}.conditions must be a non-empty list")
+                return
+            for i, sub in enumerate(sub_conditions):
+                branch_lower: dict = {}
+                branch_upper: dict = {}
+                _walk(sub, f"{cond_path}.conditions[{i}]", branch_lower, branch_upper)
+                _check_bounds(branch_lower, branch_upper, f"{cond_path}.conditions[{i}]")
             return
 
         if ctype == "not":
             if "condition" not in cond:
                 errors.append(f"{cond_path}.condition is required for not groups")
                 return
-            _walk(cond.get("condition"), f"{cond_path}.condition")
+            # Negation: validate the inner condition independently (bounds inside NOT
+            # are inverted logically; treat as isolated scope to avoid false positives).
+            inner_lower: dict = {}
+            inner_upper: dict = {}
+            _walk(cond.get("condition"), f"{cond_path}.condition", inner_lower, inner_upper)
             return
 
         if ctype == "regime_filter":
@@ -178,26 +302,12 @@ def _validate_condition_quality(conditions: list[Any], path: str) -> tuple[list[
                 warnings.append(f"{cond_path} has an empty regime filter")
             return
 
+    # Top-level conditions are implicitly AND-ed (all must fire together).
+    top_lower: dict = {}
+    top_upper: dict = {}
     for i, cond in enumerate(conditions):
-        _walk(cond, f"{path}[{i}]")
-
-    for left_sig, lowers in lower_bounds.items():
-        uppers = upper_bounds.get(left_sig, [])
-        if not uppers:
-            continue
-        max_lower = max(v for v, _, _ in lowers)
-        min_upper = min(v for v, _, _ in uppers)
-        if max_lower > min_upper:
-            errors.append(
-                f"{path} contains contradictory bounds on {_spec_signature_to_text(left_sig)}: lower bound {max_lower} exceeds upper bound {min_upper}"
-            )
-        elif max_lower == min_upper:
-            strict_lower = any(v == max_lower and not inclusive for v, inclusive, _ in lowers)
-            strict_upper = any(v == min_upper and not inclusive for v, inclusive, _ in uppers)
-            if strict_lower or strict_upper:
-                errors.append(
-                    f"{path} contains impossible bounds on {_spec_signature_to_text(left_sig)} at exactly {max_lower}"
-                )
+        _walk(cond, f"{path}[{i}]", top_lower, top_upper)
+    _check_bounds(top_lower, top_upper, path)
 
     return errors, warnings
 
@@ -258,10 +368,7 @@ def _validate_indicator_kinds(config: dict[str, Any]) -> list[str]:
         kind = spec.get("indicator") or spec.get("kind")
         if not kind:
             return
-        # Accept parameterised variants: ema_9, rsi_14, sma_50, zscore_20, etc.
-        # Strip a trailing _<digits> suffix and check the base kind.
-        base_kind = re.sub(r'_\d+$', '', kind)
-        if base_kind not in VALID_INDICATOR_KINDS and kind not in VALID_INDICATOR_KINDS:
+        if not is_supported_feature_ref(str(kind), VALID_INDICATOR_KINDS):
             warnings.append(
                 f"Unknown indicator kind '{kind}' at {path}. "
                 f"Supported: {', '.join(sorted(VALID_INDICATOR_KINDS))}"
@@ -322,10 +429,6 @@ def _validate_strategy_config(config: dict[str, Any], duration_mode: str | None 
     stop_loss = config.get("stop_loss")
     if not stop_loss:
         warnings.append("No stop_loss configured — trades may have unbounded risk")
-
-    position_sizing = config.get("position_sizing")
-    if not position_sizing:
-        warnings.append("No position_sizing configured — using defaults")
 
     timeframe = config.get("timeframe")
     if isinstance(timeframe, str) and timeframe not in SUPPORTED_BACKTEST_TIMEFRAMES:
@@ -736,6 +839,7 @@ async def validate_strategy(body: StrategyValidateRequest):
         "valid": len(errors) == 0,
         "errors": errors,
         "warnings": warnings,
+        "feature_plan_preview": build_feature_plan_preview(body.config, duration_mode=body.duration_mode),
     }
 
 
@@ -778,3 +882,413 @@ async def clone_strategy(strategy_id: str, db: AsyncSession = Depends(get_db)):
     db.add(version)
     await db.flush()
     return {"id": clone.id, "version_id": version.id, "source_strategy_id": strategy_id, "status": "cloned"}
+
+
+# ── Export / Import ───────────────────────────────────────────────────────────
+
+@router.get("/{strategy_id}/export")
+async def export_strategy(strategy_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Export a strategy and all its versions as a portable JSON document.
+
+    The export format is versioned (export_format_version) so future imports
+    can apply migrations if the config schema changes.
+    """
+    result = await db.execute(
+        select(Strategy)
+        .options(selectinload(Strategy.versions))
+        .where(Strategy.id == strategy_id)
+    )
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    payload = {
+        "export_format_version": EXPORT_FORMAT_VERSION,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "strategy": {
+            "name": s.name,
+            "description": s.description,
+            "category": s.category,
+            "tags": list(s.tags or []),
+            "status": s.status,
+        },
+        "versions": [
+            {
+                "version": v.version,
+                "duration_mode": v.duration_mode,
+                "config": v.config,
+                "notes": v.notes or "",
+                "promotion_status": v.promotion_status,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+            }
+            for v in sorted(s.versions, key=lambda x: x.version)
+        ],
+    }
+
+    # Return as downloadable JSON file
+    return JSONResponse(
+        content=payload,
+        headers={"Content-Disposition": f'attachment; filename="strategy_{s.name.replace(" ", "_")}.json"'},
+    )
+
+
+class StrategyImportRequest(BaseModel):
+    payload: dict[str, Any]
+    name_override: str | None = None
+
+
+@router.post("/import", status_code=status.HTTP_201_CREATED)
+async def import_strategy(body: StrategyImportRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Import a strategy from an export payload.
+
+    Creates a new Strategy + all versions. Original IDs are NOT preserved — new
+    IDs are generated to avoid conflicts. The imported strategy starts with status
+    'draft' regardless of the source status.
+    """
+    payload = body.payload
+    fmt_ver = payload.get("export_format_version")
+    if fmt_ver != EXPORT_FORMAT_VERSION:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported export format version '{fmt_ver}'. Expected '{EXPORT_FORMAT_VERSION}'.",
+        )
+
+    src = payload.get("strategy")
+    versions_data = payload.get("versions", [])
+
+    if not src or not isinstance(src, dict):
+        raise HTTPException(status_code=422, detail="Invalid export payload: missing 'strategy' key")
+    if not versions_data:
+        raise HTTPException(status_code=422, detail="Invalid export payload: no versions found")
+
+    name = body.name_override or src.get("name", "Imported Strategy")
+
+    # Validate all version configs before writing anything
+    for vd in versions_data:
+        config = vd.get("config", {})
+        duration_mode = vd.get("duration_mode", "swing")
+        errors, _ = _validate_strategy_config(config, duration_mode)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Version {vd.get('version', '?')} config invalid: {'; '.join(errors)}",
+            )
+
+    strategy = Strategy(
+        id=str(uuid.uuid4()),
+        name=name,
+        description=src.get("description", ""),
+        category=src.get("category", "custom"),
+        tags=list(src.get("tags", [])),
+        status="draft",
+    )
+    db.add(strategy)
+
+    new_version_ids = []
+    for vd in versions_data:
+        v = StrategyVersion(
+            id=str(uuid.uuid4()),
+            strategy_id=strategy.id,
+            version=int(vd.get("version", 1)),
+            config=vd.get("config", {}),
+            notes=vd.get("notes", ""),
+            duration_mode=vd.get("duration_mode", "swing"),
+            promotion_status="dev",
+        )
+        db.add(v)
+        new_version_ids.append(v.id)
+
+    await db.flush()
+    return {
+        "strategy_id": strategy.id,
+        "strategy_name": strategy.name,
+        "versions_imported": len(new_version_ids),
+        "version_ids": new_version_ids,
+        "status": "imported",
+    }
+
+
+def _flatten_config(obj: Any, prefix: str = "") -> dict[str, Any]:
+    """Recursively flatten nested dict/list into dot-path keys."""
+    out: dict[str, Any] = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            full_key = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, (dict, list)):
+                out.update(_flatten_config(v, full_key))
+            else:
+                out[full_key] = v
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            full_key = f"{prefix}[{i}]"
+            if isinstance(v, (dict, list)):
+                out.update(_flatten_config(v, full_key))
+            else:
+                out[full_key] = v
+    else:
+        out[prefix] = obj
+    return out
+
+
+_CONDITION_SYSTEM_PROMPT = """\
+You are a trading strategy assistant. Your job is to convert a plain-English signal description
+into a structured condition tree that conforms exactly to the schema below.
+
+## ValueSpec schema
+A ValueSpec is one of:
+  { "field": "<field>" }          — a price field: close, open, high, low, volume
+  { "indicator": "<indicator>" }  — a technical indicator (see list below)
+  { "prev_bar": "<indicator_or_field>" }  — previous bar's value of that indicator/field
+  { "n_bars_back": <int>, "indicator": "<indicator>" }  — N bars back
+  <number>                        — a literal numeric value
+
+## Condition schema
+  { "type": "single", "left": <ValueSpec>, "op": "<op>", "right": <ValueSpec> }
+  { "type": "all_of", "conditions": [<Condition>, ...] }
+  { "type": "any_of", "conditions": [<Condition>, ...] }
+  { "type": "not", "condition": <Condition> }
+
+## Valid operators
+>, >=, <, <=, ==, !=, crosses_above, crosses_below, between, in
+
+## Available indicators
+rsi_14, rsi_7, rsi_3, rsi_8, rsi_2,
+ema_9, ema_21, ema_55, ema_200, sma_20, sma_50, sma_200,
+hull_ma, hull_ma_20, hull_ma_50,
+vwap, atr_14, adx, plus_di, minus_di,
+macd, macd_signal, macd_hist,
+bb_upper, bb_lower, bb_mid,
+stoch_k, stoch_d,
+dc_upper, dc_lower, dc_mid, donchian_high, donchian_low,
+sar, sar_trend, ibs,
+zscore, zscore_10, zscore_20, bt_snipe, strat_num,
+opening_range_high, opening_range_low,
+prev_day_high, prev_day_low, prev_day_close,
+prev_week_high, prev_week_low, prev_week_close,
+prev_month_high, prev_month_low, prev_month_close,
+market_day_type, in_regular_session, earnings_blackout_active,
+open_gap_pct, pp, r1, r2, r3, s1, s2, s3
+
+## Valid logic values
+all_of, any_of, n_of_m:2, n_of_m:3, n_of_m:4, n_of_m:5
+
+## Output format (JSON only, no prose)
+{
+  "conditions": [ <Condition>, ... ],
+  "logic": "<logic_value>"
+}
+
+Rules:
+- Use "all_of" logic unless the description clearly implies OR logic.
+- Keep conditions flat when possible; nest only if the description requires grouped logic.
+- Use crosses_above / crosses_below for crossover signals.
+- Never invent indicators not in the list above.
+- Return valid JSON only.
+"""
+
+
+class GenerateConditionsRequest(BaseModel):
+    prompt: str = Field(..., min_length=3, max_length=1000)
+    condition_type: str = Field(default="entry", pattern=r"^(entry|exit|stop)$")
+
+
+_BRIEF_SYSTEM_PROMPT = """\
+You are a trading strategy assistant. Given a plain-English strategy idea, return ONLY valid JSON.
+
+## Output schema (all fields required)
+{
+  "name": "<short title-case name, 3–6 words>",
+  "hypothesis": "<one sentence stating the edge and why it should persist>",
+  "description": "<2–3 sentences: entry trigger, intended exit approach, applicable market conditions>",
+  "conditions": [ <FLAT list of type:single objects for LONG entries — see below> ],
+  "logic": "all_of" | "any_of",
+  "short_conditions": [ <FLAT list of type:single objects for SHORT entries, or [] if long-only> ],
+  "short_logic": "all_of" | "any_of",
+  "assumptions": [ "<string>", ... ],
+  "warnings": [ "<string>", ... ],
+  "partial_success": false
+}
+
+## CRITICAL: conditions must be a FLAT array of type:single objects only
+Each item in "conditions" must look exactly like this:
+  { "type": "single", "left": <ValueSpec>, "op": "<op>", "right": <ValueSpec> }
+
+DO NOT wrap conditions in an all_of or any_of group object.
+DO NOT nest conditions inside another conditions array.
+The top-level "conditions" array is already the list. Put each rule directly in it.
+
+WRONG (do not do this):
+  "conditions": [{ "type": "all_of", "conditions": [...] }]
+
+RIGHT:
+  "conditions": [
+    { "type": "single", "left": {"indicator": "rsi_14"}, "op": "<", "right": 30 },
+    { "type": "single", "left": {"field": "close"}, "op": ">", "right": {"indicator": "ema_21"} }
+  ]
+
+## ValueSpec — pick one form
+  { "field": "close" | "open" | "high" | "low" | "volume" }
+  { "indicator": "<indicator_name>" }
+  <number literal>
+
+## Valid operators
+>, >=, <, <=, ==, !=, crosses_above, crosses_below
+
+## Available indicators
+rsi_14, rsi_7, rsi_3, rsi_2, ema_9, ema_21, ema_55, ema_200, sma_20, sma_50, sma_200,
+vwap, atr_14, adx, plus_di, minus_di, macd, macd_signal, macd_hist,
+bb_upper, bb_lower, bb_mid, stoch_k, stoch_d, sar, sar_trend, ibs,
+zscore, zscore_20, bt_snipe, opening_range_high, opening_range_low,
+prev_day_high, prev_day_low, prev_day_close,
+prev_week_high, prev_week_low, prev_week_close,
+prev_month_high, prev_month_low, prev_month_close,
+market_day_type, in_regular_session, earnings_blackout_active,
+open_gap_pct, dc_upper, dc_lower
+
+## Rules
+- Generate ENTRY conditions only. Do not generate stops, targets, position sizing, watchlists, or execution logic.
+- Use only indicators from the list above. Never invent new ones.
+- Each condition must be type:single with valid left, op, and right fields.
+- If the prompt describes both long and short entries, populate both "conditions" and "short_conditions".
+- If the prompt is long-only, set short_conditions to [].
+- If the idea is ambiguous, simplify and record your assumption in the assumptions array.
+- If you cannot produce valid conditions, return conditions: [] and set partial_success: true.
+- Return valid JSON only. No prose outside the JSON object.
+"""
+
+
+def _flatten_to_singles(conditions: list[Any]) -> list[Any]:
+    """Recursively extract all type:single conditions from any nested group structure."""
+    singles: list[Any] = []
+    for cond in conditions:
+        if not isinstance(cond, dict):
+            continue
+        ctype = cond.get("type", "single")
+        if ctype == "single":
+            if cond.get("left") is not None and cond.get("op") and cond.get("right") is not None:
+                singles.append(cond)
+        elif ctype in ("all_of", "any_of", "n_of_m"):
+            singles.extend(_flatten_to_singles(cond.get("conditions") or []))
+    return singles
+
+
+class GenerateBriefRequest(BaseModel):
+    prompt: str = Field(..., min_length=3, max_length=1000)
+
+
+@router.post("/generate-brief")
+async def generate_brief(body: GenerateBriefRequest):
+    """Generate a full strategy brief (name, hypothesis, description, conditions) from a plain-English prompt."""
+    from app.services.ai_service import generate_json
+
+    user_prompt = f"Generate a strategy brief for this idea:\n\n{body.prompt}"
+    result = await generate_json(_BRIEF_SYSTEM_PROMPT, user_prompt)
+
+    VALID_LOGIC = {"all_of", "any_of"}
+    warnings: list[str] = list(result.get("warnings") or [])
+    assumptions: list[str] = list(result.get("assumptions") or [])
+    partial_success: bool = bool(result.get("partial_success", False))
+
+    conditions = result.get("conditions")
+    if not isinstance(conditions, list):
+        conditions = []
+        warnings.append("AI did not return a valid conditions list — entry conditions left empty.")
+        partial_success = True
+    else:
+        conditions = _flatten_to_singles(conditions)
+        if not conditions:
+            warnings.append("AI returned no usable single conditions after flattening — entry conditions left empty.")
+            partial_success = True
+
+    short_conditions = result.get("short_conditions")
+    if not isinstance(short_conditions, list):
+        short_conditions = []
+    else:
+        short_conditions = _flatten_to_singles(short_conditions)
+
+    logic = result.get("logic", "all_of")
+    if logic not in VALID_LOGIC:
+        logic = "all_of"
+
+    short_logic = result.get("short_logic", "all_of")
+    if short_logic not in VALID_LOGIC:
+        short_logic = "all_of"
+
+    return {
+        "name": str(result.get("name") or ""),
+        "hypothesis": str(result.get("hypothesis") or ""),
+        "description": str(result.get("description") or ""),
+        "conditions": conditions,
+        "logic": logic,
+        "short_conditions": short_conditions,
+        "short_logic": short_logic,
+        "assumptions": assumptions,
+        "warnings": warnings,
+        "partial_success": partial_success,
+    }
+
+
+@router.post("/generate-conditions")
+async def generate_conditions(body: GenerateConditionsRequest):
+    """Use the default AI service to generate a condition tree from a plain-English description."""
+    from app.services.ai_service import generate_json
+
+    user_prompt = (
+        f"Generate {body.condition_type} conditions for this trading signal:\n\n{body.prompt}"
+    )
+    result = await generate_json(_CONDITION_SYSTEM_PROMPT, user_prompt)
+
+    conditions = result.get("conditions")
+    logic = result.get("logic", "all_of")
+
+    if not isinstance(conditions, list):
+        raise HTTPException(status_code=502, detail="AI returned unexpected structure — missing 'conditions' list")
+
+    return {"conditions": conditions, "logic": logic}
+
+
+@router.get("/{strategy_id}/versions/{v1_id}/diff/{v2_id}")
+async def diff_versions(
+    strategy_id: str, v1_id: str, v2_id: str, db: AsyncSession = Depends(get_db)
+):
+    """
+    Compare two strategy versions config field by field.
+    Returns three lists: added (only in v2), removed (only in v1), changed (in both but different).
+    Each item: { path, v1_value, v2_value }.
+    """
+    v1 = await db.get(StrategyVersion, v1_id)
+    v2 = await db.get(StrategyVersion, v2_id)
+    if not v1 or v1.strategy_id != strategy_id:
+        raise HTTPException(status_code=404, detail="Version v1 not found")
+    if not v2 or v2.strategy_id != strategy_id:
+        raise HTTPException(status_code=404, detail="Version v2 not found")
+
+    flat1 = _flatten_config(v1.config or {})
+    flat2 = _flatten_config(v2.config or {})
+
+    all_keys = set(flat1) | set(flat2)
+    added: list[dict] = []
+    removed: list[dict] = []
+    changed: list[dict] = []
+
+    for path in sorted(all_keys):
+        in1 = path in flat1
+        in2 = path in flat2
+        if in1 and not in2:
+            removed.append({"path": path, "v1_value": flat1[path], "v2_value": None})
+        elif in2 and not in1:
+            added.append({"path": path, "v1_value": None, "v2_value": flat2[path]})
+        elif flat1[path] != flat2[path]:
+            changed.append({"path": path, "v1_value": flat1[path], "v2_value": flat2[path]})
+
+    return {
+        "strategy_id": strategy_id,
+        "v1": {"id": v1_id, "version": v1.version, "notes": v1.notes, "created_at": v1.created_at.isoformat() if v1.created_at else None},
+        "v2": {"id": v2_id, "version": v2.version, "notes": v2.notes, "created_at": v2.created_at.isoformat() if v2.created_at else None},
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "total_changes": len(added) + len(removed) + len(changed),
+    }

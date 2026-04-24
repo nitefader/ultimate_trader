@@ -80,3 +80,33 @@ async def test_delete_running_run_rejected(client, db):
 
     resp = await client.delete(f"/api/v1/backtests/{run.id}")
     assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_get_run_exposes_feature_plan_preview(client, db):
+    run = await _seed_run(db, status="completed")
+    run.parameters = {
+        "lookback": 20,
+        "feature_plan_preview": {
+            "symbols": ["SPY"],
+            "timeframes": ["5m"],
+            "feature_keys": ["5m:ema:close:length=20"],
+            "warmup_bars_by_timeframe": {"5m": 60},
+            "features": [
+                {
+                    "kind": "ema",
+                    "timeframe": "5m",
+                    "source": "close",
+                    "params": {"length": 20},
+                    "runtime_columns": ["ema_20"],
+                },
+            ],
+        },
+    }
+    await db.commit()
+
+    resp = await client.get(f"/api/v1/backtests/{run.id}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["feature_plan_preview"]["feature_keys"] == ["5m:ema:close:length=20"]
+    assert body["feature_plan_preview"]["warmup_bars_by_timeframe"] == {"5m": 60}

@@ -245,6 +245,165 @@ async def get_deployment_trades(
     }
 
 
+def _get_alpaca_config(dep: Deployment):
+    """Build AlpacaClientConfig from a deployment's account credentials."""
+    from app.services.alpaca_service import build_client_config, AlpacaConfigError
+    config = dep.account.broker_config or {}
+    mode = str(dep.account.mode).strip().lower()
+    mode_config = config.get(mode, {})
+    api_key = mode_config.get("api_key", "")
+    secret_key = mode_config.get("secret_key", "")
+    if not api_key or not secret_key:
+        raise HTTPException(status_code=422, detail="No Alpaca credentials configured for this account")
+    try:
+        return build_client_config(
+            api_key=api_key,
+            secret_key=secret_key,
+            mode=mode,
+            base_url=mode_config.get("base_url"),
+        )
+    except AlpacaConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{deployment_id}/positions/{symbol}/scale-out")
+async def manual_scale_out(
+    deployment_id: str,
+    symbol: str,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually exit a percentage of a live position.
+
+    Body: { "exit_pct": 50.0 }  — percentage of current position to close.
+    Calls Alpaca close_position for partial qty.
+    """
+    result = await db.execute(
+        select(Deployment).options(selectinload(Deployment.account)).where(Deployment.id == deployment_id)
+    )
+    dep = result.scalar_one_or_none()
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    exit_pct = float(body.get("exit_pct") or 0)
+    if exit_pct <= 0 or exit_pct > 100:
+        raise HTTPException(status_code=422, detail="exit_pct must be between 1 and 100")
+
+    from app.services.alpaca_service import get_positions, AlpacaClosePositionRequest
+    import asyncio
+
+    client_config = _get_alpaca_config(dep)
+
+    positions = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: get_positions(client_config)
+    )
+    pos = next((p for p in positions if p["symbol"].upper() == symbol.upper()), None)
+    if not pos:
+        raise HTTPException(status_code=404, detail=f"No open position for {symbol}")
+
+    qty = float(pos.get("qty") or 0)
+    exit_qty = round(qty * (exit_pct / 100.0), 6)
+    if exit_qty <= 0:
+        raise HTTPException(status_code=422, detail="Computed exit qty is zero")
+
+    from app.services.alpaca_service import close_position
+    close_result = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: close_position(client_config, AlpacaClosePositionRequest(symbol=symbol.upper(), qty=exit_qty))
+    )
+    if close_result.get("error"):
+        raise HTTPException(status_code=502, detail=close_result["error"])
+    return {"symbol": symbol.upper(), "exit_pct": exit_pct, "exit_qty": exit_qty, "order": close_result}
+
+
+@router.post("/{deployment_id}/positions/{symbol}/replace-stop")
+async def manual_replace_stop(
+    deployment_id: str,
+    symbol: str,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually set a new stop price on an existing stop order.
+
+    Body: { "order_id": "<alpaca_order_id>", "stop_price": 145.50, "qty": 100 }
+    """
+    result = await db.execute(
+        select(Deployment).options(selectinload(Deployment.account)).where(Deployment.id == deployment_id)
+    )
+    dep = result.scalar_one_or_none()
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    order_id = body.get("order_id")
+    stop_price = body.get("stop_price")
+    qty = body.get("qty")
+    if not order_id:
+        raise HTTPException(status_code=422, detail="order_id is required")
+    if stop_price is None:
+        raise HTTPException(status_code=422, detail="stop_price is required")
+
+    import asyncio
+    from app.services.alpaca_service import replace_order as _replace_order
+
+    client_config = _get_alpaca_config(dep)
+    replace_result = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: _replace_order(client_config, order_id, stop_price=float(stop_price), qty=float(qty) if qty else None)
+    )
+    if replace_result.get("error"):
+        raise HTTPException(status_code=502, detail=replace_result["error"])
+    return replace_result
+
+
+@router.post("/{deployment_id}/positions/{symbol}/move-stop-be")
+async def manual_move_stop_breakeven(
+    deployment_id: str,
+    symbol: str,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+):
+    """Move a stop order to breakeven (entry_price + ATR pad).
+
+    Body: {
+        "order_id": "<alpaca_order_id>",
+        "entry_price": 150.0,
+        "qty": 100,
+        "current_atr": 2.50,
+        "breakeven_atr_pad": 0.10  -- optional, defaults to 0.10
+    }
+    """
+    result = await db.execute(
+        select(Deployment).options(selectinload(Deployment.account)).where(Deployment.id == deployment_id)
+    )
+    dep = result.scalar_one_or_none()
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+
+    order_id = body.get("order_id")
+    entry_price = body.get("entry_price")
+    qty = body.get("qty")
+    current_atr = body.get("current_atr")
+    be_pad = float(body.get("breakeven_atr_pad") or 0.10)
+
+    if not order_id:
+        raise HTTPException(status_code=422, detail="order_id is required")
+    if entry_price is None:
+        raise HTTPException(status_code=422, detail="entry_price is required")
+    if current_atr is None:
+        raise HTTPException(status_code=422, detail="current_atr is required")
+
+    be_stop = round(float(entry_price) + (float(current_atr) * be_pad), 4)
+
+    import asyncio
+    from app.services.alpaca_service import replace_order as _replace_order
+
+    client_config = _get_alpaca_config(dep)
+    replace_result = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: _replace_order(client_config, order_id, stop_price=be_stop, qty=float(qty) if qty else None)
+    )
+    if replace_result.get("error"):
+        raise HTTPException(status_code=502, detail=replace_result["error"])
+    return {**replace_result, "breakeven_stop": be_stop, "entry_price": entry_price}
+
+
 def _fmt_trade(t: DeploymentTrade) -> dict:
     qty = float(t.quantity or 0)
     entry_price = float(t.entry_price or 0)

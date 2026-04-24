@@ -66,14 +66,12 @@ class RiskEngine:
         if portfolio.num_open_positions >= self.config.max_open_positions:
             return False, f"Max open positions reached ({self.config.max_open_positions})"
 
-        # Max position size — checked against buying power (equity × leverage) so the
-        # limit remains meaningful when leverage > 1.  A 25% limit on 4× leverage means
-        # one position can consume up to 25% of your $400k buying power ($100k on $100k
-        # equity), which is already sensible before the leverage cap below fires.
-        buying_power = equity * self.config.max_leverage
-        if position_value / buying_power > self.config.max_position_size_pct:
+        # Max position size — checked as a fraction of account equity.
+        # max_position_size_pct = 0.10 means no single position may exceed 10% of equity.
+        position_value = abs(quantity * price)
+        if position_value / equity > self.config.max_position_size_pct:
             return False, (
-                f"Position size {position_value/buying_power:.1%} of buying power "
+                f"Position size {position_value/equity:.1%} of equity "
                 f"exceeds max {self.config.max_position_size_pct:.1%}"
             )
 

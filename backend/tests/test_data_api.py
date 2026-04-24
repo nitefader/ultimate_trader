@@ -32,11 +32,16 @@ async def test_fetch_data_uses_market_data_service(client, monkeypatch):
     assert called["provider"] == "yfinance"
 
 
+
+
 @pytest.mark.asyncio
 async def test_inventory_uses_market_data_service(client, monkeypatch):
+    async def _fake_inventory(db):
+        return [{"symbol": "SPY", "timeframe": "1d", "provider": "yfinance"}]
+
     monkeypatch.setattr(
         "app.api.routes.data.list_inventory_entries",
-        lambda: [{"symbol": "SPY", "timeframe": "1d", "provider": "yfinance"}],
+        _fake_inventory,
     )
 
     resp = await client.get("/api/v1/data/inventory")
@@ -56,6 +61,8 @@ async def test_search_uses_market_data_service(client, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["results"][0]["symbol"] == "AAPL"
+
+
 
 
 @pytest.mark.asyncio
